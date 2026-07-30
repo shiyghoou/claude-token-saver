@@ -56,9 +56,21 @@ assert_file_missing() {
 # grep -c は「一致した行数」しか返さないため、同じ行に2回出ても 1 になる。
 # 冪等性の検証では追記が1行に潰れた場合こそ見逃したくないので、
 # grep -o で出現ごとに1行へ展開してから数える。
+#
+# -F は必須である。呼び出し側の needle は ".claude/.handoff/" のように
+# ドットを含むため、正規表現として解釈されると「1件も無いのに1件ある」と
+# 誤判定し、冪等性の検証が黙って緩む。-- は先頭ハイフンの needle のため。
+#
+# 制約: 改行を含む needle は grep が行単位で走るため常に 0 と数える。
+# 複数行の一致を数えたい場合は、このアサーションを使ってはならない。
 assert_count() {
   local expected="$1" haystack="$2" needle="$3" label="${4:-出現回数}"
   local actual
+  # 空 needle の出現回数は定義できない。変数が空だった事故を 0 件や 1 件に
+  # 化けさせず、その場で落とす。
+  if [ -z "$needle" ]; then
+    _fail "${label}の needle が空である（呼び出し側の変数が空の可能性）"
+  fi
   actual=$(printf '%s\n' "$haystack" | grep -o -F -- "$needle" | wc -l | tr -d ' ')
   if [ "$expected" != "$actual" ]; then
     _fail "${label}が一致しない: expected=${expected} actual=${actual} needle=[${needle}]"
