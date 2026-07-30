@@ -74,10 +74,29 @@ test_同名ファイルが_consumed_にあっても既存を上書きしない()
   assert_contains "$(cat "$PROJ"/.claude/.handoff/consumed/a.md.*)" "新しい内容" "退避先の内容"
 }
 
-test_存在しないパスを指定しても終了コード0() {
+# 無音で成功扱いにすると、タイプミスが「消費できたつもり」に化ける。
+test_存在しないパスを指定したら失敗して理由を示す() {
   _setup_project
   _run_consume "$PROJ/.claude/.handoff/pending/nope.md"
-  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+  assert_ne "0" "$CONSUME_STATUS" "終了コード"
+  assert_contains "$CONSUME_ERR" "nope.md" "標準エラー"
+}
+
+test_ディレクトリを指定したら失敗する() {
+  _setup_project
+  mkdir -p "$PROJ/.claude/.handoff/pending/draft"
+  _run_consume "$PROJ/.claude/.handoff/pending/draft"
+  assert_ne "0" "$CONSUME_STATUS" "終了コード"
+  assert_contains "$CONSUME_ERR" "draft" "標準エラー"
+}
+
+# 不正な引数で落ちても、正しい引数の分は処理を試みたことが分かること。
+test_不正な引数があっても正しい引数は消費する() {
+  _setup_project
+  _write_pending "a.md" "A"
+  _run_consume "$PROJ/.claude/.handoff/pending/a.md" "$PROJ/.claude/.handoff/pending/nope.md"
+  assert_ne "0" "$CONSUME_STATUS" "終了コード"
+  assert_file_exists "$PROJ/.claude/.handoff/consumed/a.md"
 }
 
 test_ハイフンで始まるパスでも壊れない() {

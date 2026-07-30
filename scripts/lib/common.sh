@@ -7,7 +7,8 @@
 # 標準入力から受け取ったフックのペイロードを保持する。
 CTS_HOOK_PAYLOAD=""
 # ペイロードを読み切れなかった（タイムアウトした）ら 1。
-# 呼び出し側はこのとき「判定できなかった」として安全側へ倒す。
+# ただし「読み切れなかった＝判定できない」ではない。読めた分から目的の
+# フィールドを取り出せることは多いので、これだけで捨てる判断はしない。
 CTS_PAYLOAD_TIMED_OUT=0
 
 # 標準入力の待ち時間の上限（秒）。フックはセッション起動の同期処理であり、
@@ -27,7 +28,9 @@ cts_read_payload() {
   started=$SECONDS
   while :; do
     line=""
-    IFS= read -r -t "$CTS_READ_TIMEOUT" line
+    # 標準入力が閉じられている（<&-）と read は「Bad file descriptor」を
+    # 標準エラーへ書く。フックは標準エラーを汚さない契約なので握る。
+    IFS= read -r -t "$CTS_READ_TIMEOUT" line 2>/dev/null
     rc=$?
     # タイムアウト・EOF いずれでも、読めた分は取り込む（末尾に改行が無い
     # 1行 JSON は rc=1 で返るため、ここを捨てると本来の入力まで失う）。
@@ -47,25 +50,125 @@ cts_read_payload() {
   return 0
 }
 
-# JSON から文字列フィールドを1つ取り出す。見つからなければ空文字列。
-# 正規の JSON パーサではない。フックのペイロードは Claude Code が生成する
-# 平坦な構造であり、この用途では十分である。
+# rest の先頭から空白を捨てる。呼び出し元の rest を書き換える。
+_cts_json_skip_ws() {
+  while [ -n "$rest" ]; do
+    case "${rest:0:1}" in
+      ' ' | $'\t' | $'\n' | $'\r') rest="${rest:1}" ;;
+      *) return 0 ;;
+    esac
+  done
+  return 0
+}
+
+# 開き引用符の直後から文字列リテラルを1つ読む。読んだ値を s に、
+# 残りを rest に入れる。呼び出し元の local 変数を書き換える（bash の動的スコープ）。
+# 1文字ずつ回さず、引用符かバックスラッシュまでを一気に取り込むのは、
+# 長いペイロードで O(長さの2乗) にしないためである。
+_cts_json_take_string() {
+  local part ch esc upto_q upto_b
+  s=""
+  while [ -n "$rest" ]; do
+    upto_q="${rest%%\"*}"
+    upto_b="${rest%%\\*}"
+    if [ "${#upto_q}" -le "${#upto_b}" ]; then part="$upto_q"; else part="$upto_b"; fi
+    if [ "${#part}" -eq "${#rest}" ]; then
+      # 閉じていない文字列。壊れたペイロードなので、残り全部を値とみなす。
+      s="$s$rest"
+      rest=""
+      return 0
+    fi
+    s="$s$part"
+    ch="${rest:${#part}:1}"
+    rest="${rest:$((${#part} + 1))}"
+    [ "$ch" = '"' ] && return 0
+    esc="${rest:0:1}"
+    rest="${rest:1}"
+    case "$esc" in
+      n) s="$s"$'\n' ;;
+      t) s="$s"$'\t' ;;
+      r) s="$s"$'\r' ;;
+      b) s="$s"$'\b' ;;
+      f) s="$s"$'\f' ;;
+      u) s="$s\\u${rest:0:4}"; rest="${rest:4}" ;;
+      *) s="$s$esc" ;;
+    esac
+  done
+  return 0
+}
+
+# JSON の「トップレベルの」文字列フィールドを1つ取り出す。無ければ空文字列。
+# 正規の JSON パーサではないが、入れ子と文字列リテラルは読み飛ばす。
 #
-# 必ず「最初の一致」を採る。本体がペイロードへ入れ子オブジェクトを足したとき、
-# 貪欲マッチだと入れ子側の値を拾い、compact 判定が静かに壊れるため。
+# grep での近似をやめたのは、入れ子オブジェクトが目的のキーより前にあると
+# 入れ子側の値を拾うためである。{"nested":{"source":"compact"},"source":"startup"}
+# のようなペイロードを本体が送り始めた瞬間に、compact 判定が静かに壊れる。
+# jq を使わないのは、環境によって無いものへフックを依存させないためである。
 cts_json_field() {
-  local key="$1" json="${2:-$CTS_HOOK_PAYLOAD}" match
-  # 不一致で grep が 1 を返す。pipefail 下で代入自体が失敗すると呼び出し側の
-  # ERR トラップを踏むため、ここで握って空文字列に落とす。
-  match="$(
-    printf '%s' "$json" |
-      tr -d '\n' |
-      grep -o "\"${key}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" |
-      head -n 1
-  )" || match=""
-  [ -n "$match" ] || return 0
-  printf '%s' "$match" |
-    sed -n 's/^"[^"]*"[[:space:]]*:[[:space:]]*"\(.*\)"$/\1/p'
+  local key="$1" rest="${2:-$CTS_HOOK_PAYLOAD}"
+  local depth=0 chunk c s
+  local q='"'
+  # ']' を先頭に置くのは、bash のブラケット式へ ']' 自身を含めるための書き方。
+  local structural="]{}[${q}"
+
+  while [ -n "$rest" ]; do
+    chunk="${rest%%[$structural]*}"
+    # 構造文字が残っていない。
+    [ "${#chunk}" -ne "${#rest}" ] || return 0
+    c="${rest:${#chunk}:1}"
+    rest="${rest:$((${#chunk} + 1))}"
+    case "$c" in
+      '{' | '[') depth=$((depth + 1)) ;;
+      '}' | ']') depth=$((depth - 1)) ;;
+      "$q")
+        _cts_json_take_string
+        # 直後（空白を除く）が ':' ならキー、そうでなければただの値。
+        _cts_json_skip_ws
+        [ "${rest:0:1}" = ':' ] || continue
+        rest="${rest:1}"
+        if [ "$depth" -eq 1 ] && [ "$s" = "$key" ]; then
+          _cts_json_skip_ws
+          # 文字列でなければ「無い」とみなす。
+          if [ "${rest:0:1}" = "$q" ]; then
+            rest="${rest:1}"
+            _cts_json_take_string
+            printf '%s' "$s"
+          fi
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 0
+}
+
+# 引き継ぎ本文を囲む区切りの識別子。実行ごとに変える。
+# 固定文字列だと、本文に終端文字列を1行書くだけで囲いを抜けられ、
+# 以降が「フック自身の地の文」として読まれてしまう。
+# 本文を無害化する方式にしないのは、無害化の漏れがそのまま突破になるためで、
+# 書き手が事前に知り得ない識別子で囲むほうが確実である。
+cts_fence_id() {
+  local id=""
+  if [ -r /dev/urandom ]; then
+    # tr は head に切られて SIGPIPE で死ぬため終了コードは当てにならない。
+    # 長さで判定する。
+    id="$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c 16 || true)"
+  fi
+  if [ "${#id}" -lt 8 ]; then
+    # /dev/urandom を読めない環境の退路。$RANDOM は乱数の質こそ劣るが、
+    # 「本文の書き手が事前に知り得ない」という条件はここでは満たす。
+    id="$(printf '%04x%04x%04x%04x' \
+      "$((RANDOM))" "$((RANDOM))" "$((RANDOM))" "$(($$ & 0xffff))")"
+  fi
+  printf '%s' "$id"
+}
+
+# 出力の1行へ埋め込める形へ落とす。制御文字（改行を含む）と " < > を落とす。
+# ファイル名は攻撃者が決められる。改行を通せばフック自身の出力に見える行を
+# 作れるし、引用符と山括弧を通せば区切りの開始タグを割れる。
+# ファイル名・パスを出すところでは、区切りの中か外かを問わず必ず通す。
+cts_sanitize_text() {
+  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177"<>'
 }
 
 # 導入先リポジトリのルート。CLAUDE_PROJECT_DIR → ペイロードの cwd → カレント。

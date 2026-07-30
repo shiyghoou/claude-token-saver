@@ -21,11 +21,19 @@ if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
 fi
 
 if [ "$#" -gt 0 ]; then
+  # 明示的に指定されたものは黙って飛ばさない。無音で成功扱いにすると、
+  # タイプミスやディレクトリ指定が「消費できたつもり」に化ける。
+  # 引数なしの一括処理とは違い、ここでは対象が存在するはずである。
+  rc=0
   for f in "$@"; do
-    [ -f "$f" ] || continue
-    cts_consume_file "$f" "$consumed_dir" || exit 1
+    if [ ! -f "$f" ]; then
+      printf '通常ファイルではない: %s\n' "$f" >&2
+      rc=1
+      continue
+    fi
+    cts_consume_file "$f" "$consumed_dir" || { printf '消費できなかった: %s\n' "$f" >&2; rc=1; }
   done
-  exit 0
+  exit "$rc"
 fi
 
 pending_dir="$(cts_handoff_dir)/pending"
