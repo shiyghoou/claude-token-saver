@@ -80,6 +80,53 @@ test_存在しないパスを指定しても終了コード0() {
   assert_eq "0" "$CONSUME_STATUS" "終了コード"
 }
 
+test_ハイフンで始まるパスでも壊れない() {
+  _setup_project
+  printf 'ハイフン名の本文\n' >"$PROJ/.claude/.handoff/pending/-n.md"
+  ( cd "$PROJ/.claude/.handoff/pending" && bash "$CONSUME" -n.md >"$TEST_TMP/.out" 2>"$TEST_TMP/.err" )
+  CONSUME_STATUS=$?
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+  assert_file_exists "$PROJ/.claude/.handoff/consumed/-n.md"
+}
+
+test_ダブルダッシュ以降は引数として扱う() {
+  _setup_project
+  printf 'ハイフン名の本文\n' >"$PROJ/.claude/.handoff/pending/-n.md"
+  _run_consume -- "$PROJ/.claude/.handoff/pending/-n.md"
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+  assert_file_exists "$PROJ/.claude/.handoff/consumed/-n.md"
+}
+
+test_引数なしでもハイフン始まりのファイルを移せる() {
+  _setup_project
+  printf 'A\n' >"$PROJ/.claude/.handoff/pending/-n.md"
+  _run_consume
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+  assert_empty "$CONSUME_ERR" "標準エラー"
+  assert_file_exists "$PROJ/.claude/.handoff/consumed/-n.md"
+}
+
+test_改行を含むファイル名でも移せる() {
+  _setup_project
+  printf 'A\n' >"$PROJ/.claude/.handoff/pending/$(printf 'a\nb').md"
+  _run_consume
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+  assert_empty "$(ls -A "$PROJ/.claude/.handoff/pending")" "pending の残存"
+}
+
+# CLAUDE_PROJECT_DIR が無い環境では CWD を導入先とみなす。
+test_CLAUDE_PROJECT_DIR_が無いときは_PWD_を使う() {
+  _setup_project
+  unset CLAUDE_PROJECT_DIR
+  mkdir -p "$PWD/.claude/.handoff/pending"
+  printf 'PWD 側\n' >"$PWD/.claude/.handoff/pending/a.md"
+  _run_consume
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+  assert_file_exists "$PWD/.claude/.handoff/consumed/a.md"
+  # CLAUDE_PROJECT_DIR 側は触られていないこと。
+  assert_file_exists "$PROJ/.claude/.handoff/pending"
+}
+
 test_サブディレクトリは移動対象にしない() {
   _setup_project
   mkdir -p "$PROJ/.claude/.handoff/pending/draft"

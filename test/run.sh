@@ -34,6 +34,18 @@ for test_file in "$TEST_DIR"/test-*.sh; do
 
   printf '%s\n' "$base"
 
+  # 先に構文検査する。列挙は source のエラーを捨てるため、関数定義より前に
+  # 構文エラーがあると「テスト関数 0 件」に化け、壊れたテストが緑になる。
+  syntax_rc=0
+  syntax_err="$(bash -n "$test_file" 2>&1)" || syntax_rc=$?
+  if [ "$syntax_rc" -ne 0 ]; then
+    printf '  FAIL (構文エラー)\n'
+    printf '%s\n' "$syntax_err"
+    fail_count=$((fail_count + 1))
+    failed_names+=("$base::(構文エラー)")
+    continue
+  fi
+
   # テスト関数名を列挙する。source は各関数の実行時に行うため、ここでは
   # 別プロセスで宣言を取り出すだけに留める（ファイル間の汚染を防ぐ）。
   mapfile -t fns < <(
@@ -42,8 +54,12 @@ for test_file in "$TEST_DIR"/test-*.sh; do
     declare -F | awk '{print $3}' | grep '^test_' | sort
   )
 
+  # 0 件は成功ではない。テストを書いたつもりで1つも走っていない状態を
+  # 黙って通すと、他のテストの緑も信用できなくなる。
   if [ "${#fns[@]}" -eq 0 ]; then
-    printf '  (テスト関数なし)\n'
+    printf '  FAIL (テスト関数なし)\n'
+    fail_count=$((fail_count + 1))
+    failed_names+=("$base::(テスト関数なし)")
     continue
   fi
 

@@ -53,10 +53,13 @@ assert_file_missing() {
 }
 
 # 出現回数を数える。install.sh の冪等性検証に使う。
+# grep -c は「一致した行数」しか返さないため、同じ行に2回出ても 1 になる。
+# 冪等性の検証では追記が1行に潰れた場合こそ見逃したくないので、
+# grep -o で出現ごとに1行へ展開してから数える。
 assert_count() {
   local expected="$1" haystack="$2" needle="$3" label="${4:-出現回数}"
   local actual
-  actual=$(printf '%s\n' "$haystack" | grep -c -F -- "$needle" || true)
+  actual=$(printf '%s\n' "$haystack" | grep -o -F -- "$needle" | wc -l | tr -d ' ')
   if [ "$expected" != "$actual" ]; then
     _fail "${label}が一致しない: expected=${expected} actual=${actual} needle=[${needle}]"
   fi
