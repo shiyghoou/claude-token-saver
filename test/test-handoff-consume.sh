@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# handoff-consume.sh（pending → consumed）の検証。
+# handoff-check.sh とは別に、手で消費したいときに単体で使える必要がある。
+
+CONSUME="$REPO_ROOT/scripts/handoff-consume.sh"
+
+_setup_project() {
+  PROJ="$TEST_TMP/proj"
+  mkdir -p "$PROJ/.claude/.handoff/pending"
+  export CLAUDE_PROJECT_DIR="$PROJ"
+}
+
+_write_pending() {
+  printf '%s\n' "$2" >"$PROJ/.claude/.handoff/pending/$1"
+}
+
+_run_consume() {
+  bash "$CONSUME" "$@" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
+  CONSUME_STATUS=$?
+  CONSUME_ERR="$(cat "$TEST_TMP/.err")"
+}
+
+test_引数なしで_pending_の全ファイルを移す() {
+  _setup_project
+  _write_pending "a.md" "A"
+  _write_pending "b.md" "B"
+  _run_consume
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+  assert_file_exists "$PROJ/.claude/.handoff/consumed/a.md"
+  assert_file_exists "$PROJ/.claude/.handoff/consumed/b.md"
+  assert_empty "$(ls -A "$PROJ/.claude/.handoff/pending")" "pending の残存"
+}
+
+test_パスを指定するとそのファイルのみ移す() {
+  _setup_project
+  _write_pending "a.md" "A"
+  _write_pending "b.md" "B"
+  _run_consume "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.claude/.handoff/consumed/a.md"
+  assert_file_exists "$PROJ/.claude/.handoff/pending/b.md"
+  assert_file_missing "$PROJ/.claude/.handoff/consumed/b.md"
+}
+
+test_pending_が空でも終了コード0で何も壊さない() {
+  _setup_project
+  _run_consume
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+  assert_empty "$CONSUME_ERR" "標準エラー"
+}
+
+test_pending_ディレクトリが無くても終了コード0() {
+  _setup_project
+  rm -rf "$PROJ/.claude/.handoff"
+  _run_consume
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+}
+
+test_移した内容は失われない() {
+  _setup_project
+  _write_pending "a.md" "残るべき本文"
+  _run_consume
+  assert_contains "$(cat "$PROJ/.claude/.handoff/consumed/a.md")" "残るべき本文" "consumed の内容"
+}
+
+test_同名ファイルが_consumed_にあっても既存を上書きしない() {
+  _setup_project
+  mkdir -p "$PROJ/.claude/.handoff/consumed"
+  printf '先に消費した内容\n' >"$PROJ/.claude/.handoff/consumed/a.md"
+  _write_pending "a.md" "新しい内容"
+  _run_consume
+  assert_contains "$(cat "$PROJ/.claude/.handoff/consumed/a.md")" "先に消費した内容" "既存の consumed"
+  assert_empty "$(ls -A "$PROJ/.claude/.handoff/pending")" "pending の残存"
+  # 新しい内容も別名でどこかに残っているべきである。
+  assert_contains "$(cat "$PROJ"/.claude/.handoff/consumed/a.md.*)" "新しい内容" "退避先の内容"
+}
+
+test_存在しないパスを指定しても終了コード0() {
+  _setup_project
+  _run_consume "$PROJ/.claude/.handoff/pending/nope.md"
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+}
+
+test_サブディレクトリは移動対象にしない() {
+  _setup_project
+  mkdir -p "$PROJ/.claude/.handoff/pending/draft"
+  _write_pending "a.md" "A"
+  _run_consume
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+  assert_file_exists "$PROJ/.claude/.handoff/pending/draft"
+  assert_file_exists "$PROJ/.claude/.handoff/consumed/a.md"
+}
