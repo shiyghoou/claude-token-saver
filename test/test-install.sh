@@ -239,3 +239,159 @@ test_末尾に改行が無い_gitignore_でも行が結合しない() {
   assert_contains "$(cat "$TARGET/.gitignore")" "$(printf 'node_modules/\n')" ".gitignore"
   assert_not_contains "$(cat "$TARGET/.gitignore")" "node_modules/#" ".gitignore"
 }
+
+# --- 以下、敵対的レビューの指摘に対する回帰テスト -----------------------------
+
+GITIGNORE_START="# claude-token-saver (install.sh が追記。uninstall.sh で削除される)"
+GITIGNORE_END="# claude-token-saver end"
+
+# クローンを別の場所へ複製する。CTS_HOME 側のパスを変えた検証に使う。
+_clone_repo() {
+  local dest="$1"
+  mkdir -p "$dest"
+  cp -R "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh" "$dest/"
+  local d
+  for d in scripts skills lib; do
+    [ -d "$REPO_ROOT/$d" ] && cp -R "$REPO_ROOT/$d" "$dest/"
+  done
+  return 0
+}
+
+_mtime() { stat -c %Y "$1"; }
+
+test_クローンのパスに空白があってもフックが実行できる() {
+  _setup_target
+  local clone="$TEST_TMP/my clone"
+  _clone_repo "$clone"
+  bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
+
+  mkdir -p "$TARGET/.claude/.handoff/pending"
+  printf '空白パスでも読める\n' >"$TARGET/.claude/.handoff/pending/a.md"
+
+  local cmd out
+  cmd="$(_hook_commands SessionStart | grep handoff-check.sh)"
+  out="$(printf '{"source":"startup","cwd":"%s"}' "$TARGET" |
+    CLAUDE_PROJECT_DIR="$TARGET" bash -c "$cmd" 2>&1)"
+  assert_contains "$out" "空白パスでも読める" "フック出力"
+}
+
+test_gitignore_のブロックは再実行で再生成される() {
+  _setup_target
+  _run_install
+  # スキルが増えた／出力先が増えた場面を模す。ブロックの中身が欠けていても
+  # 再実行で復元されないと、リンクが版管理対象として現れる。
+  grep -v '^\.claude/skills/session-handoff$' "$TARGET/.gitignore" >"$TARGET/.gitignore.tmp"
+  mv "$TARGET/.gitignore.tmp" "$TARGET/.gitignore"
+  _run_install
+  assert_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignore"
+}
+
+test_設置しなかったスキルは_gitignore_に書かない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/skills/session-handoff"
+  printf '導入先が自分で書いたもの\n' >"$TARGET/.claude/skills/session-handoff/SKILL.md"
+  _run_install
+  # 触らないと判断したスキルを無視すると、導入先の版管理から静かに消える。
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignore"
+}
+
+test_gitignore_に変化が無ければ書き込まない() {
+  _setup_target
+  _run_install
+  touch -d '2020-01-01 00:00:00' "$TARGET/.gitignore"
+  local before after
+  before="$(_mtime "$TARGET/.gitignore")"
+  _run_install
+  after="$(_mtime "$TARGET/.gitignore")"
+  assert_eq "$before" "$after" ".gitignore の mtime"
+}
+
+test_gitignore_の_END_が無ければ何も削らず警告する() {
+  _setup_target
+  printf 'dist/\n%s\n.claude/.handoff/\n' "$GITIGNORE_START" >"$TARGET/.gitignore"
+  _run_install
+  assert_contains "$(cat "$TARGET/.gitignore")" "dist/" ".gitignore"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "警告" "出力"
+}
+
+test_綴りの違うパスから実行してもフックが重複しない() {
+  _setup_target
+  ln -s "$REPO_ROOT" "$TEST_TMP/link"
+  bash "$TEST_TMP/link/install.sh" "$TARGET" >/dev/null 2>&1
+  _run_install
+  assert_count 1 "$(_hook_commands SessionStart)" "handoff-check.sh" "handoff-check.sh の登録数"
+}
+
+test_移動した古いクローンを指す登録は掃除される() {
+  _setup_target
+  local clone="$TEST_TMP/old-clone"
+  _clone_repo "$clone"
+  bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
+  rm -rf "$clone"
+  _run_install
+  assert_count 1 "$(_hook_commands SessionStart)" "handoff-check.sh" "handoff-check.sh の登録数"
+  assert_not_contains "$(_hook_commands SessionStart)" "old-clone" "SessionStart のコマンド"
+}
+
+test_matcher_付きのユーザー独自フックは残す() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  cat >"$SETTINGS" <<'EOF'
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup", "hooks": [ { "type": "command", "command": "echo 独自フック" } ] }
+    ]
+  }
+}
+EOF
+  _run_install
+  _run_install
+  local cmds
+  cmds="$(_hook_commands SessionStart)"
+  assert_contains "$cmds" "独自フック" "SessionStart のコマンド"
+  assert_contains "$(cat "$SETTINGS")" "matcher" "settings.local.json"
+}
+
+test_既存の_settings_をバックアップする() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' >"$SETTINGS"
+  _run_install
+  assert_file_exists "$SETTINGS.cts-backup"
+  assert_contains "$(cat "$SETTINGS.cts-backup")" "Bash(ls:*)" "バックアップの内容"
+  assert_contains "$INSTALL_OUT" "cts-backup" "出力"
+}
+
+test_バックアップは二度目の実行で上書きしない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' >"$SETTINGS"
+  _run_install
+  _run_install
+  assert_contains "$(cat "$SETTINGS.cts-backup")" "Bash(ls:*)" "バックアップの内容"
+  assert_not_contains "$(cat "$SETTINGS.cts-backup")" "handoff-check.sh" "バックアップの内容"
+}
+
+test_settings_に変化が無ければ書き込まない() {
+  _setup_target
+  _run_install
+  touch -d '2020-01-01 00:00:00' "$SETTINGS"
+  local before after
+  before="$(_mtime "$SETTINGS")"
+  _run_install
+  after="$(_mtime "$SETTINGS")"
+  assert_eq "$before" "$after" "settings.local.json の mtime"
+}
+
+test_警告があればサマリで再掲する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/skills/session-handoff"
+  printf '導入先が自分で書いたもの\n' >"$TARGET/.claude/skills/session-handoff/SKILL.md"
+  _run_install
+  # 「完了」とだけ出して警告を流すと、利用者は取りこぼしに気づけない。
+  assert_contains "$INSTALL_OUT" "警告" "出力"
+  local tail_out
+  tail_out="$(printf '%s\n' "$INSTALL_OUT" | tail -n 5)"
+  assert_contains "$tail_out" "警告" "出力の末尾"
+}

@@ -18,6 +18,7 @@ _run_uninstall() {
   bash "$UNINSTALL" "$TARGET" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
   UNINSTALL_STATUS=$?
   UNINSTALL_OUT="$(cat "$TEST_TMP/.out")"
+  UNINSTALL_ERR="$(cat "$TEST_TMP/.err")"
 }
 
 _hook_commands() {
@@ -164,6 +165,140 @@ test_残った_settings_は妥当な_JSON_である() {
   _setup_target
   _run_install
   _run_uninstall
+  # 中身が空なら uninstall が消すので、残っている場合だけ検査する。
+  [ -f "$SETTINGS" ] || return 0
   python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$SETTINGS" ||
     _fail "settings.local.json が妥当な JSON でない"
+}
+
+# --- 以下、敵対的レビューの指摘に対する回帰テスト -----------------------------
+
+GITIGNORE_START="# claude-token-saver (install.sh が追記。uninstall.sh で削除される)"
+GITIGNORE_END="# claude-token-saver end"
+
+_clone_repo() {
+  local dest="$1"
+  mkdir -p "$dest"
+  cp -R "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh" "$dest/"
+  local d
+  for d in scripts skills lib; do
+    [ -d "$REPO_ROOT/$d" ] && cp -R "$REPO_ROOT/$d" "$dest/"
+  done
+  return 0
+}
+
+test_END_マーカーが無ければ_gitignore_を削らない() {
+  _setup_target
+  printf 'dist/\n.env\n%s\n.claude/.handoff/\n' "$GITIGNORE_START" >"$TARGET/.gitignore"
+  local before
+  before="$(cat "$TARGET/.gitignore")"
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_eq "$before" "$(cat "$TARGET/.gitignore")" ".gitignore"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "警告" "出力"
+}
+
+test_同じ接頭辞のユーザーのコメント行を誤認しない() {
+  _setup_target
+  printf '# claude-token-saver は便利\ndist/\n.env\n' >"$TARGET/.gitignore"
+  _run_install
+  _run_uninstall
+  local gi
+  gi="$(cat "$TARGET/.gitignore")"
+  assert_contains "$gi" "# claude-token-saver は便利" ".gitignore"
+  assert_contains "$gi" "dist/" ".gitignore"
+  assert_contains "$gi" ".env" ".gitignore"
+}
+
+test_ブロックと無関係な末尾の空行は消さない() {
+  _setup_target
+  {
+    printf 'node_modules/\n\n'
+    printf '%s\n' "$GITIGNORE_START"
+    printf '.claude/.handoff/\n'
+    printf '%s\n' "$GITIGNORE_END"
+    printf 'dist/\n\n\n'
+  } >"$TARGET/.gitignore"
+  _run_uninstall
+  # コマンド置換は末尾の改行を落とすため、repr で厳密に比べる。
+  local actual
+  actual="$(python3 -c 'import sys; print(repr(open(sys.argv[1]).read()))' "$TARGET/.gitignore")"
+  assert_eq "'node_modules/\ndist/\n\n\n'" "$actual" ".gitignore"
+}
+
+test_空白を含むパスで登録したフックも外せる() {
+  _setup_target
+  local clone="$TEST_TMP/my clone"
+  _clone_repo "$clone"
+  bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
+  # 導入したのとは別のクローンから外せねばならない。
+  _run_uninstall
+  assert_not_contains "$(_hook_commands SessionStart 2>/dev/null || true)" \
+    "handoff-check.sh" "SessionStart のコマンド"
+}
+
+test_非クォートで登録された古いフックも外せる() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  cat >"$SETTINGS" <<EOF
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "$REPO_ROOT/scripts/handoff-check.sh" } ] }
+    ]
+  }
+}
+EOF
+  _run_uninstall
+  assert_not_contains "$(cat "$SETTINGS" 2>/dev/null || true)" \
+    "handoff-check.sh" "settings.local.json"
+}
+
+test_別のクローンで設置したスキルのリンクも外す() {
+  _setup_target
+  _run_install
+  # 導入時にはあったが、この uninstall を実行するクローンには無いスキルを模す。
+  mkdir -p "$TEST_TMP/other-clone/skills/extra-skill"
+  printf 'x\n' >"$TEST_TMP/other-clone/skills/extra-skill/SKILL.md"
+  ln -s "$TEST_TMP/other-clone/skills/extra-skill" "$TARGET/.claude/skills/extra-skill"
+  _run_uninstall
+  assert_file_missing "$TARGET/.claude/skills/extra-skill"
+}
+
+test_導入先が自前で置いた実ディレクトリのスキルは残す() {
+  _setup_target
+  _run_install
+  mkdir -p "$TARGET/.claude/skills/my-own-skill"
+  printf 'mine\n' >"$TARGET/.claude/skills/my-own-skill/SKILL.md"
+  _run_uninstall
+  assert_file_exists "$TARGET/.claude/skills/my-own-skill/SKILL.md"
+}
+
+test_空になったディレクトリとファイルを残さない() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  assert_file_missing "$TARGET/.claude/.handoff/pending"
+  assert_file_missing "$TARGET/.claude/.handoff/consumed"
+  assert_file_missing "$TARGET/.claude/.handoff"
+  assert_file_missing "$TARGET/.claude/.token-saver"
+  assert_file_missing "$TARGET/.gitignore"
+  assert_file_missing "$SETTINGS"
+}
+
+test_実ファイルのある_handoff_は残す() {
+  _setup_target
+  _run_install
+  printf '残す\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  _run_uninstall
+  assert_file_exists "$TARGET/.claude/.handoff/pending/a.md"
+}
+
+test_install_前から在った_gitignore_は消さない() {
+  _setup_target
+  printf 'node_modules/\n' >"$TARGET/.gitignore"
+  _run_install
+  _run_uninstall
+  assert_file_exists "$TARGET/.gitignore"
+  assert_contains "$(cat "$TARGET/.gitignore")" "node_modules/" ".gitignore"
 }

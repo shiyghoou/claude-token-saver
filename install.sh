@@ -9,18 +9,37 @@
 
 set -uo pipefail
 
-CTS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="$(cd "${1:-$PWD}" 2>/dev/null && pwd)" || {
+# 物理パスで解決する。シンボリックリンク経由で呼ばれたときに綴りの違う
+# パスが登録され、実パス経由の再実行で二重登録になるのを防ぐ。
+CTS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+TARGET="$(cd "${1:-$PWD}" 2>/dev/null && pwd -P)" || {
   printf 'エラー: 導入先ディレクトリが見つからない: %s\n' "${1:-$PWD}" >&2
   exit 1
 }
 
 SETTINGS="$TARGET/.claude/settings.local.json"
+BACKUP="$SETTINGS.cts-backup"
 GITIGNORE="$TARGET/.gitignore"
-GITIGNORE_MARKER="# claude-token-saver"
 
-die() { printf 'エラー: %s\n' "$*" >&2; exit 1; }
+# ここまでに適用した作業。途中で失敗したときに、何が残っているかを伝える。
+applied=()
+warnings=()
+backup_path=""
+
+die() {
+  printf 'エラー: %s\n' "$*" >&2
+  if [ "${#applied[@]}" -gt 0 ]; then
+    printf 'ここまで適用した:\n' >&2
+    printf '  - %s\n' "${applied[@]}" >&2
+    printf '復旧するには uninstall.sh を実行せよ: %s/uninstall.sh %s\n' "$CTS_HOME" "$TARGET" >&2
+  fi
+  exit 1
+}
 info() { printf '%s\n' "$*"; }
+warn() {
+  warnings+=("$*")
+  printf '  警告: %s\n' "$*"
+}
 
 command -v python3 >/dev/null 2>&1 ||
   die "python3 が必要である（settings.local.json を壊さずに編集するため）。フック自体は python3 に依存しない。"
@@ -33,6 +52,7 @@ mkdir -p "$TARGET/.claude/.handoff/pending" \
          "$TARGET/.claude/.handoff/consumed" \
          "$TARGET/.claude/.token-saver" ||
   die "ディレクトリを作成できない"
+applied+=(".claude 配下のディレクトリを作成")
 
 # --- 2. フックの登録 ---------------------------------------------------------
 
@@ -45,98 +65,26 @@ hook_specs=()
   hook_specs+=("Stop:$CTS_HOME/scripts/suggest-session-cut.sh")
 
 if [ "${#hook_specs[@]}" -gt 0 ]; then
-  python3 - "$SETTINGS" "${hook_specs[@]}" <<'PY' || die "settings.local.json を更新できない"
-import json, os, sys, tempfile
+  # settings.local.json は通常 git 管理外の個人設定である。git から復元でき
+  # ないので、最初の書き換え前に控えを取る。既にあれば上書きしない（原状の
+  # 控えを、再実行で自分の書いた内容へ塗り替えては意味がない）。
+  if [ -f "$SETTINGS" ] && [ ! -e "$BACKUP" ]; then
+    cp -p "$SETTINGS" "$BACKUP" || die "settings.local.json の控えを作れない"
+    backup_path="$BACKUP"
+  fi
 
-settings_path, specs = sys.argv[1], sys.argv[2:]
-
-data = {}
-if os.path.exists(settings_path):
-    try:
-        with open(settings_path, encoding="utf-8") as f:
-            text = f.read().strip()
-        data = json.loads(text) if text else {}
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        # 壊れたファイルを上書きすると、ユーザーの既存設定を失う。何もせず落ちる。
-        sys.stderr.write(
-            "既存の %s が妥当な JSON でない (%s)。\n"
-            "手で直してから install.sh を再実行せよ。設定は変更していない。\n"
-            % (settings_path, e)
-        )
-        sys.exit(1)
-    if not isinstance(data, dict):
-        sys.stderr.write("既存の %s の最上位がオブジェクトでない。設定は変更していない。\n" % settings_path)
-        sys.exit(1)
-
-hooks = data.setdefault("hooks", {})
-if not isinstance(hooks, dict):
-    sys.stderr.write("既存の %s の hooks がオブジェクトでない。設定は変更していない。\n" % settings_path)
-    sys.exit(1)
-
-added = []
-for spec in specs:
-    event, command = spec.split(":", 1)
-    groups = hooks.setdefault(event, [])
-
-    # 同じコマンドが既にあれば何もしない（冪等性）。
-    already = any(
-        h.get("command") == command
-        for g in groups if isinstance(g, dict)
-        for h in g.get("hooks", []) if isinstance(h, dict)
-    )
-    if already:
-        continue
-
-    groups.append({"hooks": [{"type": "command", "command": command}]})
-    added.append("%s → %s" % (event, os.path.basename(command)))
-
-os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(settings_path), prefix=".settings-", suffix=".tmp")
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, settings_path)
-except Exception:
-    os.path.exists(tmp) and os.unlink(tmp)
-    raise
-
-for line in added:
-    print("  フックを登録した: %s" % line)
-if not added:
-    print("  フックは既に登録済み")
-PY
+  python3 "$CTS_HOME/lib/settings-hooks.py" install "$SETTINGS" "${hook_specs[@]}" ||
+    die "settings.local.json を更新できない"
+  applied+=("settings.local.json へフックを登録")
 fi
 
-# --- 3. .gitignore -----------------------------------------------------------
-
-# 引き継ぎと状態ファイルは利用実績であり、既定では版管理しない。
-# スキルのリンクは絶対パスを指す環境依存の産物であり、版管理へ入れると
-# 他の開発者のクローンで壊れたリンクになる。
-if ! grep -qF "$GITIGNORE_MARKER" "$GITIGNORE" 2>/dev/null; then
-  {
-    if [ -s "$GITIGNORE" ]; then
-      # 末尾に改行が無ければ足す。無いまま追記すると行が結合する。
-      [ -n "$(tail -c 1 "$GITIGNORE" 2>/dev/null)" ] && printf '\n'
-      printf '\n'
-    fi
-    printf '%s (install.sh が追記。uninstall.sh で削除される)\n' "$GITIGNORE_MARKER"
-    printf '.claude/.handoff/\n'
-    printf '.claude/.token-saver/\n'
-    for skill_dir in "$CTS_HOME"/skills/*/; do
-      [ -d "$skill_dir" ] && printf '.claude/skills/%s\n' "$(basename "$skill_dir")"
-    done
-    printf '%s end\n' "$GITIGNORE_MARKER"
-  } >>"$GITIGNORE" || die ".gitignore へ追記できない"
-  info "  .gitignore へ追記した"
-else
-  info "  .gitignore は既に追記済み"
-fi
-
-# --- 4. スキルのリンク -------------------------------------------------------
+# --- 3. スキルのリンク -------------------------------------------------------
 
 # 実体はクローン先に1つだけ置く。複数プロジェクトへ導入しても更新は git pull 1回で全体へ届く。
 mkdir -p "$TARGET/.claude/skills" || die "skills ディレクトリを作成できない"
+
+# 実際に設置したスキルだけを .gitignore へ書くため、名前を集める。
+installed_skills=()
 
 for skill_dir in "$CTS_HOME"/skills/*/; do
   [ -d "$skill_dir" ] || continue
@@ -146,13 +94,14 @@ for skill_dir in "$CTS_HOME"/skills/*/; do
 
   # 既に正しくリンクされているなら何もしない。
   if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
+    installed_skills+=("$name")
     continue
   fi
 
   # 実ディレクトリがあり、それが install.sh のコピーでないなら触らない。
   # 導入先が自前で置いたスキルを上書きすると、他人の作業を消す。
   if [ -d "$dest" ] && [ ! -L "$dest" ] && [ ! -f "$dest/.claude-token-saver" ]; then
-    info "  スキル $name は導入先に既存のディレクトリがあるため触らない"
+    warn "スキル $name は導入先に既存のディレクトリがあるため触らない（.gitignore にも書かない）"
     continue
   fi
 
@@ -166,6 +115,43 @@ for skill_dir in "$CTS_HOME"/skills/*/; do
     info "  スキルをコピーで配置した（シンボリックリンクが使えない環境）: $name"
     info "    リポジトリを更新したら install.sh を再実行してコピーを更新せよ。"
   fi
+  installed_skills+=("$name")
+  applied+=("スキル $name を設置")
 done
 
-info "完了。新しいセッションを開始すると引き継ぎフックが有効になる。"
+# --- 4. .gitignore -----------------------------------------------------------
+
+# 引き継ぎと状態ファイルは利用実績であり、既定では版管理しない。
+# スキルのリンクは絶対パスを指す環境依存の産物であり、版管理へ入れると
+# 他の開発者のクローンで壊れたリンクになる。
+#
+# ブロックは毎回作り直す。存在確認だけで済ませると、スキルが増えたときに
+# 無視行が追加されず、リンクが版管理対象として現れる。
+# 無視行を書くのは実際に設置したスキルだけに限る。触らなかったスキル
+# （導入先が自前で持っているもの）を無視すると、その版管理を静かに壊す。
+{
+  printf '.claude/.handoff/\n'
+  printf '.claude/.token-saver/\n'
+  for name in ${installed_skills[@]+"${installed_skills[@]}"}; do
+    printf '.claude/skills/%s\n' "$name"
+  done
+} | python3 "$CTS_HOME/lib/gitignore-block.py" apply "$GITIGNORE"
+gitignore_status=$?
+case "$gitignore_status" in
+  0) applied+=(".gitignore を更新") ;;
+  2) warnings+=(".gitignore の claude-token-saver ブロックが壊れているため更新していない") ;;
+  *) die ".gitignore を更新できない" ;;
+esac
+
+# --- 5. まとめ ---------------------------------------------------------------
+
+[ -n "$backup_path" ] && info "  既存の settings.local.json の控え: $backup_path"
+
+if [ "${#warnings[@]}" -gt 0 ]; then
+  info ""
+  info "警告 ${#warnings[@]} 件（未適用の項目がある）:"
+  printf '  - %s\n' "${warnings[@]}"
+  info "内容を確認せよ。取り消すには uninstall.sh を実行する。"
+else
+  info "完了。新しいセッションを開始すると引き継ぎフックが有効になる。"
+fi

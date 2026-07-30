@@ -9,8 +9,8 @@
 
 set -uo pipefail
 
-CTS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="$(cd "${1:-$PWD}" 2>/dev/null && pwd)" || {
+CTS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+TARGET="$(cd "${1:-$PWD}" 2>/dev/null && pwd -P)" || {
   printf 'エラー: 導入先ディレクトリが見つからない: %s\n' "${1:-$PWD}" >&2
   exit 1
 }
@@ -29,73 +29,10 @@ info "claude-token-saver を取り外す: $TARGET"
 # --- 1. フックの登録解除 -----------------------------------------------------
 
 # コマンドのファイル名で判定する。別のクローンから導入されていても外せるようにするため。
+# 判定は install.sh と共有する（lib/settings-hooks.py）。
 if [ -f "$SETTINGS" ]; then
-  python3 - "$SETTINGS" handoff-check.sh suggest-session-cut.sh <<'PY' || die "settings.local.json を更新できない"
-import json, os, sys, tempfile
-
-settings_path, basenames = sys.argv[1], set(sys.argv[2:])
-
-try:
-    with open(settings_path, encoding="utf-8") as f:
-        text = f.read().strip()
-    data = json.loads(text) if text else {}
-except (json.JSONDecodeError, UnicodeDecodeError) as e:
-    sys.stderr.write(
-        "既存の %s が妥当な JSON でない (%s)。設定は変更していない。\n" % (settings_path, e)
-    )
-    sys.exit(1)
-
-if not isinstance(data, dict) or not isinstance(data.get("hooks"), dict):
-    print("  登録済みのフックは無い")
-    sys.exit(0)
-
-def is_ours(hook):
-    return isinstance(hook, dict) and os.path.basename(str(hook.get("command", ""))) in basenames
-
-removed = 0
-hooks = data["hooks"]
-for event in list(hooks):
-    groups = hooks.get(event)
-    if not isinstance(groups, list):
-        continue
-
-    kept_groups = []
-    for group in groups:
-        if not isinstance(group, dict):
-            kept_groups.append(group)
-            continue
-        inner = group.get("hooks")
-        if not isinstance(inner, list):
-            kept_groups.append(group)
-            continue
-        kept = [h for h in inner if not is_ours(h)]
-        removed += len(inner) - len(kept)
-        # 中身が空になったグループは、install.sh が作ったものなので落とす。
-        if kept:
-            group["hooks"] = kept
-            kept_groups.append(group)
-
-    if kept_groups:
-        hooks[event] = kept_groups
-    else:
-        del hooks[event]
-
-if not hooks:
-    del data["hooks"]
-
-d = os.path.dirname(settings_path)
-fd, tmp = tempfile.mkstemp(dir=d, prefix=".settings-", suffix=".tmp")
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, settings_path)
-except Exception:
-    os.path.exists(tmp) and os.unlink(tmp)
-    raise
-
-print("  フックの登録を %d 件外した" % removed)
-PY
+  python3 "$CTS_HOME/lib/settings-hooks.py" remove "$SETTINGS" ||
+    die "settings.local.json を更新できない"
 else
   info "  settings.local.json が無い"
 fi
@@ -103,75 +40,41 @@ fi
 # --- 2. .gitignore -----------------------------------------------------------
 
 if [ -f "$GITIGNORE" ]; then
-  python3 - "$GITIGNORE" <<'PY' || die ".gitignore を更新できない"
-import os, sys, tempfile
-
-path = sys.argv[1]
-START, END = "# claude-token-saver", "# claude-token-saver end"
-
-with open(path, encoding="utf-8") as f:
-    lines = f.read().splitlines()
-
-out, skipping, removed = [], False, 0
-for line in lines:
-    s = line.strip()
-    if not skipping and s.startswith(START) and not s.startswith(END):
-        skipping = True
-        removed += 1
-        continue
-    if skipping:
-        removed += 1
-        if s.startswith(END):
-            skipping = False
-        continue
-    out.append(line)
-
-if removed == 0:
-    print("  .gitignore に追記は無い")
-    sys.exit(0)
-
-# ブロックの直前に install.sh が入れた空行が残るので落とす。
-while out and out[-1].strip() == "":
-    out.pop()
-
-d = os.path.dirname(path) or "."
-fd, tmp = tempfile.mkstemp(dir=d, prefix=".gitignore-", suffix=".tmp")
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        if out:
-            f.write("\n".join(out) + "\n")
-    os.replace(tmp, path)
-except Exception:
-    os.path.exists(tmp) and os.unlink(tmp)
-    raise
-
-print("  .gitignore の追記を削除した")
-PY
+  python3 "$CTS_HOME/lib/gitignore-block.py" remove "$GITIGNORE" ||
+    die ".gitignore を更新できない"
 fi
 
 # --- 3. スキル ---------------------------------------------------------------
 
-for skill_dir in "$CTS_HOME"/skills/*/; do
-  [ -d "$skill_dir" ] || continue
-  name="$(basename "$skill_dir")"
-  dest="$TARGET/.claude/skills/$name"
+# 導入先の skills を走査する。CTS_HOME 側を基準にすると、導入時とは別の
+# クローン（スキルの構成が違う）で実行したときに取り残しが出る。
+if [ -d "$TARGET/.claude/skills" ]; then
+  for dest in "$TARGET/.claude/skills"/*; do
+    [ -e "$dest" ] || [ -L "$dest" ] || continue
+    name="$(basename "$dest")"
 
-  if [ -L "$dest" ]; then
-    rm -f "$dest"
-    info "  スキルのリンクを外した: $name"
-  elif [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; then
-    rm -rf "$dest"
-    info "  スキルのコピーを削除した: $name"
-  elif [ -e "$dest" ]; then
-    # 導入先が自前で置いたものは触らない。
-    info "  スキル $name は導入先のものなので残す"
-  fi
-done
+    if [ -L "$dest" ]; then
+      # どこかのクローンの skills/<同名> を指すリンクだけを外す。
+      # 導入先が自分で張った別のリンクは触らない。
+      link="$(readlink "$dest")"
+      if [ "$(basename "$link")" = "$name" ] &&
+         [ "$(basename "$(dirname "$link")")" = "skills" ]; then
+        rm -f "$dest"
+        info "  スキルのリンクを外した: $name"
+      else
+        info "  スキル $name は導入先のものなので残す"
+      fi
+    elif [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; then
+      rm -rf "$dest"
+      info "  スキルのコピーを削除した: $name"
+    fi
+  done
+fi
 
 # 空になった skills ディレクトリは片付ける。中身があるなら触らない。
 rmdir "$TARGET/.claude/skills" 2>/dev/null || true
 
-# --- 4. 残したものの通知 -----------------------------------------------------
+# --- 4. 残したものの通知と後片付け -------------------------------------------
 
 handoff_dir="$TARGET/.claude/.handoff"
 if [ -d "$handoff_dir" ] && [ -n "$(find "$handoff_dir" -type f -print -quit 2>/dev/null)" ]; then
@@ -185,5 +88,18 @@ state_dir="$TARGET/.claude/.token-saver"
 if [ -d "$state_dir" ] && [ -n "$(find "$state_dir" -type f -print -quit 2>/dev/null)" ]; then
   info "状態ファイルは残した: .claude/.token-saver"
 fi
+
+# install.sh が作った空の器を残さない。rmdir は空でなければ何もしないので、
+# 実ファイルのある .handoff は従来どおり残る。
+rmdir "$handoff_dir/pending" "$handoff_dir/consumed" 2>/dev/null || true
+rmdir "$handoff_dir" "$state_dir" 2>/dev/null || true
+
+# 中身が無くなったファイルは、install.sh より前には存在しなかったものである。
+[ -f "$GITIGNORE" ] && [ ! -s "$GITIGNORE" ] && rm -f "$GITIGNORE"
+if [ -f "$SETTINGS" ] &&
+   [ "$(tr -d ' \t\n\r' <"$SETTINGS")" = "{}" ]; then
+  rm -f "$SETTINGS"
+fi
+rmdir "$TARGET/.claude" 2>/dev/null || true
 
 info "完了。"
