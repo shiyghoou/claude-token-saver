@@ -21,9 +21,17 @@ _run_uninstall() {
   UNINSTALL_ERR="$(cat "$TEST_TMP/.err")"
 }
 
-_hook_commands() {
+# 指定フックのコマンド一覧を HOOK_COMMANDS へ読み込む。
+# uninstall 後は settings.local.json 自体が消えることがある。素の python に
+# 読ませると FileNotFoundError で標準出力が空になり、不在アサーションが
+# 無条件に成立してしまう。「消えた」と「読めなかった」を区別する。
+_load_hook_commands() {
   local event="$1"
-  python3 -c '
+  if [ ! -f "$SETTINGS" ]; then
+    HOOK_COMMANDS='(settings.local.json は存在しない)'
+    return 0
+  fi
+  HOOK_COMMANDS="$(python3 -c '
 import json, sys
 event = sys.argv[1]
 with open(sys.argv[2]) as f:
@@ -31,7 +39,31 @@ with open(sys.argv[2]) as f:
 for group in data.get("hooks", {}).get(event, []):
     for h in group.get("hooks", []):
         print(h.get("command", ""))
-' "$event" "$SETTINGS"
+' "$event" "$SETTINGS" 2>"$TEST_TMP/.hookerr")" ||
+    _fail "settings.local.json を解析できない: $(cat "$TEST_TMP/.hookerr")"
+}
+
+_hook_commands() {
+  _load_hook_commands "$1" || exit 1
+  printf '%s\n' "$HOOK_COMMANDS"
+}
+
+# 不在を明示的な文言として返す。`cat 2>/dev/null || true` は空文字列を返すため、
+# 不在アサーションが常に成立してしまう。
+_gitignore_text() {
+  if [ ! -f "$TARGET/.gitignore" ]; then
+    printf '(.gitignore は存在しない)\n'
+    return 0
+  fi
+  cat "$TARGET/.gitignore"
+}
+
+_settings_text() {
+  if [ ! -f "$SETTINGS" ]; then
+    printf '(settings.local.json は存在しない)\n'
+    return 0
+  fi
+  cat "$SETTINGS"
 }
 
 test_フックの登録を外す() {
@@ -39,7 +71,8 @@ test_フックの登録を外す() {
   _run_install
   _run_uninstall
   assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
-  assert_not_contains "$(_hook_commands SessionStart)" "handoff-check.sh" "SessionStart のコマンド"
+  _load_hook_commands SessionStart
+  assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "SessionStart のコマンド"
 }
 
 test_導入先の他のフックは残す() {
@@ -90,8 +123,7 @@ test_gitignore_の追記を削除する() {
   _setup_target
   _run_install
   _run_uninstall
-  assert_not_contains "$(cat "$TARGET/.gitignore" 2>/dev/null || true)" \
-    ".claude/.token-saver/" ".gitignore"
+  assert_not_contains "$(_gitignore_text)" ".claude/.token-saver/" ".gitignore"
 }
 
 test_gitignore_の他の行は残す() {
@@ -233,8 +265,8 @@ test_空白を含むパスで登録したフックも外せる() {
   bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
   # 導入したのとは別のクローンから外せねばならない。
   _run_uninstall
-  assert_not_contains "$(_hook_commands SessionStart 2>/dev/null || true)" \
-    "handoff-check.sh" "SessionStart のコマンド"
+  _load_hook_commands SessionStart
+  assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "SessionStart のコマンド"
 }
 
 test_非クォートで登録された古いフックも外せる() {
@@ -250,17 +282,18 @@ test_非クォートで登録された古いフックも外せる() {
 }
 EOF
   _run_uninstall
-  assert_not_contains "$(cat "$SETTINGS" 2>/dev/null || true)" \
-    "handoff-check.sh" "settings.local.json"
+  assert_not_contains "$(_settings_text)" "handoff-check.sh" "settings.local.json"
 }
 
 test_別のクローンで設置したスキルのリンクも外す() {
   _setup_target
-  _run_install
   # 導入時にはあったが、この uninstall を実行するクローンには無いスキルを模す。
-  mkdir -p "$TEST_TMP/other-clone/skills/extra-skill"
-  printf 'x\n' >"$TEST_TMP/other-clone/skills/extra-skill/SKILL.md"
-  ln -s "$TEST_TMP/other-clone/skills/extra-skill" "$TARGET/.claude/skills/extra-skill"
+  local clone="$TEST_TMP/other-clone"
+  _clone_repo "$clone"
+  mkdir -p "$clone/skills/extra-skill"
+  printf 'x\n' >"$clone/skills/extra-skill/SKILL.md"
+  bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
+  assert_file_exists "$TARGET/.claude/skills/extra-skill"
   _run_uninstall
   assert_file_missing "$TARGET/.claude/skills/extra-skill"
 }
@@ -292,6 +325,197 @@ test_実ファイルのある_handoff_は残す() {
   printf '残す\n' >"$TARGET/.claude/.handoff/pending/a.md"
   _run_uninstall
   assert_file_exists "$TARGET/.claude/.handoff/pending/a.md"
+}
+
+test_導入と無関係な同名スキルのリンクは外さない() {
+  _setup_target
+  _run_install
+  # 導入先が自分で張った、社内共有のスキルへのリンク。リンク先の basename と
+  # 親ディレクトリ名だけで判定すると、これも「自分のもの」と誤認して消す。
+  mkdir -p "$TEST_TMP/shared/skills/mine"
+  printf '利用者のスキル\n' >"$TEST_TMP/shared/skills/mine/SKILL.md"
+  ln -s "$TEST_TMP/shared/skills/mine" "$TARGET/.claude/skills/mine"
+  _run_uninstall
+  assert_file_exists "$TARGET/.claude/skills/mine"
+  assert_contains "$(cat "$TARGET/.claude/skills/mine/SKILL.md")" "利用者のスキル" "スキルの内容"
+}
+
+test_空白入りパスの非クォート登録も外せる() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  # クォートせずに登録していた頃の残骸。単純な先頭トークンの basename では
+  # "with" になり同定できず、外れないまま「1 件外した」と報告される。
+  cat >"$SETTINGS" <<EOF
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "$TEST_TMP/my clone/scripts/handoff-check.sh" } ] }
+    ]
+  }
+}
+EOF
+  _run_uninstall
+  _load_hook_commands SessionStart
+  assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "SessionStart のコマンド"
+}
+
+test_Windows_風のパスで登録されたフックも外せる() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  cat >"$SETTINGS" <<'EOF'
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "C:\\Users\\me\\cts\\scripts\\handoff-check.sh" } ] }
+    ]
+  }
+}
+EOF
+  _run_uninstall
+  _load_hook_commands SessionStart
+  assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "SessionStart のコマンド"
+}
+
+test_インタプリタ経由で登録されたフックも外せる() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  cat >"$SETTINGS" <<'EOF'
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "bash /opt/cts/scripts/handoff-check.sh" } ] }
+    ]
+  }
+}
+EOF
+  _run_uninstall
+  _load_hook_commands SessionStart
+  assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "SessionStart のコマンド"
+}
+
+test_二重登録を残さない() {
+  _setup_target
+  local clone="$TEST_TMP/my clone"
+  _clone_repo "$clone"
+  mkdir -p "$TARGET/.claude"
+  # 旧版が非クォートで登録した状態から、新版で install し直す場面。
+  cat >"$SETTINGS" <<EOF
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "$clone/scripts/handoff-check.sh" } ] }
+    ]
+  }
+}
+EOF
+  bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
+  _load_hook_commands SessionStart
+  assert_count 1 "$HOOK_COMMANDS" "handoff-check.sh" "handoff-check.sh の登録数"
+}
+
+test_未導入のリポジトリの_settings_を再整形しない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  cat >"$SETTINGS" <<'EOF'
+{
+    "permissions": {"allow": ["Bash(ls:*)"]}
+}
+EOF
+  local before
+  before="$(cat "$SETTINGS")"
+  _run_uninstall
+  # 一度も導入していない利用者のファイルを、取り外しのついでに書き換えない。
+  assert_eq "$before" "$(cat "$SETTINGS")" "settings.local.json"
+}
+
+test_gitignore_のブロックが2つあれば両方削除する() {
+  _setup_target
+  {
+    printf '%s\n.claude/.handoff/\n%s\n' "$GITIGNORE_START" "$GITIGNORE_END"
+    printf 'dist/\n'
+    printf '%s\n.claude/.handoff/\n%s\n' "$GITIGNORE_START" "$GITIGNORE_END"
+  } >"$TARGET/.gitignore"
+  _run_uninstall
+  local gi
+  gi="$(_gitignore_text)"
+  assert_not_contains "$gi" "$GITIGNORE_START" ".gitignore"
+  assert_not_contains "$gi" "$GITIGNORE_END" ".gitignore"
+  assert_contains "$gi" "dist/" ".gitignore"
+}
+
+test_末尾の空行は往復で保たれる() {
+  _setup_target
+  printf 'a\nb\n\n\n\n' >"$TARGET/.gitignore"
+  _run_install
+  _run_uninstall
+  local actual
+  actual="$(python3 -c 'import sys; print(repr(open(sys.argv[1]).read()))' "$TARGET/.gitignore")"
+  assert_eq "'a\nb\n\n\n\n'" "$actual" ".gitignore"
+}
+
+test_内容が同じ控えは片付ける() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' >"$SETTINGS"
+  _run_install
+  _run_uninstall
+  # 原状へ戻ったのに控えだけ残ると、個人設定のコピーが放置される。
+  assert_file_missing "$SETTINGS.cts-backup"
+}
+
+test_控えと差があれば残して知らせる() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' >"$SETTINGS"
+  _run_install
+  python3 -c '
+import json, sys
+p = sys.argv[1]
+with open(p) as f:
+    d = json.load(f)
+d["env"] = {"FOO": "bar"}
+with open(p, "w") as f:
+    json.dump(d, f)
+' "$SETTINGS"
+  _run_uninstall
+  assert_file_exists "$SETTINGS.cts-backup"
+  assert_contains "$UNINSTALL_OUT" "cts-backup" "出力"
+}
+
+test_gitignore_が壊れていれば完了と言わず警告をまとめる() {
+  _setup_target
+  printf 'dist/\n%s\n' "$GITIGNORE_START" >"$TARGET/.gitignore"
+  _run_uninstall
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "警告" "出力"
+  # 何も外せていないのに「完了。」で終わると、取り残しに気づけない。
+  assert_not_contains "$UNINSTALL_OUT" "完了。" "出力"
+}
+
+test_CTS_STRICT_なら警告で非ゼロを返す() {
+  _setup_target
+  printf 'dist/\n%s\n' "$GITIGNORE_START" >"$TARGET/.gitignore"
+  local rc=0
+  CTS_STRICT=1 bash "$UNINSTALL" "$TARGET" >/dev/null 2>&1 || rc=$?
+  assert_ne "0" "$rc" "終了コード"
+}
+
+test_追跡済みの空の_gitignore_は消さない() {
+  _setup_target
+  : >"$TARGET/.gitignore"
+  ( cd "$TARGET" &&
+    git add .gitignore &&
+    git -c user.email=t@example.com -c user.name=t commit -qm '空の gitignore' ) >/dev/null 2>&1
+  _run_install
+  _run_uninstall
+  # install.sh が作ったのでなければ、空になっても消してはならない。
+  assert_file_exists "$TARGET/.gitignore"
+}
+
+test_台帳を残さない() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  assert_file_missing "$TARGET/.claude/.token-saver/installed.json"
 }
 
 test_install_前から在った_gitignore_は消さない() {

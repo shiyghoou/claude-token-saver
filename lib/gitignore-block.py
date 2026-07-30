@@ -4,37 +4,74 @@
 #   gitignore-block.py apply  <path>   # 本文を標準入力から受け取り、無ければ追記・あれば差し替え
 #   gitignore-block.py remove <path>   # ブロックを削除する
 #
+# 終了コード: 0=変更した / 2=警告（何も変更していない） / 3=変更不要
+#
 # install.sh と uninstall.sh の双方がこれを呼ぶ。ブロックの境界判定を2箇所に
 # 書くと、片方だけが綴りを変えたときに「END が見つからず EOF まで削除」という
 # 破壊的な取り違えが起きる。判定はここ1箇所に閉じる。
 
 import os
 import sys
-import tempfile
+
+# 導入先から呼ばれる道具である。クローンに __pycache__ を書き散らさない。
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ledger  # noqa: E402  (write_atomic を共有する)
 
 START = "# claude-token-saver (install.sh が追記。uninstall.sh で削除される)"
 END = "# claude-token-saver end"
 
+EXIT_OK = 0
+EXIT_WARN = 2
+EXIT_UNCHANGED = 3
 
-def find_block(lines):
-    """START と END の対が揃っている区間 (start, end) を返す。揃わなければ None。
+
+def find_blocks(lines):
+    """START と END の対が揃っている区間 (start, end) をすべて返す。
+
+    1つ目で打ち切らない。別クローンからの旧 install やマージ衝突の両採用で
+    ブロックが2つになることがあり、1つしか見ないと片方が永久に残る。
+    残ったブロックは対が揃っているため警告にも引っかからない。
 
     前方一致ではなく完全一致で判定する。前方一致にすると、利用者が書いた
     「# claude-token-saver は便利」のような1行を START と誤認し、そこから
     EOF までを削除してしまう。
     """
+    spans = []
     start = None
     for i, line in enumerate(lines):
         s = line.strip()
         if s == END and start is not None:
-            return (start, i)
-        if s == START and start is None:
+            spans.append((start, i))
+            start = None
+        elif s == START and start is None:
             start = i
-    return None
+    return spans
 
 
-def has_marker(lines):
-    return any(line.strip() in (START, END) for line in lines)
+def stray_markers(lines, spans):
+    """対になっていないマーカーの (行番号, 行) を返す。行番号は1始まり。"""
+    inside = set()
+    for start, end in spans:
+        inside.update(range(start, end + 1))
+    return [
+        (i + 1, line.strip())
+        for i, line in enumerate(lines)
+        if i not in inside and line.strip() in (START, END)
+    ]
+
+
+def warn_unpaired(path, strays, action):
+    sys.stderr.write(
+        "  警告: %s の claude-token-saver ブロックが START/END の対になっていない。\n" % path
+    )
+    for lineno, text in strays:
+        sys.stderr.write("        %d 行目: %s\n" % (lineno, text))
+    sys.stderr.write(
+        "        %s。手で直せ。対にすべき2行は次のとおり:\n"
+        "          START: %s\n"
+        "          END:   %s\n" % (action, START, END)
+    )
 
 
 def read_text(path):
@@ -42,19 +79,6 @@ def read_text(path):
         return None
     with open(path, encoding="utf-8") as f:
         return f.read()
-
-
-def write_atomic(path, text):
-    d = os.path.dirname(path) or "."
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".gitignore-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    except Exception:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
 
 
 def render(lines):
@@ -67,23 +91,29 @@ def cmd_apply(path):
     body = sys.stdin.read().splitlines()
     block = [START] + body + [END]
 
-    span = find_block(lines)
-    if span is not None:
+    spans = find_blocks(lines)
+    strays = stray_markers(lines, spans)
+    if strays:
+        warn_unpaired(path, strays, "取り違えて削除しないよう、.gitignore は変更しない")
+        return EXIT_WARN
+
+    if spans:
         # 中身は毎回作り直す。存在確認だけで済ませると、スキルが増えたときや
         # 出力先が増えたときに追記が永久に反映されない。
-        out = lines[: span[0]] + block + lines[span[1] + 1 :]
+        # 先頭のブロックを差し替え、残りは削除して1つに畳む。
+        out = lines[: spans[0][0]] + block + lines[spans[0][1] + 1 :]
+        offset = len(block) - (spans[0][1] - spans[0][0] + 1)
+        for start, end in reversed(spans[1:]):
+            del out[start + offset : end + offset + 1]
+            # 畳んだ跡に、区切りとして入っていた空行1行だけを取り除く。
+            if start + offset > 0 and out[start + offset - 1].strip() == "":
+                del out[start + offset - 1]
         verb = "更新した"
-    elif has_marker(lines):
-        sys.stderr.write(
-            "  警告: %s の claude-token-saver ブロックが START/END の対になっていない。\n"
-            "        取り違えて削除しないよう、.gitignore は変更しない。手で直せ。\n" % path
-        )
-        return 2
     else:
         out = list(lines)
-        # 既存の行と1行だけ空けて区切る。末尾の空行の数は元の状態に依らず揃える。
-        while out and out[-1].strip() == "":
-            out.pop()
+        # 既存の行と1行空けて区切る。末尾の空行を一律に潰すと、利用者が
+        # 意図して空けた行が失われ、remove しても元へ戻らない。
+        # 区切りの空行はここで必ず1行だけ足し、remove がその1行だけを外す。
         if out:
             out.append("")
         out += block
@@ -92,40 +122,40 @@ def cmd_apply(path):
     new_text = render(out)
     if new_text == original:
         print("  .gitignore は最新である")
-        return 0
+        return EXIT_UNCHANGED
 
-    write_atomic(path, new_text)
+    ledger.write_atomic(path, new_text)
     print("  .gitignore へ%s" % verb)
-    return 0
+    return EXIT_OK
 
 
 def cmd_remove(path):
     original = read_text(path)
     if original is None:
-        return 0
+        return EXIT_OK
     lines = original.splitlines()
 
-    span = find_block(lines)
-    if span is None:
-        if has_marker(lines):
-            sys.stderr.write(
-                "  警告: %s の claude-token-saver ブロックが START/END の対になっていない。\n"
-                "        巻き込んで削除しないよう、何も削除しない。手で直せ。\n" % path
-            )
-        else:
-            print("  .gitignore に追記は無い")
-        return 0
+    spans = find_blocks(lines)
+    strays = stray_markers(lines, spans)
+    if strays:
+        warn_unpaired(path, strays, "巻き込んで削除しないよう、何も削除しない")
+        return EXIT_WARN
+    if not spans:
+        print("  .gitignore に追記は無い")
+        return EXIT_OK
 
-    start, end = span
-    out = lines[:start] + lines[end + 1 :]
-    # install.sh が区切りに入れた空行1行だけを、消した位置の直前から取り除く。
-    # 末尾の空行を一律に削ると、ブロックと無関係な空行まで失われる。
-    if start > 0 and out[start - 1].strip() == "":
-        del out[start - 1]
+    out = list(lines)
+    # 後ろから消す。前から消すと以降の行番号がずれる。
+    for start, end in reversed(spans):
+        del out[start : end + 1]
+        # install.sh が区切りに入れた空行1行だけを、消した位置の直前から取り除く。
+        # 末尾の空行を一律に削ると、ブロックと無関係な空行まで失われる。
+        if start > 0 and out[start - 1].strip() == "":
+            del out[start - 1]
 
-    write_atomic(path, render(out))
+    ledger.write_atomic(path, render(out))
     print("  .gitignore の追記を削除した")
-    return 0
+    return EXIT_OK
 
 
 def main(argv):

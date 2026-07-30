@@ -17,10 +17,18 @@ _run_install() {
   INSTALL_ERR="$(cat "$TEST_TMP/.err")"
 }
 
-# settings.local.json から指定フックのコマンド一覧を取り出す。
-_hook_commands() {
+# settings.local.json から指定フックのコマンド一覧を HOOK_COMMANDS へ読み込む。
+# 「登録が消えた」と「ファイルが読めなかった」を取り違えないため、
+# 不在は明示的な文言を返し、解析できないときはテストを失敗させる。
+# コマンド置換の中で呼ぶと _fail のサブシェル脱出が握り潰されるので、
+# 変数へ入れる形にしている。
+_load_hook_commands() {
   local event="$1"
-  python3 -c '
+  if [ ! -f "$SETTINGS" ]; then
+    HOOK_COMMANDS='(settings.local.json は存在しない)'
+    return 0
+  fi
+  HOOK_COMMANDS="$(python3 -c '
 import json, sys
 event = sys.argv[1]
 with open(sys.argv[2]) as f:
@@ -28,7 +36,18 @@ with open(sys.argv[2]) as f:
 for group in data.get("hooks", {}).get(event, []):
     for h in group.get("hooks", []):
         print(h.get("command", ""))
-' "$event" "$SETTINGS"
+' "$event" "$SETTINGS" 2>"$TEST_TMP/.hookerr")" ||
+    _fail "settings.local.json を解析できない: $(cat "$TEST_TMP/.hookerr")"
+}
+
+_hook_commands() {
+  _load_hook_commands "$1" || exit 1
+  printf '%s\n' "$HOOK_COMMANDS"
+}
+
+# パーミッションを 8 進で返す。GNU と BSD で書式が違う。
+_perm() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
 }
 
 test_settings_が無ければ作って_SessionStart_に登録する() {
@@ -167,8 +186,15 @@ test_存在しないフックスクリプトは登録しない() {
   _run_install
   # 段階3で追加される Stop フックは、実体が無いうちは登録してはならない。
   # 実体の無いコマンドを登録すると、導入先のセッションでフックが毎回失敗する。
-  if [ ! -f "$REPO_ROOT/scripts/suggest-session-cut.sh" ]; then
-    assert_not_contains "$(_hook_commands Stop 2>/dev/null || true)" "suggest-session-cut.sh" "Stop のコマンド"
+  # 実体が現れたら登録されることまで見る。条件付きスキップにすると、
+  # 段階3でファイルが増えた瞬間にテストが丸ごと空振りして恒久的に緑になる。
+  _load_hook_commands Stop
+  if [ -f "$REPO_ROOT/scripts/suggest-session-cut.sh" ]; then
+    assert_contains "$HOOK_COMMANDS" "suggest-session-cut.sh" "Stop のコマンド"
+  else
+    assert_not_contains "$HOOK_COMMANDS" "suggest-session-cut.sh" "Stop のコマンド"
+    # 未実装であることは、取りこぼしの警告ではなく予定として伝える。
+    assert_contains "$INSTALL_OUT" "段階3" "出力"
   fi
 }
 
@@ -257,7 +283,20 @@ _clone_repo() {
   return 0
 }
 
-_mtime() { stat -c %Y "$1"; }
+# mtime を秒で返す。GNU (stat -c) と BSD/macOS (stat -f) の双方を見る。
+# 取得できないまま空文字列を返すと assert_eq "" "" が成立し、実装を壊しても
+# 緑のままになる。取得できなければテストを失敗させる。
+_mtime() {
+  local m
+  m="$(stat -c %Y "$1" 2>/dev/null)" || m=""
+  [ -n "$m" ] || m="$(stat -f %m "$1" 2>/dev/null)" || m=""
+  [ -n "$m" ] || _fail "mtime を取得できない: $1"
+  printf '%s\n' "$m"
+}
+
+# _mtime は $( ) の中で呼ぶため、_fail の exit が握り潰される。
+# 先に一度だけ素で呼んで取得可能性を確かめる。
+_require_mtime() { _mtime "$1" >/dev/null; }
 
 test_クローンのパスに空白があってもフックが実行できる() {
   _setup_target
@@ -298,8 +337,9 @@ test_設置しなかったスキルは_gitignore_に書かない() {
 test_gitignore_に変化が無ければ書き込まない() {
   _setup_target
   _run_install
-  touch -d '2020-01-01 00:00:00' "$TARGET/.gitignore"
+  touch -t 202001010000 "$TARGET/.gitignore"
   local before after
+  _require_mtime "$TARGET/.gitignore"
   before="$(_mtime "$TARGET/.gitignore")"
   _run_install
   after="$(_mtime "$TARGET/.gitignore")"
@@ -376,12 +416,136 @@ test_バックアップは二度目の実行で上書きしない() {
 test_settings_に変化が無ければ書き込まない() {
   _setup_target
   _run_install
-  touch -d '2020-01-01 00:00:00' "$SETTINGS"
+  touch -t 202001010000 "$SETTINGS"
   local before after
+  _require_mtime "$SETTINGS"
   before="$(_mtime "$SETTINGS")"
   _run_install
   after="$(_mtime "$SETTINGS")"
   assert_eq "$before" "$after" "settings.local.json の mtime"
+}
+
+test_設置したものを台帳へ記録する() {
+  _setup_target
+  _run_install
+  # 「何を設置したか」を記録していないと、uninstall が推測で判定するしかなくなる。
+  local led
+  led="$(cat "$TARGET/.claude/.token-saver/installed.json")"
+  assert_contains "$led" "session-handoff" "台帳"
+  assert_contains "$led" "handoff-check.sh" "台帳"
+}
+
+test_クローンに__pycache__を書き散らさない() {
+  _setup_target
+  local clone="$TEST_TMP/clone"
+  _clone_repo "$clone"
+  bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
+  # 導入先から呼ばれる道具である。利用者のクローンに生成物を残さない。
+  assert_file_missing "$clone/lib/__pycache__"
+}
+
+test_利用者が張った同名スキルのリンクは上書きしない() {
+  _setup_target
+  # 導入先が自分の共有ディレクトリへ張ったリンク。実ディレクトリでないという
+  # だけで rm -rf すると、他人の設置物を黙って消す。
+  mkdir -p "$TEST_TMP/shared/skills/session-handoff"
+  printf '利用者の共有スキル\n' >"$TEST_TMP/shared/skills/session-handoff/SKILL.md"
+  mkdir -p "$TARGET/.claude/skills"
+  ln -s "$TEST_TMP/shared/skills/session-handoff" "$TARGET/.claude/skills/session-handoff"
+  _run_install
+  assert_contains "$(cat "$TARGET/.claude/skills/session-handoff/SKILL.md")" \
+    "利用者の共有スキル" "スキルの内容"
+  assert_contains "$INSTALL_OUT" "警告" "出力"
+}
+
+test_書き戻したファイルのパーミッションを保つ() {
+  _setup_target
+  printf 'node_modules/\n' >"$TARGET/.gitignore"
+  chmod 644 "$TARGET/.gitignore"
+  mkdir -p "$TARGET/.claude"
+  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' >"$SETTINGS"
+  chmod 644 "$SETTINGS"
+  _run_install
+  # .gitignore は追跡ファイルである。0600 に落とすと共有ワークツリーや CI で読めなくなる。
+  assert_eq "644" "$(_perm "$TARGET/.gitignore")" ".gitignore のパーミッション"
+  assert_eq "644" "$(_perm "$SETTINGS")" "settings.local.json のパーミッション"
+}
+
+test_新規作成するファイルは_umask_に従う() {
+  _setup_target
+  ( umask 022; bash "$INSTALL" "$TARGET" >/dev/null 2>&1 )
+  assert_eq "644" "$(_perm "$TARGET/.gitignore")" ".gitignore のパーミッション"
+  assert_eq "644" "$(_perm "$SETTINGS")" "settings.local.json のパーミッション"
+}
+
+test_settings_の書式は内容が同値なら保つ() {
+  _setup_target
+  _run_install
+  # 利用者が自分の書式へ整え直した状態を模す。登録内容が変わらないのに
+  # 再整形するのは、利用者のファイルを黙って書き換えることである。
+  python3 -c '
+import json, sys
+p = sys.argv[1]
+with open(p) as f:
+    d = json.load(f)
+with open(p, "w") as f:
+    f.write(json.dumps(d, ensure_ascii=False, indent=4) + "\n")
+' "$SETTINGS"
+  local before
+  before="$(cat "$SETTINGS")"
+  _run_install
+  assert_eq "$before" "$(cat "$SETTINGS")" "settings.local.json"
+}
+
+test_gitignore_のブロックが2つあれば1つに畳む() {
+  _setup_target
+  {
+    printf '%s\n.claude/.handoff/\n%s\n' "$GITIGNORE_START" "$GITIGNORE_END"
+    printf '%s\n.claude/.handoff/\n%s\n' "$GITIGNORE_START" "$GITIGNORE_END"
+  } >"$TARGET/.gitignore"
+  _run_install
+  # 別クローンからの旧 install やマージ衝突の両採用で容易に生じる。
+  # 片方を残すと、uninstall がそれを永久に取り残す。
+  assert_count 1 "$(cat "$TARGET/.gitignore")" "$GITIGNORE_END" "END マーカー"
+  assert_count 1 "$(cat "$TARGET/.gitignore")" "$GITIGNORE_START" "START マーカー"
+}
+
+test_クローンが不完全なら警告して完了と言わない() {
+  _setup_target
+  local clone="$TEST_TMP/broken"
+  _clone_repo "$clone"
+  rm -rf "$clone/scripts" "$clone/skills"
+  bash "$clone/install.sh" "$TARGET" >"$TEST_TMP/.out" 2>&1
+  local out
+  out="$(cat "$TEST_TMP/.out")"
+  assert_contains "$out" "警告" "出力"
+  assert_not_contains "$out" "完了。" "出力"
+}
+
+test_gitignore_の警告はマーカー文字列と行番号を示す() {
+  _setup_target
+  printf 'dist/\n%s\n' "$GITIGNORE_START" >"$TARGET/.gitignore"
+  _run_install
+  # 「手で直せ」と言うなら、直す手掛かりを出さねば従えない。
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "$GITIGNORE_END" "出力"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "2 行目" "出力"
+}
+
+test_利用者の空のフックイベントを消さない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{"hooks":{"Stop":[]}}\n' >"$SETTINGS"
+  _run_install
+  # 明示的な空は「何も登録しない」という設定意図である。
+  assert_contains "$(cat "$SETTINGS")" '"Stop"' "settings.local.json"
+}
+
+test_CTS_STRICT_なら警告で非ゼロを返す() {
+  _setup_target
+  printf 'dist/\n%s\n' "$GITIGNORE_START" >"$TARGET/.gitignore"
+  local rc=0
+  CTS_STRICT=1 bash "$INSTALL" "$TARGET" >/dev/null 2>&1 || rc=$?
+  assert_ne "0" "$rc" "終了コード"
 }
 
 test_警告があればサマリで再掲する() {

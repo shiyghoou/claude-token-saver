@@ -6,6 +6,7 @@
 #
 # 冪等である。二度実行しても設定は重複しない。
 # 環境変数 CTS_NO_SYMLINK=1 でスキルのリンクをコピーへ強制的に退避できる。
+# 環境変数 CTS_STRICT=1 で、警告があれば終了コードを非 0 にする（CI 向け）。
 
 set -uo pipefail
 
@@ -20,6 +21,9 @@ TARGET="$(cd "${1:-$PWD}" 2>/dev/null && pwd -P)" || {
 SETTINGS="$TARGET/.claude/settings.local.json"
 BACKUP="$SETTINGS.cts-backup"
 GITIGNORE="$TARGET/.gitignore"
+# 何を設置したかの台帳。uninstall.sh はこれを正として取り外す。
+# 記録が無いと、利用者が自分で張った同名のリンクまで巻き込んで消してしまう。
+LEDGER="$TARGET/.claude/.token-saver/installed.json"
 
 # ここまでに適用した作業。途中で失敗したときに、何が残っているかを伝える。
 applied=()
@@ -54,15 +58,28 @@ mkdir -p "$TARGET/.claude/.handoff/pending" \
   die "ディレクトリを作成できない"
 applied+=(".claude 配下のディレクトリを作成")
 
+# .gitignore を新規に作るかどうかは、この時点でしか分からない。
+# uninstall.sh が「空になったから消してよい」と判断する根拠になる。
+gitignore_existed=1
+[ -e "$GITIGNORE" ] || gitignore_existed=0
+
 # --- 2. フックの登録 ---------------------------------------------------------
 
 # 実体のあるスクリプトだけを登録する。存在しないコマンドを登録すると、
 # 導入先のセッションでフックが毎回失敗する。
 hook_specs=()
-[ -f "$CTS_HOME/scripts/handoff-check.sh" ] &&
+if [ -f "$CTS_HOME/scripts/handoff-check.sh" ]; then
   hook_specs+=("SessionStart:$CTS_HOME/scripts/handoff-check.sh")
-[ -f "$CTS_HOME/scripts/suggest-session-cut.sh" ] &&
+else
+  warn "scripts/handoff-check.sh が無いため SessionStart フックを登録しない（クローンが不完全である）"
+fi
+# suggest-session-cut.sh は段階3の成果物である。まだ無いのが正常なので、
+# 取りこぼしの警告ではなく予定として伝える。
+if [ -f "$CTS_HOME/scripts/suggest-session-cut.sh" ]; then
   hook_specs+=("Stop:$CTS_HOME/scripts/suggest-session-cut.sh")
+else
+  info "  Stop フック（セッション区切りの提案）は段階3で登録される"
+fi
 
 if [ "${#hook_specs[@]}" -gt 0 ]; then
   # settings.local.json は通常 git 管理外の個人設定である。git から復元でき
@@ -73,7 +90,8 @@ if [ "${#hook_specs[@]}" -gt 0 ]; then
     backup_path="$BACKUP"
   fi
 
-  python3 "$CTS_HOME/lib/settings-hooks.py" install "$SETTINGS" "${hook_specs[@]}" ||
+  python3 "$CTS_HOME/lib/settings-hooks.py" install "$SETTINGS" \
+    --ledger "$LEDGER" "${hook_specs[@]}" ||
     die "settings.local.json を更新できない"
   applied+=("settings.local.json へフックを登録")
 fi
@@ -85,9 +103,23 @@ mkdir -p "$TARGET/.claude/skills" || die "skills ディレクトリを作成で�
 
 # 実際に設置したスキルだけを .gitignore へ書くため、名前を集める。
 installed_skills=()
+found_skills=0
+
+# 台帳が無い旧環境向けの推測。リンク先が「どこかのクローンの skills/<同名>」で
+# あり、その親に install.sh が実在するときだけ自分のものとみなす。
+# basename と親ディレクトリ名だけで判定すると、利用者が社内共有の skills/ へ
+# 張ったリンクまで自分のものと誤認する。
+looks_like_our_link() {
+  local link="$1" name="$2" home
+  [ "$(basename "$link")" = "$name" ] || return 1
+  [ "$(basename "$(dirname "$link")")" = "skills" ] || return 1
+  home="$(dirname "$(dirname "$link")")"
+  [ -f "$home/install.sh" ]
+}
 
 for skill_dir in "$CTS_HOME"/skills/*/; do
   [ -d "$skill_dir" ] || continue
+  found_skills=$((found_skills + 1))
   name="$(basename "$skill_dir")"
   dest="$TARGET/.claude/skills/$name"
   src="${skill_dir%/}"
@@ -95,29 +127,51 @@ for skill_dir in "$CTS_HOME"/skills/*/; do
   # 既に正しくリンクされているなら何もしない。
   if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
     installed_skills+=("$name")
+    python3 "$CTS_HOME/lib/ledger.py" add-skill "$LEDGER" "$name" "$src" link ||
+      die "台帳を更新できない"
     continue
   fi
 
-  # 実ディレクトリがあり、それが install.sh のコピーでないなら触らない。
-  # 導入先が自前で置いたスキルを上書きすると、他人の作業を消す。
-  if [ -d "$dest" ] && [ ! -L "$dest" ] && [ ! -f "$dest/.claude-token-saver" ]; then
+  if [ -L "$dest" ]; then
+    # 別の場所を指すリンク。自分が過去に張ったもの（クローンを移した等）なら
+    # 張り替える。そうでなければ導入先の設置物なので触らない。
+    link="$(readlink "$dest")"
+    recorded="$(python3 "$CTS_HOME/lib/ledger.py" get-skill "$LEDGER" "$name" | cut -f1)"
+    if [ -n "$recorded" ] && [ "$recorded" = "$link" ]; then
+      : # 自分が張ったリンクである
+    elif [ -z "$recorded" ] && looks_like_our_link "$link" "$name"; then
+      : # 台帳の無い旧環境で張ったリンクとみなす
+    else
+      warn "スキル $name は導入先が張ったリンクなので触らない（$link）"
+      continue
+    fi
+  elif [ -d "$dest" ] && [ ! -f "$dest/.claude-token-saver" ]; then
+    # 実ディレクトリがあり、それが install.sh のコピーでないなら触らない。
+    # 導入先が自前で置いたスキルを上書きすると、他人の作業を消す。
     warn "スキル $name は導入先に既存のディレクトリがあるため触らない（.gitignore にも書かない）"
     continue
   fi
 
   rm -rf "$dest"
+  mode=link
   if [ -z "${CTS_NO_SYMLINK:-}" ] && ln -s "$src" "$dest" 2>/dev/null; then
     info "  スキルをリンクした: $name"
   else
     cp -R "$src" "$dest" || die "スキル $name を配置できない"
     # コピーであることを記録する。次回の install.sh が更新してよいと判断できるようにする。
     printf 'claude-token-saver が配置したコピー。手で編集しない。\n' >"$dest/.claude-token-saver"
+    mode=copy
     info "  スキルをコピーで配置した（シンボリックリンクが使えない環境）: $name"
     info "    リポジトリを更新したら install.sh を再実行してコピーを更新せよ。"
   fi
+  python3 "$CTS_HOME/lib/ledger.py" add-skill "$LEDGER" "$name" "$src" "$mode" ||
+    die "台帳を更新できない"
   installed_skills+=("$name")
   applied+=("スキル $name を設置")
 done
+
+[ "$found_skills" -gt 0 ] ||
+  warn "skills/ にスキルが1つも無いため何も設置していない（クローンが不完全である）"
 
 # --- 4. .gitignore -----------------------------------------------------------
 
@@ -138,10 +192,18 @@ done
 } | python3 "$CTS_HOME/lib/gitignore-block.py" apply "$GITIGNORE"
 gitignore_status=$?
 case "$gitignore_status" in
+  # applied は失敗時の唯一の説明手段である。実際に書いたときだけ積む。
   0) applied+=(".gitignore を更新") ;;
+  3) ;;
   2) warnings+=(".gitignore の claude-token-saver ブロックが壊れているため更新していない") ;;
   *) die ".gitignore を更新できない" ;;
 esac
+
+# 自分で作った .gitignore だけを、取り外しのときに消してよい。
+if [ "$gitignore_existed" = 0 ] && [ -e "$GITIGNORE" ]; then
+  python3 "$CTS_HOME/lib/ledger.py" set-flag "$LEDGER" gitignore_created 1 ||
+    die "台帳を更新できない"
+fi
 
 # --- 5. まとめ ---------------------------------------------------------------
 
@@ -152,6 +214,9 @@ if [ "${#warnings[@]}" -gt 0 ]; then
   info "警告 ${#warnings[@]} 件（未適用の項目がある）:"
   printf '  - %s\n' "${warnings[@]}"
   info "内容を確認せよ。取り消すには uninstall.sh を実行する。"
+  # CI から呼ぶと、未適用のまま rc=0 で通ってしまう。明示的に厳格を選べるようにする。
+  [ -n "${CTS_STRICT:-}" ] && exit 1
 else
   info "完了。新しいセッションを開始すると引き継ぎフックが有効になる。"
 fi
+exit 0
