@@ -1,0 +1,5 @@
+# claude-token-saver (install.sh が追記。uninstall.sh で削除される)
+.claude/.handoff/
+.claude/.token-saver/
+.claude/skills/session-handoff
+# claude-token-saver end
