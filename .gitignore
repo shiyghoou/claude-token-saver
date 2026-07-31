@@ -1,3 +1,6 @@
+# このリポジトリでは .claude/ 配下を追跡しない（開発中の作業痕跡が入るため）
+.claude/
+
 # claude-token-saver (install.sh が追記。uninstall.sh で削除される)
 .claude/.handoff/
 .claude/.token-saver/
