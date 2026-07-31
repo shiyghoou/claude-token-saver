@@ -650,6 +650,36 @@ test_git管理下では追跡ファイルの書き換えと未追跡ディレク
     "git 経路（porcelain 形式）で検出したことの確認"
 }
 
+# git の指紋には `.gitignore` の死角がある。無視されたパスは
+# `git status --porcelain -uall` に一切現れないため、git の指紋だけでは
+# 「本体が汚れたのに何も検出しない」まま緑になりうる。これはこのリポジトリが
+# 最も嫌う形（守りが黙って no-op になる）そのものであり、この死角を塞ぐために
+# 存在確認（_repo_pollution_probe）を並走させた。その存在確認自身が働いている
+# ことを、`.gitignore` で実際に隠したうえで確かめる。
+test_gitignoreに隠れた汚染も存在確認で検出する() {
+  _make_runner_dir
+  ( cd "$TEST_TMP" &&
+    git init -q . &&
+    printf '.token-saver/\n' >.gitignore &&
+    git add install.sh .gitignore &&
+    git -c user.email=t@example.com -c user.name=t commit -qm '種まき'
+  ) >/dev/null 2>&1 || _fail "複製先の git init に失敗した"
+  _put_test_file subject '  test_gitignoreで隠れた場所を汚す() {
+    mkdir -p "$REPO_ROOT/.token-saver"
+    : >"$REPO_ROOT/.token-saver/leaked.json"
+    @A@eq a a "何もしない"
+  }'
+  _run_runner
+  # git の指紋だけを見ていれば、.gitignore が隠すため何も検出できず緑になる
+  # （このアサーションが無くても以降の3本で赤は確認できるが、「なぜこの
+  # 存在確認が要るのか」を裏づけるために明示しておく）。
+  assert_not_contains "$RUNNER_OUT" "?? .token-saver" \
+    "git の指紋は .gitignore に隠れて何も拾わない（前提の確認）"
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード（存在確認が拾って赤になる）"
+  assert_contains "$RUNNER_OUT" ".gitignore 越しの見逃し" "存在確認の側が打ち切ったことを示す文言"
+  assert_contains "$RUNNER_OUT" ".token-saver" "汚染したパス"
+}
+
 # このゲート自体が誤検知しないこと。本体を汚さない健全なテストでは
 # 打ち切らない。
 test_本体が汚れていなければ打ち切らない() {

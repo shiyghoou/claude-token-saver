@@ -145,10 +145,28 @@ _check_assert_layer
 #
 # 違反があればテストを1本も走らせずに打ち切る。1箇所の直し忘れを
 # 「他は緑だから大丈夫」と読ませないためである。
+#
+# 対象がここに挙げたもの以外を意図して見ないことも書いておく。「何を見るか」
+# だけを書いて「何を見ないか」を書かずにいたら、skills/** がこのゲートの
+# 対象から漏れていることに誰も気づかなかった（本レビューで指摘されるまで）。
+#   - test/ は対象外。契約テストはリテラルを直書きする規約であり（理由は
+#     上のコメント参照）、ここへ含めると実装とテストが同じ定義を参照するだけに
+#     なって、パスがまるごと間違っていても両者が一致して緑になる。
+#   - docs/ と README.md は対象外。散文であり、パスへ触れること自体が目的の
+#     文書を検査対象にする理由が無い。
+#   - skills/** は対象外。Markdown にはコメント構文が無く、新パスに許している
+#     「行頭コメントは免除する」という緩和が効かない。素朴に対象へ含めると
+#     散文の中でパスへ言及すること自体が書けなくなる。その代わりに
+#     test/test-paths.sh の一致性テスト（SKILL.md が cts_handoff_rel() に
+#     追随しているかを確かめるテスト）で守る。
 _check_path_literals() {
-  local targets=() legacy_hits new_hits paths_sh
-  [ -f "$REPO_ROOT/install.sh" ] && targets+=("$REPO_ROOT/install.sh")
-  [ -f "$REPO_ROOT/uninstall.sh" ] && targets+=("$REPO_ROOT/uninstall.sh")
+  local targets=() legacy_hits new_hits paths_sh sh_file
+  # ルート直下は2ファイルの決め打ちではなく *.sh を丸ごと対象にする。
+  # install.sh / uninstall.sh の2つを名指しすると、明日 migrate.sh や
+  # doctor.sh がルートへ増えたときにゲートの対象へ入らず、無警告の穴になる。
+  for sh_file in "$REPO_ROOT"/*.sh; do
+    [ -f "$sh_file" ] && targets+=("$sh_file")
+  done
   [ -d "$REPO_ROOT/scripts" ] && targets+=("$REPO_ROOT/scripts")
   [ -d "$REPO_ROOT/lib" ] && targets+=("$REPO_ROOT/lib")
 
@@ -248,7 +266,42 @@ _repo_fingerprint() {
   fi
 }
 
+# git の指紋には死角が1つある。`git status --porcelain -uall` は
+# `.gitignore` で無視されたパスを一切列挙しない。このリポジトリの
+# `.gitignore` は `.claude/` を丸ごと無視しているため、その配下の汚染は
+# 最初から見えていない。`.token-saver/` も今のところ見えているだけで、
+# それはこのリポジトリ自身の `# claude-token-saver` ブロックが旧パス
+# （`.claude/.handoff/` 等）のまま更新されずに残っているという偶然による。
+# 誰かがこのリポジトリで `install.sh` を再実行すれば（保守として普通に
+# 起こりうる）、移行が走ってブロックは新パス（`.token-saver/`）へ再生成され、
+# その瞬間から `.token-saver/` も無視対象になり、この汚染ゲートは git の
+# 経路だけでは何も検出しなくなる。
+#
+# 対策の候補は2つあった。`--ignored=matching` に切り替えて無視パスも
+# 指紋へ含める案は採らない。それをやると `.superpowers/` や `.claude/` の
+# 中身まで指紋に含まり、`.superpowers/` は開発セッション中に本ツール以外の
+# 仕組みが実際に書き込む場所である。無関係な変化で毎回赤くなるゲートは、
+# それを守るはずの開発者自身の手で無効化される。今まさに塞ごうとしている
+# 「守りが黙って no-op になる」欠陥が、別の道から戻ってくるだけである。
+#
+# 採るのは、`git status` を主とした指紋はそのまま残し、`.gitignore` に
+# まったく依存しない存在確認を並走させる案である。対象は token-saver 自身が
+# 作りうる器（新パスと、まだこのリポジトリの `.gitignore` が無視できていない
+# 旧パス）に絞る。「今は無視されていないから」ではなく「無視されていても
+# 検出する」ことが目的なので、無視されているかどうかで対象を選ばない。
+_repo_pollution_probe() {
+  local p
+  for p in "$REPO_ROOT/.token-saver" \
+           "$REPO_ROOT/.claude/.handoff" \
+           "$REPO_ROOT/.claude/.token-saver"; do
+    if [ -e "$p" ] || [ -L "$p" ]; then
+      printf '%s\n' "$p"
+    fi
+  done
+}
+
 _REPO_BEFORE="$(_repo_fingerprint)"
+_REPO_POLLUTION_BEFORE="$(_repo_pollution_probe)"
 
 PATTERN="${1:-}"
 
@@ -548,6 +601,19 @@ if [ "$_REPO_BEFORE" != "$_repo_after" ]; then
   diff <(printf '%s\n' "$_REPO_BEFORE") <(printf '%s\n' "$_repo_after") >&2 || true
   fail_count=$((fail_count + 1))
   failed_names+=("(リポジトリ本体の汚染)")
+fi
+
+# git の指紋は `.gitignore` に無視されたパスを見ない。並走させた存在確認で、
+# git の指紋が無視して見逃した汚染を拾う。git の指紋と同じ扱い（fail_count
+# へ積むだけで打ち切らない）にするのは、結果の一覧を最後まで出し切ってから
+# 報告するという既存の方針を崩さないためである。
+_repo_pollution_after="$(_repo_pollution_probe)"
+if [ "$_REPO_POLLUTION_BEFORE" != "$_repo_pollution_after" ]; then
+  printf 'エラー: テストがリポジトリ本体を汚染した（.gitignore に隠れて git の指紋では見えない）\n' >&2
+  printf '       実行前後の差:\n' >&2
+  diff <(printf '%s\n' "$_REPO_POLLUTION_BEFORE") <(printf '%s\n' "$_repo_pollution_after") >&2 || true
+  fail_count=$((fail_count + 1))
+  failed_names+=("(リポジトリ本体の汚染: .gitignore 越しの見逃し)")
 fi
 
 # 実行件数の下限を検査する。ファイルが丸ごと消えても「成功 N 件」としか出ないため、
