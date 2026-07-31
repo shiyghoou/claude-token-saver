@@ -10,6 +10,15 @@
 #
 # docker が無い環境では失敗する。黙って飛ばすと、この防御が「あるつもり」の
 # まま消える。ローカルで回せないなら CI（.github/workflows/test.yml）に任せること。
+#
+# ここで bash 3.2 の実機確認が通るのは scripts/handoff-check.sh だけである。
+# install.sh / uninstall.sh はここでは一切走らせていない。両者は python3 を
+# 呼ぶが、`bash:3.2` イメージ（Debian ベースの最小構成）には python3 が入って
+# おらず、確認しようとしても「python3 が必要である」で即 die する。
+# フックだけが対象なのは手抜きではなく、フックだけが python3 に依存しない
+# 設計だからである（install.sh 冒頭のコメント参照）。install.sh /
+# uninstall.sh の bash 3.2 面での確認が要るなら、python3 入りの別イメージを
+# 別途用意する必要がある。ここにカバレッジがあると誤解しないこと。
 
 set -uo pipefail
 
