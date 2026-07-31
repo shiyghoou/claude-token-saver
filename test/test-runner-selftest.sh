@@ -605,28 +605,49 @@ test_複製先が_git_管理下でなくても本体の汚染を検出する() {
   assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
   assert_contains "$RUNNER_OUT" "リポジトリ本体を変更した" "ランナー出力"
   assert_contains "$RUNNER_OUT" "leaked-from-test" "汚したファイルの名前"
+  # git 管理下でない枝が実際に走ったことを形で確かめる。フォールバックの
+  # 指紋はタブ区切りの「path<TAB>file<TAB>チェックサム」であり、porcelain の
+  # 「?? path」とは形が違う。ここでこの形が出ていなければ、実は git 管理下に
+  # 巻き込まれていて（$TMPDIR が git リポジトリの中にある等）、非 git の枝を
+  # 検証したつもりで何も検証していないことになる。
+  assert_contains "$RUNNER_OUT" "$(printf 'leaked-from-test\tfile\t')" \
+    "非 git 経路（タブ区切り）の指紋形式"
 }
 
 # 本物のリポジトリでは git が使える。追跡ファイルの書き換えと未追跡ファイルの
 # 増加の両方を見ることを、複製先を明示的に git 管理下へ置いて確かめる
 # （controller の候補: 「複製先のテストでは、種まきした $TEST_TMP を git init
 # して git 管理下にする」）。
-test_git管理下では追跡ファイルの書き換えと未追跡ファイルの増加の両方を検出する() {
+#
+# 汚染は「既存の未追跡ディレクトリの中」に作る。git status の既定
+# （-unormal 相当）は未追跡ディレクトリを `?? dir/` の1行へ畳み、中の
+# 増減を区別しない。リポジトリ直下に汚染を作るだけでは -unormal でも
+# -uall でも同じく検出できてしまい、-uall を使っていることの証拠にならない。
+test_git管理下では追跡ファイルの書き換えと未追跡ディレクトリの中の増加も検出する() {
   _make_runner_dir
   ( cd "$TEST_TMP" &&
     git init -q . &&
     git add install.sh &&
-    git -c user.email=t@example.com -c user.name=t commit -qm '種まき' ) >/dev/null 2>&1
-  _put_test_file subject '  test_追跡ファイルを書き換え未追跡ファイルも増やす() {
+    git -c user.email=t@example.com -c user.name=t commit -qm '種まき'
+  ) >/dev/null 2>&1 || _fail "複製先の git init に失敗した"
+  mkdir -p "$TEST_TMP/untracked-dir"
+  : >"$TEST_TMP/untracked-dir/existing.txt"
+  _put_test_file subject '  test_追跡ファイルを書き換え未追跡ディレクトリの中も増やす() {
     printf "leaked\n" >>"$REPO_ROOT/install.sh"
-    : >"$REPO_ROOT/leaked-from-test"
+    : >"$REPO_ROOT/untracked-dir/leaked-inside.txt"
+    ln -s /nonexistent "$REPO_ROOT/untracked-dir/leaked-link"
     assert_eq a a "何もしない"
   }'
   _run_runner
   assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
   assert_contains "$RUNNER_OUT" "リポジトリ本体を変更した" "ランナー出力"
   assert_contains "$RUNNER_OUT" "install.sh" "追跡ファイルの書き換えを検出"
-  assert_contains "$RUNNER_OUT" "leaked-from-test" "未追跡ファイルの増加を検出"
+  assert_contains "$RUNNER_OUT" "untracked-dir/leaked-inside.txt" \
+    "既存の未追跡ディレクトリの中の増加を検出（-uall が無ければ dir/ の1行に畳まれて見えない）"
+  # git の枝が実際に走ったことを porcelain の形で確かめる（フォールバックとは
+  # 形が違うタブ無しの "?? path" 形式）。
+  assert_contains "$RUNNER_OUT" "?? untracked-dir/leaked-inside.txt" \
+    "git 経路（porcelain 形式）で検出したことの確認"
 }
 
 # このゲート自体が誤検知しないこと。本体を汚さない健全なテストでは

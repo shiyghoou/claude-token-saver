@@ -236,7 +236,13 @@ _repo_fingerprint_no_git() {
 
 _repo_fingerprint() {
   if _repo_is_git; then
-    git -C "$REPO_ROOT" status --porcelain 2>/dev/null | LC_ALL=C sort
+    # -uall が必須である。既定（-unormal 相当）は未追跡ディレクトリを
+    # `?? dir/` の1行へ畳むため、その中にファイルやリンクが増えても
+    # porcelain の出力は変わらない（実測で確認済み: 既に未追跡の
+    # ディレクトリの中へファイルとリンクを1つずつ足しても出力がバイト単位で
+    # 同一になり、このゲートが丸ごと no-op になる）。それはまさにこの
+    # ゲートが存在する理由（本体の汚染を見逃さない）を裏切る。
+    git -C "$REPO_ROOT" status --porcelain -uall 2>/dev/null | LC_ALL=C sort
   else
     _repo_fingerprint_no_git
   fi
