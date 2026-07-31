@@ -56,3 +56,25 @@ test_フックの置き場所が新パスを組み立てる() {
   assert_eq "$PWD/.token-saver/handoff" "$(cts_handoff_dir)" "cts_handoff_dir"
   assert_eq "$PWD/.token-saver" "$(cts_state_dir)" "cts_state_dir"
 }
+
+# SKILL.md はモデルへの指示であり、書き込み先を選ぶのはこの文書である。
+# test/run.sh の静的ゲートは skills/** を対象外にしている（Markdown にはコメント
+# 構文が無く、行頭 # の免除が効かないため、パス直書きを許すと散文が書けなくなる）。
+# その結果 SKILL.md の書き込み先はゲートにもテストにも縛られていない。
+# cts_handoff_rel() を変えても SKILL.md が追随しなければ、モデルは旧い場所へ
+# 書き続け、フックは新しい場所しか読まない。エラーにはならず、引き継ぎが
+# 静かに二度と注入されなくなるだけである。
+#
+# ここで paths.sh から期待値を導出するのは「二層問題」（同じ定義をテストと実装の
+# 両方に置くと、まるごと間違っていても両者が一致して緑になる）には当たらない。
+# 値そのものの契約は test_新パスの相対パスを返す がリテラルで別途ピン留めして
+# いるため、このテストが守るのは値ではなく「SKILL.md が paths.sh の値に追随して
+# いるか」という一致性である。paths.sh 側の値が丸ごと間違っていれば、上のリテラル
+# 契約テストが単独で赤くなる。
+test_SKILL_MDの保存先がpathsshと一致する() {
+  _load_paths
+  local skill_md
+  skill_md="$(cat "$REPO_ROOT/skills/session-handoff/SKILL.md")"
+  assert_contains "$skill_md" "$(cts_handoff_rel)/pending" \
+    "SKILL.md の保存先が cts_handoff_rel() と一致する"
+}
