@@ -10,6 +10,23 @@
 
 設計書: `docs/specs/2026-07-31-token-saver-root-dir-design.md`
 
+## 実行順の改訂（2026-07-31、Task 2 完了時）
+
+**実行順は `2 → 4 → 5 → 3 → 6 → 7 → 10 → 8 → 9` である。** 番号順ではない。
+
+Task 2 で `install.sh` が台帳を新パスへ書くようになった時点で、旧パスを読む
+`uninstall.sh` が台帳を見つけられず、`test-uninstall.sh` の 15 件が赤になる。
+当初の順（2 → 3 → 4）では赤を2タスク分抱えることになり、各タスクの
+「全緑で終わる」という完了条件が成立しない。uninstall 側（Task 4、5）を先に
+片付けて緑を回復させ、そのあとで移行（Task 3）へ移る。Task 3 は `install.sh`
+だけを触るため、順序を入れ替えても依存は壊れない。
+
+**Task 2 の Step 4 にある「期待: 全緑」は誤りである。** Task 2 の完了時点では
+`test-uninstall.sh` の 15 件が赤であることが正しい状態であり、Task 4 で緑に戻る。
+
+Task 10 はテストの隔離の破れを塞ぐタスクで、Task 2 の実行中に発見した既存欠陥に
+対して追加した。`test/run.sh` を触るため Task 7 の後に置く。
+
 ## Global Constraints
 
 - **bash 3.2 で動くこと。** 連想配列（`declare -A`）、`mapfile`、`${var,,}`、`+=` での配列展開のガード無し参照を実装コード（`install.sh` / `uninstall.sh` / `scripts/**`）に持ち込まない。配列展開は必ず `${arr[@]+"${arr[@]}"}` の形でガードする。`test/run.sh` は開発環境の bash で走るため連想配列を使ってよい（既に使っている）。
@@ -1402,3 +1419,166 @@ gh pr checks 1
 
 **このタスクでコミットや push を勝手に済ませてはならない。** push は Step 5 で
 行うが、`squash merge` はユーザーの指示を待つ。
+
+---
+
+### Task 10: テストの隔離の破れを塞ぐ
+
+**Files:**
+- Modify: 原因となったテストファイル（調査で特定する。`test/test-install.sh` または `test/test-uninstall.sh` が有力）
+- Modify: `test/run.sh`（リポジトリ本体の汚染を検出するゲート）
+- Modify: `test/test-runner-selftest.sh`
+- Modify: `test/expected-min-count`
+
+**Interfaces:**
+- Consumes: Task 7 の `test/run.sh` の冒頭ゲート群（`_check_assert_layer`、`_check_path_literals`）
+- Produces: `test/run.sh` はテスト実行の前後でリポジトリ本体の汚染を検出し、汚れていれば赤にする。
+
+Task 2 の実行中に、リポジトリの追跡対象ディレクトリの中に壊れたシンボリックリンクが
+残っているのを発見した。
+
+```
+skills/session-handoff/session-handoff -> /tmp/cts-test.PaUHqB/shared/skills/session-handoff
+```
+
+`$TEST_TMP` の下に作った「利用者の共有クローン」を指すリンクが、**導入先ではなく
+`claude-token-saver` 本体の `skills/session-handoff/` の中**に作られている。テストの
+隔離が破れている。`install.sh` は `$CTS_HOME/skills/*/` を走査するため、放置すると
+設置物にこの残骸が混ざる。
+
+- [ ] **Step 1: 原因を特定する**
+
+`ln -s "$src" "$dest"` は `$dest` が既存のディレクトリのとき、リンクを
+**その中に**作る。これが疑いの筋である。次で候補を洗い出す。
+
+```bash
+grep -rn 'ln -s' test/*.sh
+```
+
+各候補について、`$dest` が既にディレクトリとして存在しうる経路があるかを読む。
+とくに「コピーで配置したスキル」を作ったあとに同じ名前へリンクを張るテストを疑う
+（`CTS_NO_SYMLINK=1` の経路でスキルがディレクトリのコピーとして置かれる）。
+
+`$REPO_ROOT` や `$CTS_HOME` を `$TARGET` として渡しているテストが無いかも確認する。
+
+**特定できたら、報告に「どのテストの何行目が、どの条件で本体を汚すか」を書く。**
+推測で直してはならない。再現させること。
+
+- [ ] **Step 2: 汚染を検出するテストを書く**
+
+`test/test-runner-selftest.sh` に追加する。`test/run.sh` が「リポジトリ本体が
+汚れたら赤にする」ことを検べる。
+
+```bash
+test_リポジトリ本体が汚れたら赤にする() {
+  local fake
+  fake="$(_fake_repo)"
+  # テストが本体を汚す状況を模す。テストファイルの中で本体へ書き込む。
+  cat >>"$fake/test/test-paths.sh" <<'EOF'
+test_本体を汚す() {
+  : >"$REPO_ROOT/skills/session-handoff/leaked"
+  assert_eq a a "何もしない"
+}
+EOF
+  local out st=0
+  out="$("$fake/test/run.sh" paths 2>&1)" || st=$?
+  assert_ne "0" "$st" "終了コード"
+  assert_contains "$out" "leaked" "汚したファイルの名前"
+}
+```
+
+`_fake_repo` は Task 7 で作ったヘルパーである。無い場合は Task 7 の実装を読んで
+合わせる。
+
+- [ ] **Step 3: テストが失敗することを確認する**
+
+```bash
+test/run.sh runner-selftest
+```
+
+期待: 追加した1件が FAIL（ゲートが無いため終了コードが 0 になる）。
+
+- [ ] **Step 4: ゲートを実装する**
+
+`test/run.sh` の `_check_path_literals` の直後に、実行前の状態を記録する処理を置き、
+全テストの実行後（件数検査の前）に照合する。
+
+```bash
+# ---- リポジトリ本体の汚染の検査 ------------------------------------------
+# テストは $TEST_TMP を CWD として走るが、$REPO_ROOT を掴んでいるため本体へ
+# 書き込めてしまう。実測: テストが張ったリンクが skills/session-handoff/ の中に
+# 残り、install.sh の走査対象に混ざる状態になっていた。
+#
+# 追跡対象の変更と未追跡ファイルの増加の両方を見る。git に頼るのは、
+# 「何が本体か」を自前で列挙すると列挙漏れがそのまま穴になるためである。
+_repo_fingerprint() {
+  {
+    git -C "$REPO_ROOT" status --porcelain 2>/dev/null
+  } | LC_ALL=C sort
+}
+
+_REPO_BEFORE="$(_repo_fingerprint)"
+```
+
+テスト実行後、件数検査の前に照合する。
+
+```bash
+_repo_after="$(_repo_fingerprint)"
+if [ "$_REPO_BEFORE" != "$_repo_after" ]; then
+  printf 'エラー: テストがリポジトリ本体を変更した\n' >&2
+  printf '       テストは $TEST_TMP の中だけで動かねばならない。\n' >&2
+  printf '       実行前後の差:\n' >&2
+  diff <(printf '%s\n' "$_REPO_BEFORE") <(printf '%s\n' "$_repo_after") >&2 || true
+  fail_count=$((fail_count + 1))
+  failed_names+=("(リポジトリ本体の汚染)")
+fi
+```
+
+`exit 1` で即座に打ち切らず `fail_count` へ積むのは、テストの結果一覧を
+先に見せたうえで汚染を報告するほうが原因の切り分けが早いためである。
+
+- [ ] **Step 5: Step 1 で特定した原因を直す**
+
+`ln -s` の呼び出しが既存ディレクトリの中にリンクを作りうる箇所を直す。
+`ln -sn` や、張る前に `rm -rf "$dest"` を置くなど、**そのテストが検証したい
+状況を変えない方法**を選ぶ。テストの意図を弱めてはならない。
+
+`$REPO_ROOT` を `$TARGET` として渡している箇所があれば、`$TEST_TMP` の下の
+複製へ差し替える。
+
+- [ ] **Step 6: テストが通ることを確認する**
+
+```bash
+test/run.sh
+```
+
+期待: 全緑。汚染の検出も赤にならないこと。`test/expected-min-count` を
+実測値へ上げる。
+
+- [ ] **Step 7: ミューテーションで実証する**
+
+1. Step 4 のゲートの `if [ "$_REPO_BEFORE" != "$_repo_after" ]` を `if false; then` へ変える。
+2. `test/run.sh runner-selftest` を実行し、`test_リポジトリ本体が汚れたら赤にする`
+   が **FAIL** になることを確認する。
+3. 元に戻す。
+4. Step 5 で直した箇所を元の（汚す）形へ戻す。
+5. `test/run.sh` を実行し、**リポジトリ本体の汚染で赤になる**ことを確認する
+   （＝ゲートが実際にこの欠陥を捕まえることの証拠）。
+6. 直した形へ戻し、全緑に戻ることを確認する。
+
+- [ ] **Step 8: コミット**
+
+```bash
+git add test/run.sh test/test-runner-selftest.sh test/expected-min-count
+git add <Step 5 で直したテストファイル>
+git commit -m "$(cat <<'EOF'
+テストがリポジトリ本体を汚すのを塞ぐ
+
+テストが張ったリンクが skills/session-handoff/ の中に残り、install.sh の
+走査対象に混ざる状態になっていた。原因を直すだけでは再発を検出できないため、
+実行前後でリポジトリ本体の状態を照合するゲートを置く。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
