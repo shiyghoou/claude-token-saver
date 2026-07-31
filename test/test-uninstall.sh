@@ -825,3 +825,57 @@ test_START_が2つあれば利用者の行を飲み込まず警告する() {
   assert_eq "$before" "$(cat "$TARGET/.gitignore")" ".gitignore"
   assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "警告" "出力"
 }
+
+# --- 旧パスの台帳へのフォールバック -------------------------------------------
+# 旧版で install したあと新版の uninstall.sh を使うと、台帳は .claude/.token-saver/
+# 配下にあり新パスには無い。フォールバックが無いと fail-closed で
+# 利用者のフックを残したまま外せなくなる。
+
+test_旧パスの台帳を読んで外す() {
+  _setup_target
+  _run_install
+  # 旧版の状態を作る: 台帳を旧パスへ戻す。
+  mkdir -p "$TARGET/.claude/.token-saver"
+  mv "$TARGET/.token-saver/installed.json" \
+     "$TARGET/.claude/.token-saver/installed.json"
+  _run_uninstall
+  # フックが外れていること。推測に落ちていないこと。
+  _load_hook_commands SessionStart
+  assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "フックが外れている"
+  assert_file_missing "$TARGET/.claude/skills/session-handoff" "スキルのリンク"
+}
+
+test_旧台帳を読んでも旧台帳へ書き込まない() {
+  _setup_target
+  _run_install
+  mkdir -p "$TARGET/.claude/.token-saver"
+  mv "$TARGET/.token-saver/installed.json" \
+     "$TARGET/.claude/.token-saver/installed.json"
+  local before after
+  before="$(cat "$TARGET/.claude/.token-saver/installed.json")"
+  _run_uninstall
+  if [ -f "$TARGET/.claude/.token-saver/installed.json" ]; then
+    after="$(cat "$TARGET/.claude/.token-saver/installed.json")"
+    assert_eq "$before" "$after" "旧台帳の内容"
+  else
+    assert_file_missing "$TARGET/.claude/.token-saver/installed.json" "旧台帳は消えてよい"
+  fi
+}
+
+# 新パスの台帳を rm -f で完全に消す点が既存の記録無し検証と異なる。
+# _write_ledger の変種はファイルを空・壊れた内容で「上書き」するだけで
+# ファイル自体は在る。load() はその場合 json.loads('' or "{}") が例外を
+# 投げずに成立するため、ファイルが本当に無い（open が OSError を投げる）
+# 経路を一度も通らない。このテストは、新パスに続いて旧パスも本当に
+# 存在しない場合の has-record 呼び出し（今回追加したフォールバック判定）を
+# 実際に踏む。既存の test_記録の無い台帳では推測に落ちず利用者のフックを残す
+# とは踏むコードパスが異なるため、重複ではない。
+test_新旧どちらにも台帳が無ければ推測に落ちない() {
+  _setup_target
+  _run_install
+  rm -f "$TARGET/.token-saver/installed.json"
+  _run_uninstall
+  # fail-closed。利用者のフックを勝手に消さない。
+  _load_hook_commands SessionStart
+  assert_contains "$HOOK_COMMANDS" "handoff-check.sh" "台帳が無ければフックを残す"
+}

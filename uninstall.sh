@@ -59,6 +59,9 @@ SETTINGS="$TARGET/.claude/settings.local.json"
 BACKUP="$SETTINGS.cts-backup"
 GITIGNORE="$TARGET/.gitignore"
 LEDGER="$TARGET/$(cts_ledger_rel)"
+# 案内するパスは、実際に読んだ台帳のものでなければならない。旧パスへ
+# フォールバックしたときに新パスを案内すると、利用者が消す先を間違える。
+LEDGER_REL="$(cts_ledger_rel)"
 
 warnings=()
 
@@ -78,6 +81,20 @@ info "claude-token-saver を取り外す: $TARGET"
 # 台帳をファイルの有無だけで「在る」と数えると、記録ゼロを「設置物ゼロ」と
 # 取り違え、外すべきものを残したまま「完了。」と言う。
 # 判定は lib/ledger.py に寄せる（JSON を読めるのは python 側だけである）。
+#
+# 新パスに台帳が無く、旧パス（.claude 配下）にあるなら、そちらを読む。
+# 旧版で導入したあと新版で取り外す経路である。フォールバックが無いと台帳を
+# 見つけられず、fail-closed で利用者のフックを残したまま終わる。
+# 読むだけで、旧台帳へは書き込まない。旧パスは移行元であり、書き戻すと
+# install.sh の移行が次回また同じものを拾う。
+LEGACY_LEDGER="$TARGET/$(cts_legacy_ledger_rel)"
+if ! python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" any &&
+   python3 "$CTS_HOME/lib/ledger.py" has-record "$LEGACY_LEDGER" any; then
+  info "  旧パスの台帳を使う: $(cts_legacy_ledger_rel)"
+  LEDGER="$LEGACY_LEDGER"
+  LEDGER_REL="$(cts_legacy_ledger_rel)"
+fi
+
 have_ledger=0
 have_skill_record=0
 python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" any && have_ledger=1
@@ -233,7 +250,7 @@ gitignore_created=0
 if [ "${#warnings[@]}" -eq 0 ]; then
   rm -f "$LEDGER"
 else
-  info "  取り残しがあるため台帳を残した: $(cts_ledger_rel)"
+  info "  取り残しがあるため台帳を残した: $LEDGER_REL"
 fi
 
 handoff_dir="$TARGET/$(cts_handoff_rel)"
