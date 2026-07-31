@@ -559,3 +559,146 @@ test_警告があればサマリで再掲する() {
   tail_out="$(printf '%s\n' "$INSTALL_OUT" | tail -n 5)"
   assert_contains "$tail_out" "警告" "出力の末尾"
 }
+
+# --- 既存物の種類を見落とす経路 ----------------------------------------------
+
+test_同名の通常ファイルがあれば触らず警告する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/skills"
+  printf '利用者のメモ\n' >"$TARGET/.claude/skills/session-handoff"
+  _run_install
+  # 分岐がリンクとディレクトリしか見ていないと、これが rm -rf へ落ちて
+  # 利用者のファイルを無警告で消す。
+  assert_contains "$(cat "$TARGET/.claude/skills/session-handoff")" "利用者のメモ" "既存ファイル"
+  assert_contains "$INSTALL_OUT" "警告" "出力"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignore"
+}
+
+# --- 途中で失敗したときの控えの案内 ------------------------------------------
+
+test_die_しても控えの場所を伝える() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  # 控えは settings.local.json の書き換えより前に作られるため、この後で
+  # die しても残る。案内しなければ利用者は残ったことを知らない。
+  printf '{"permissions":{"allow":["Bash(ls:*)"]},\n' >"$SETTINGS"
+  _run_install
+  assert_ne "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_exists "$SETTINGS.cts-backup"
+  assert_contains "$INSTALL_ERR" "cts-backup" "標準エラー"
+}
+
+test_控えは再実行で自分の書いた内容へ塗り替えない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' >"$SETTINGS"
+  _run_install
+  _run_install
+  # 控えの値打ちは「導入より前の内容」であることに尽きる。
+  assert_not_contains "$(cat "$SETTINGS.cts-backup")" "handoff-check.sh" "控えの内容"
+  assert_contains "$(cat "$SETTINGS.cts-backup")" "Bash(ls:*)" "控えの内容"
+}
+
+# --- 台帳の行プロトコルと書き込み失敗 ----------------------------------------
+
+test_台帳は行プロトコルに載せられない名前を拒む() {
+  local led="$TEST_TMP/led.json" rc
+  # TSV の行プロトコルは tab と改行を表現できない。JSON は表現できるという
+  # 不整合を放置すると、別名のスキルを対象にしたり .gitignore へ2行生成できる。
+  local bad
+  for bad in "$(printf 'a\tb')" "$(printf 'a\nb')" "../outside" ".." "sub/dir" ""; do
+    rc=0
+    python3 "$REPO_ROOT/lib/ledger.py" add-skill "$led" "$bad" /src link >/dev/null 2>&1 || rc=$?
+    assert_ne "0" "$rc" "名前=[$bad] の終了コード"
+  done
+  rc=0
+  python3 "$REPO_ROOT/lib/ledger.py" add-skill "$led" "session-handoff" /src link >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "妥当な名前の終了コード"
+}
+
+test_台帳は行プロトコルに載らない記録を読み飛ばす() {
+  local led="$TEST_TMP/led.json" out
+  # tab を含む名前は、渡した先で境界が壊れる（別名のスキルを対象にできる）。
+  # 渡すこと自体ができないので、読む側で落とす。
+  printf '%s' '{"skills":[{"name":"a\tb","src":"/s","mode":"link"},{"name":"ok","src":"/s","mode":"link"}]}' >"$led"
+  out="$(python3 "$REPO_ROOT/lib/ledger.py" list-skills "$led" 2>/dev/null)"
+  assert_not_contains "$out" "a	b" "list-skills の出力"
+  assert_contains "$out" "ok" "list-skills の出力"
+}
+
+test_台帳の行プロトコルは空のフィールドを保つ() {
+  local led="$TEST_TMP/led.json" got
+  printf '%s' '{"skills":[{"name":"ok","src":"","mode":"link"}]}' >"$led"
+  # tab 区切りだと、読む側の IFS が連続する区切りを畳んで src が mode の値に
+  # 化ける。「記録が欠けている」ことが別の値として読まれてはならない。
+  got="$(python3 "$REPO_ROOT/lib/ledger.py" list-skills "$led" |
+    { IFS=$'\037' read -r n s m; printf 'n=[%s] s=[%s] m=[%s]' "$n" "$s" "$m"; })"
+  assert_eq "n=[ok] s=[] m=[link]" "$got" "list-skills の行"
+}
+
+test_台帳の記録の有無をファイルの有無と区別する() {
+  local led="$TEST_TMP/led.json" rc
+  local variant
+  for variant in '{}' 'null' '[]' '"x"' '' 'not json'; do
+    printf '%s' "$variant" >"$led"
+    rc=0
+    python3 "$REPO_ROOT/lib/ledger.py" has-record "$led" any || rc=$?
+    assert_ne "0" "$rc" "台帳=[$variant] は記録なしと判定されねばならない"
+  done
+  python3 "$REPO_ROOT/lib/ledger.py" add-skill "$led" ok /src link >/dev/null 2>&1
+  rc=0
+  python3 "$REPO_ROOT/lib/ledger.py" has-record "$led" skills || rc=$?
+  assert_eq "0" "$rc" "記録のある台帳"
+  # 空の hooks リストは「登録すべきものが無かった」という記録である。
+  printf '%s' '{"hooks":[]}' >"$led"
+  rc=0
+  python3 "$REPO_ROOT/lib/ledger.py" has-record "$led" hooks || rc=$?
+  assert_eq "0" "$rc" "空の hooks リスト"
+}
+
+test_台帳を書けない場所でもトレースバックを出さない() {
+  # ディレクトリを作れない場所を作る（root でも失敗する形にする）。
+  printf 'x\n' >"$TEST_TMP/notadir"
+  local led="$TEST_TMP/notadir/installed.json" out rc=0
+  out="$(python3 "$REPO_ROOT/lib/ledger.py" add-skill "$led" ok /src link 2>&1)" || rc=$?
+  assert_ne "0" "$rc" "ledger.py の終了コード"
+  assert_not_contains "$out" "Traceback" "ledger.py の出力"
+  assert_contains "$out" "台帳" "ledger.py の出力"
+
+  # settings-hooks.py 経由の ledger.save は捕まえていなかった経路である。
+  _setup_target
+  rc=0
+  out="$(python3 "$REPO_ROOT/lib/settings-hooks.py" install "$SETTINGS" \
+    --ledger "$led" "SessionStart:$REPO_ROOT/scripts/handoff-check.sh" 2>&1)" || rc=$?
+  assert_ne "0" "$rc" "settings-hooks.py の終了コード"
+  assert_not_contains "$out" "Traceback" "settings-hooks.py の出力"
+  # 何が書けなかったのかを名指しすること。総括の捕捉だけに任せると
+  # 「ファイルを操作できない」としか言わず、原因の切り分けができない。
+  assert_contains "$out" "台帳を書けない" "settings-hooks.py の出力"
+}
+
+test_gitignore_を書けない場所でもトレースバックを出さない() {
+  printf 'x\n' >"$TEST_TMP/notadir"
+  local out rc=0
+  out="$(printf '.claude/.handoff/\n' |
+    python3 "$REPO_ROOT/lib/gitignore-block.py" apply "$TEST_TMP/notadir/.gitignore" 2>&1)" || rc=$?
+  assert_ne "0" "$rc" "終了コード"
+  assert_not_contains "$out" "Traceback" "出力"
+}
+
+test_START_が2つあれば追記せず警告する() {
+  _setup_target
+  {
+    printf '%s\n' "$GITIGNORE_START"
+    printf '利用者の行A\n'
+    printf '%s\n' "$GITIGNORE_START"
+    printf '.claude/.handoff/\n'
+    printf '%s\n' "$GITIGNORE_END"
+  } >"$TARGET/.gitignore"
+  local before
+  before="$(cat "$TARGET/.gitignore")"
+  _run_install
+  # 対の揃わない START を区間の内側として飲み込むと、利用者の行が消える。
+  assert_eq "$before" "$(cat "$TARGET/.gitignore")" ".gitignore"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "警告" "出力"
+}

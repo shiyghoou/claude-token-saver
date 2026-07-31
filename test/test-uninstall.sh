@@ -21,6 +21,20 @@ _run_uninstall() {
   UNINSTALL_ERR="$(cat "$TEST_TMP/.err")"
 }
 
+# 台帳の無い旧環境向けの推測経路。既定では通らないので、明示的に opt-in する。
+_run_uninstall_guess() {
+  bash "$UNINSTALL" --guess "$TARGET" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
+  UNINSTALL_STATUS=$?
+  UNINSTALL_OUT="$(cat "$TEST_TMP/.out")"
+  UNINSTALL_ERR="$(cat "$TEST_TMP/.err")"
+}
+
+# 台帳を任意の内容へ差し替える。空・壊れた JSON・スキーマ違いを作るのに使う。
+_write_ledger() {
+  mkdir -p "$TARGET/.claude/.token-saver"
+  printf '%s' "$1" >"$TARGET/.claude/.token-saver/installed.json"
+}
+
 # 指定フックのコマンド一覧を HOOK_COMMANDS へ読み込む。
 # uninstall 後は settings.local.json 自体が消えることがある。素の python に
 # 読ませると FileNotFoundError で標準出力が空になり、不在アサーションが
@@ -281,7 +295,8 @@ test_非クォートで登録された古いフックも外せる() {
   }
 }
 EOF
-  _run_uninstall
+  # 台帳の無い旧環境である。既定では推測へ落ちないので --guess を明示する。
+  _run_uninstall_guess
   assert_not_contains "$(_settings_text)" "handoff-check.sh" "settings.local.json"
 }
 
@@ -354,7 +369,8 @@ test_空白入りパスの非クォート登録も外せる() {
   }
 }
 EOF
-  _run_uninstall
+  # 台帳の無い旧環境である。既定では推測へ落ちないので --guess を明示する。
+  _run_uninstall_guess
   _load_hook_commands SessionStart
   assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "SessionStart のコマンド"
 }
@@ -371,7 +387,8 @@ test_Windows_風のパスで登録されたフックも外せる() {
   }
 }
 EOF
-  _run_uninstall
+  # 台帳の無い旧環境である。既定では推測へ落ちないので --guess を明示する。
+  _run_uninstall_guess
   _load_hook_commands SessionStart
   assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "SessionStart のコマンド"
 }
@@ -388,7 +405,8 @@ test_インタプリタ経由で登録されたフックも外せる() {
   }
 }
 EOF
-  _run_uninstall
+  # 台帳の無い旧環境である。既定では推測へ落ちないので --guess を明示する。
+  _run_uninstall_guess
   _load_hook_commands SessionStart
   assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "SessionStart のコマンド"
 }
@@ -525,4 +543,252 @@ test_install_前から在った_gitignore_は消さない() {
   _run_uninstall
   assert_file_exists "$TARGET/.gitignore"
   assert_contains "$(cat "$TARGET/.gitignore")" "node_modules/" ".gitignore"
+}
+
+# --- 台帳の記録が無い・壊れているときの fail-closed ---------------------------
+# 「台帳ファイルが在る」を「記録が在る」と取り違えると、記録ゼロの台帳で
+# 推測経路へ落ち、利用者のフックを消して settings.local.json ごと削除する。
+
+# 台帳の壊れ方。どれか1つでも「記録が在る」と数えると事故になる。
+_LEDGER_EMPTY_VARIANTS=('{}' 'null' '[]' '"x"' '' '{"skills":"リストでない"}' 'not json')
+
+test_記録の無い台帳では推測に落ちず利用者のフックを残す() {
+  local variant
+  for variant in "${_LEDGER_EMPTY_VARIANTS[@]}"; do
+    rm -rf "$TEST_TMP/target"
+    _setup_target
+    # 利用者が自分で書いた、名前がぶつかるだけのフック。推測はファイル名で
+    # 判定するため、これを自分のものと誤認して削除する。「echo 何か」のような
+    # 当たらないコマンドでは、推測経路を通しても消えないので検出できない。
+    # install.sh を通さずに状態を作る。install.sh は自分の登録を必ず入れ直す
+    # ため推測で掃除してよい側であり、その掃除がこの検証を先に壊してしまう。
+    mkdir -p "$TARGET/.claude" "$TEST_TMP/user-own/scripts"
+    : >"$TEST_TMP/user-own/scripts/handoff-check.sh"
+    printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' \
+      "$TEST_TMP/user-own/scripts/handoff-check.sh" >"$SETTINGS"
+    _write_ledger "$variant"
+    _run_uninstall
+    assert_eq "0" "$UNINSTALL_STATUS" "台帳=[$variant] の終了コード"
+    assert_file_exists "$SETTINGS"
+    assert_contains "$(_hook_commands SessionStart)" "user-own" "台帳=[$variant] の SessionStart"
+    # 「何もしなかった」ことを名指しで伝えること。他の警告で件数を満たしていても、
+    # フックの取り残しを黙っていては利用者が気づけない。
+    assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "台帳にフックの記録が無い" \
+      "台帳=[$variant] の出力"
+    assert_not_contains "$UNINSTALL_OUT" "完了。" "台帳=[$variant] の出力"
+  done
+}
+
+test_記録の無い台帳ではスキルのリンクと_gitignore_の除外を残す() {
+  local variant
+  for variant in "${_LEDGER_EMPTY_VARIANTS[@]}"; do
+    rm -rf "$TEST_TMP/target"
+    _setup_target
+    _run_install
+    _write_ledger "$variant"
+    _run_uninstall
+    # リンクを残すなら除外も残さねばならない。除外だけ外すと、絶対パスを指す
+    # リンクが未追跡ファイルとして git に現れ、利用者の作業を汚す。
+    assert_file_exists "$TARGET/.claude/skills/session-handoff"
+    assert_contains "$(_gitignore_text)" ".claude/skills/session-handoff" "台帳=[$variant] の .gitignore"
+  done
+}
+
+test_記録の無い台帳では_CTS_STRICT_で非ゼロを返す() {
+  _setup_target
+  _run_install
+  _write_ledger '{}'
+  local rc=0
+  CTS_STRICT=1 bash "$UNINSTALL" "$TARGET" >/dev/null 2>&1 || rc=$?
+  # 外し切れていないのに rc=0 を返すと、CI から呼んだ側が取り残しに気づけない。
+  assert_ne "0" "$rc" "終了コード"
+}
+
+test_未導入なら利用者の設定ファイルを消さない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{}\n' >"$SETTINGS"
+  _run_uninstall
+  # 1件も外していないのに利用者のファイルへ手を出してはならない。
+  assert_file_exists "$SETTINGS"
+}
+
+test_未導入なら利用者の空の_claude_ディレクトリを消さない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  _run_uninstall
+  assert_file_exists "$TARGET/.claude"
+}
+
+# --- 推測経路（--guess）------------------------------------------------------
+
+test_推測経路は_guess_を付けたときだけ通る() {
+  _setup_target
+  # 利用者が社内共有リポジトリの skills/ へ張ったリンク。install.sh という
+  # ありふれた名前が親に在るだけで「自分のもの」と誤認される形をしている。
+  local shared="$TEST_TMP/shared"
+  mkdir -p "$shared/skills/session-handoff"
+  printf '利用者の共有スキル\n' >"$shared/skills/session-handoff/SKILL.md"
+  : >"$shared/install.sh"
+  mkdir -p "$TARGET/.claude/skills"
+  ln -s "$shared/skills/session-handoff" "$TARGET/.claude/skills/session-handoff"
+
+  # 利用者が自分で書いた、名前がぶつかるだけのフック。推測はファイル名で
+  # 判定するため、これを自分のものと誤認して削除する。
+  mkdir -p "$TARGET/.claude" "$TEST_TMP/user-own/scripts"
+  : >"$TEST_TMP/user-own/scripts/handoff-check.sh"
+  printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' \
+    "$TEST_TMP/user-own/scripts/handoff-check.sh" >"$SETTINGS"
+
+  # 台帳を作らない（_run_install を呼ばない）。既定では触ってはならない。
+  _run_uninstall
+  assert_file_exists "$TARGET/.claude/skills/session-handoff"
+  assert_contains "$(_hook_commands SessionStart)" "user-own" "SessionStart のコマンド"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "--guess" "出力"
+
+  # --guess を明示したときだけ従来の推測へ落ちる。
+  # 推測は利用者の設置物を巻き込む。それが opt-in である理由そのものである。
+  _run_uninstall_guess
+  assert_file_missing "$TARGET/.claude/skills/session-handoff"
+  assert_not_contains "$(_settings_text)" "user-own" "settings.local.json"
+}
+
+test_二度目の取り外しでも推測に落ちない() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  # 1回目で台帳が消えるため、2回目が必ず推測経路になっていた。
+  local shared="$TEST_TMP/shared"
+  mkdir -p "$shared/skills/session-handoff"
+  printf '利用者の共有スキル\n' >"$shared/skills/session-handoff/SKILL.md"
+  : >"$shared/install.sh"
+  mkdir -p "$TARGET/.claude/skills"
+  ln -s "$shared/skills/session-handoff" "$TARGET/.claude/skills/session-handoff"
+  _run_uninstall
+  assert_file_exists "$TARGET/.claude/skills/session-handoff"
+}
+
+# --- 台帳の name をパスへ連結する経路 ----------------------------------------
+
+# 台帳の skills を任意の内容へ差し替える。
+_replace_ledger_skills() {
+  python3 - "$TARGET/.claude/.token-saver/installed.json" "$1" "$2" "$3" <<'PY'
+import json, sys
+path, name, src, mode = sys.argv[1:5]
+with open(path) as f:
+    data = json.load(f)
+data["skills"] = [{"name": name, "src": src, "mode": mode}]
+with open(path, "w") as f:
+    json.dump(data, f, ensure_ascii=False)
+PY
+}
+
+test_台帳の名前に相対パスがあっても導入先の外を消さない() {
+  _setup_target
+  _run_install
+  local outside="$TEST_TMP/outside"
+  mkdir -p "$outside/real"
+  ln -s "$outside/real" "$outside/important-link"
+  # .claude/skills/../../../outside/important-link は $TEST_TMP/outside/… を指す。
+  _replace_ledger_skills "../../../outside/important-link" "$outside/real" link
+  _run_uninstall
+  assert_file_exists "$outside/important-link"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "不正" "出力"
+}
+
+test_台帳の名前にタブがあっても別のスキルを消さない() {
+  _setup_target
+  _run_install
+  local shared="$TEST_TMP/shared"
+  mkdir -p "$shared/victim"
+  printf '利用者のスキル\n' >"$shared/victim/SKILL.md"
+  ln -s "$shared/victim" "$TARGET/.claude/skills/victim"
+  # 行プロトコル（TSV）は tab を表現できない。素朴に読むと name=victim になり、
+  # 記録していないリンクを対象にしてしまう。
+  _replace_ledger_skills "$(printf 'victim\t%s' "$shared/victim")" "$shared/victim" link
+  _run_uninstall
+  assert_file_exists "$TARGET/.claude/skills/victim"
+  assert_contains "$(cat "$TARGET/.claude/skills/victim/SKILL.md")" "利用者のスキル" "スキルの内容"
+}
+
+test_記録にリンク先が無ければ触らない() {
+  _setup_target
+  _run_install
+  local shared="$TEST_TMP/shared"
+  mkdir -p "$shared/session-handoff"
+  printf '利用者のスキル\n' >"$shared/session-handoff/SKILL.md"
+  rm -f "$TARGET/.claude/skills/session-handoff"
+  ln -s "$shared/session-handoff" "$TARGET/.claude/skills/session-handoff"
+  # src が空の記録は「何を指していたか分からない」であり、削除の許可ではない。
+  _replace_ledger_skills session-handoff "" link
+  _run_uninstall
+  assert_file_exists "$TARGET/.claude/skills/session-handoff"
+  assert_contains "$(cat "$TARGET/.claude/skills/session-handoff/SKILL.md")" \
+    "利用者のスキル" "スキルの内容"
+}
+
+# --- 台帳の寿命と後片付け ----------------------------------------------------
+
+test_取り残しがあれば台帳を残す() {
+  _setup_target
+  _run_install
+  # 導入後に導入先がリンクを差し替えた状態。外せないので取り残しになる。
+  local shared="$TEST_TMP/shared"
+  mkdir -p "$shared/session-handoff"
+  rm -f "$TARGET/.claude/skills/session-handoff"
+  ln -s "$shared/session-handoff" "$TARGET/.claude/skills/session-handoff"
+  _run_uninstall
+  # 台帳を消すと、次回は記録の無い状態＝何もできない状態になる。
+  assert_file_exists "$TARGET/.claude/.token-saver/installed.json"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "警告" "出力"
+}
+
+test_導入後にコミットされた_gitignore_は消さない() {
+  _setup_target
+  _run_install
+  ( cd "$TARGET" &&
+    git add .gitignore &&
+    git -c user.email=t@example.com -c user.name=t commit -qm 'gitignore を追加' ) >/dev/null 2>&1
+  _run_uninstall
+  # install.sh が作ったものでも、利用者がコミットした後なら消してはならない。
+  assert_file_exists "$TARGET/.gitignore"
+}
+
+test_同じグループに同居する利用者のフックを巻き込まない() {
+  _setup_target
+  _run_install
+  # install.sh が作ったグループへ、利用者が自分のフックを足した状態。
+  # グループ単位で落とす実装だと、これを巻き込んで消す。
+  python3 - "$SETTINGS" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+group = data["hooks"]["SessionStart"][0]
+group["hooks"].append({"type": "command", "command": "echo 同居する利用者のフック"})
+with open(path, "w") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  _run_uninstall
+  local cmds
+  cmds="$(_hook_commands SessionStart)"
+  assert_contains "$cmds" "同居する利用者のフック" "SessionStart のコマンド"
+  assert_not_contains "$cmds" "handoff-check.sh" "SessionStart のコマンド"
+}
+
+test_START_が2つあれば利用者の行を飲み込まず警告する() {
+  _setup_target
+  {
+    printf '%s\n' "$GITIGNORE_START"
+    printf '利用者の行A\n'
+    printf '%s\n' "$GITIGNORE_START"
+    printf '.claude/.handoff/\n'
+    printf '%s\n' "$GITIGNORE_END"
+  } >"$TARGET/.gitignore"
+  local before
+  before="$(cat "$TARGET/.gitignore")"
+  _run_uninstall
+  # START 1つ+END 2つは警告するのに、START 2つ+END 1つを黙って消すのは非対称。
+  assert_eq "$before" "$(cat "$TARGET/.gitignore")" ".gitignore"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "警告" "出力"
 }
