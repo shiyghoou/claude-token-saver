@@ -50,15 +50,30 @@ def find_blocks(lines):
 
 
 def stray_markers(lines, spans):
-    """対になっていないマーカーの (行番号, 行) を返す。行番号は1始まり。"""
-    inside = set()
-    for start, end in spans:
-        inside.update(range(start, end + 1))
-    return [
-        (i + 1, line.strip())
-        for i, line in enumerate(lines)
-        if i not in inside and line.strip() in (START, END)
-    ]
+    """対になっていないマーカーの (行番号, 行) を返す。行番号は1始まり。
+
+    区間の内側に現れた START も対になっていない。START が2つ・END が1つの
+    形（マージ衝突の両採用で容易に生じる）では find_blocks が外側の START から
+    END までを1区間と数えるため、内側の START とその上にある利用者の行が
+    区間へ飲み込まれる。START 1つ・END 2つは警告するのに、こちらを黙って
+    消すのは非対称であり、消される側のほうが害が大きい。
+    """
+    owner = {}
+    for span in spans:
+        for i in range(span[0], span[1] + 1):
+            owner[i] = span
+
+    strays = []
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s not in (START, END):
+            continue
+        span = owner.get(i)
+        if span is None:
+            strays.append((i + 1, s))
+        elif s == START and i != span[0]:
+            strays.append((i + 1, s))
+    return strays
 
 
 def warn_unpaired(path, strays, action):
@@ -166,4 +181,9 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except OSError as e:
+        # 書き込めない環境で python のトレースバックを生で見せない。
+        sys.stderr.write("  .gitignore を操作できない (%s)\n" % e)
+        sys.exit(1)
