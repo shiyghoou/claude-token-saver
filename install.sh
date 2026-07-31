@@ -18,12 +18,19 @@ TARGET="$(cd "${1:-$PWD}" 2>/dev/null && pwd -P)" || {
   exit 1
 }
 
+# パスの単一情報源。
+# shellcheck source=scripts/lib/paths.sh
+. "$CTS_HOME/scripts/lib/paths.sh" || {
+  printf 'エラー: scripts/lib/paths.sh を読めない（クローンが不完全である）\n' >&2
+  exit 1
+}
+
 SETTINGS="$TARGET/.claude/settings.local.json"
 BACKUP="$SETTINGS.cts-backup"
 GITIGNORE="$TARGET/.gitignore"
 # 何を設置したかの台帳。uninstall.sh はこれを正として取り外す。
 # 記録が無いと、利用者が自分で張った同名のリンクまで巻き込んで消してしまう。
-LEDGER="$TARGET/.claude/.token-saver/installed.json"
+LEDGER="$TARGET/$(cts_ledger_rel)"
 
 # ここまでに適用した作業。途中で失敗したときに、何が残っているかを伝える。
 applied=()
@@ -52,11 +59,11 @@ info "claude-token-saver を導入する: $TARGET"
 
 # --- 1. ディレクトリ ---------------------------------------------------------
 
-mkdir -p "$TARGET/.claude/.handoff/pending" \
-         "$TARGET/.claude/.handoff/consumed" \
-         "$TARGET/.claude/.token-saver" ||
+mkdir -p "$TARGET/$(cts_handoff_rel)/pending" \
+         "$TARGET/$(cts_handoff_rel)/consumed" \
+         "$TARGET/$(cts_base_rel)" ||
   die "ディレクトリを作成できない"
-applied+=(".claude 配下のディレクトリを作成")
+applied+=("$(cts_base_rel)/ のディレクトリを作成")
 
 # .gitignore を新規に作るかどうかは、この時点でしか分からない。
 # uninstall.sh が「空になったから消してよい」と判断する根拠になる。
@@ -200,8 +207,7 @@ done
 # 無視行を書くのは実際に設置したスキルだけに限る。触らなかったスキル
 # （導入先が自前で持っているもの）を無視すると、その版管理を静かに壊す。
 {
-  printf '.claude/.handoff/\n'
-  printf '.claude/.token-saver/\n'
+  printf '%s/\n' "$(cts_base_rel)"
   for name in ${installed_skills[@]+"${installed_skills[@]}"}; do
     printf '.claude/skills/%s\n' "$name"
   done

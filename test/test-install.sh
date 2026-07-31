@@ -114,15 +114,14 @@ test_gitignore_に状態ディレクトリを追記する() {
   _run_install
   local gi
   gi="$(cat "$TARGET/.gitignore")"
-  assert_contains "$gi" ".claude/.handoff/" ".gitignore"
-  assert_contains "$gi" ".claude/.token-saver/" ".gitignore"
+  assert_contains "$gi" ".token-saver/" ".gitignore"
 }
 
 test_gitignore_への追記は二度実行しても重複しない() {
   _setup_target
   _run_install
   _run_install
-  assert_count 1 "$(cat "$TARGET/.gitignore")" ".claude/.handoff/" ".gitignore の追記"
+  assert_count 1 "$(cat "$TARGET/.gitignore")" ".token-saver/" ".gitignore の追記"
 }
 
 test_既存の_gitignore_の内容を消さない() {
@@ -169,8 +168,45 @@ test_シンボリックリンクが使えない環境ではコピーする() {
 test_引き継ぎディレクトリを作る() {
   _setup_target
   _run_install
-  assert_file_exists "$TARGET/.claude/.handoff/pending"
-  assert_file_exists "$TARGET/.claude/.handoff/consumed"
+  assert_file_exists "$TARGET/.token-saver/handoff/pending"
+  assert_file_exists "$TARGET/.token-saver/handoff/consumed"
+}
+
+test_新パスに引き継ぎのディレクトリを作る() {
+  _setup_target
+  _run_install
+  assert_file_exists "$TARGET/.token-saver/handoff/pending" "pending"
+  assert_file_exists "$TARGET/.token-saver/handoff/consumed" "consumed"
+}
+
+test_台帳を新パスに置く() {
+  _setup_target
+  _run_install
+  assert_file_exists "$TARGET/.token-saver/installed.json" "台帳"
+}
+
+test_claude_配下に引き継ぎのディレクトリを作らない() {
+  _setup_target
+  _run_install
+  assert_file_missing "$TARGET/.claude/.handoff" "旧の引き継ぎ置き場"
+  assert_file_missing "$TARGET/.claude/.token-saver" "旧の状態置き場"
+}
+
+test_gitignore_はルート直下の1行で覆う() {
+  _setup_target
+  _run_install
+  local gi
+  gi="$(cat "$TARGET/.gitignore")"
+  assert_contains "$gi" ".token-saver/" ".gitignore"
+  assert_not_contains "$gi" ".claude/.handoff/" ".gitignore"
+  assert_not_contains "$gi" ".claude/.token-saver/" ".gitignore"
+}
+
+test_gitignore_はスキルの行を残す() {
+  _setup_target
+  _run_install
+  assert_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" \
+    ".gitignore"
 }
 
 test_非_git_ディレクトリでも失敗しない() {
@@ -430,7 +466,7 @@ test_設置したものを台帳へ記録する() {
   _run_install
   # 「何を設置したか」を記録していないと、uninstall が推測で判定するしかなくなる。
   local led
-  led="$(cat "$TARGET/.claude/.token-saver/installed.json")"
+  led="$(cat "$TARGET/.token-saver/installed.json")"
   assert_contains "$led" "session-handoff" "台帳"
   assert_contains "$led" "handoff-check.sh" "台帳"
 }
@@ -514,7 +550,11 @@ test_クローンが不完全なら警告して完了と言わない() {
   _setup_target
   local clone="$TEST_TMP/broken"
   _clone_repo "$clone"
-  rm -rf "$clone/scripts" "$clone/skills"
+  # scripts/lib/paths.sh は install.sh 自体が動くための必須基盤なので、
+  # ここを消すと警告ではなく即エラー終了になる。ここで見たいのは
+  # 「フック・スキルが欠けている程度の不完全さ」であって、
+  # install.sh を実行不能にする破損ではない。
+  rm -rf "$clone/scripts/handoff-check.sh" "$clone/skills"
   bash "$clone/install.sh" "$TARGET" >"$TEST_TMP/.out" 2>&1
   local out
   out="$(cat "$TEST_TMP/.out")"
