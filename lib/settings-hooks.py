@@ -2,8 +2,10 @@
 # settings.local.json のフック登録を書き換える。
 #
 #   settings-hooks.py install <path> --ledger <ledger> <event>:<command> ...
-#   settings-hooks.py remove  <path> [--ledger <ledger>]
+#   settings-hooks.py remove  <path> [--ledger <ledger>] [--guess]
 #   settings-hooks.py same    <path> <other>   # 2つの設定がデータとして同値か
+#
+# 終了コード: 0=処理した / 1=失敗（何も変更していない） / 2=警告（何も変更していない）
 #
 # install も remove も、まず「自分のフック」を全部外す。install はそのうえで
 # 入れ直す。コマンド文字列の完全一致だけで冪等性を取ると、シンボリックリンク
@@ -11,8 +13,10 @@
 # 登録が残る。総入れ替えすれば、綴り違いも移動後の残骸も同時に消える。
 #
 # 「自分のもの」の同定は台帳（.claude/.token-saver/installed.json）を正とする。
-# 台帳が無い旧環境向けにファイル名での推測を残すが、それは利用者が自作した
-# 同名スクリプトを巻き込みうるフォールバックである。台帳があるときは使わない。
+# 台帳に記録が無いときは既定で何もしない（fail-closed）。ファイル名での推測は
+# 利用者が自作した同名スクリプトを巻き込んで消しうるため、明示的な --guess を
+# 与えたときだけ通す。「台帳ファイルが在る」ことを「記録が在る」と取り違えると、
+# 記録ゼロの台帳で推測へ落ち、利用者のフックを消してしまう。
 #
 # 判定を install/uninstall で二重に実装しないため、双方がこれを呼ぶ。
 
@@ -83,19 +87,25 @@ def load(path):
 
 
 def recorded_hooks(ledger_path):
-    if not ledger_path:
-        return []
+    """台帳に記録された登録コマンドを返す。記録が無ければ None を返す。
+
+    空リスト（「登録すべきフックが1つも無かった」という記録）と、記録そのものが
+    無い状態を区別する。前者は「外すものは無い」で正しく、後者は推測しか
+    残っていない状態であり、既定では何もしてはならない。
+    """
+    if not ledger_path or not ledger.has_record(ledger_path, "hooks"):
+        return None
     return [
         h for h in ledger.get_list(ledger.load(ledger_path), "hooks") if isinstance(h, str)
     ]
 
 
-def purge(data, known):
+def purge(data, known, guess=False):
     """自分のフック登録をすべて外し、外した件数を返す。
 
-    known（台帳に記録した登録コマンド）が空でなければ、それとの完全一致だけを
+    known が None でなければ（＝台帳に記録が在れば）、それとの完全一致だけを
     外す。台帳がある以上、自分が書いていないものへ手を出す理由が無い。
-    台帳が無いときだけ推測へ落ちる。
+    記録が無いときは、guess を明示されたときだけ推測へ落ちる。
 
     グループ単位ではなくフック単位で外す。matcher 付きのグループに利用者が
     自分のフックを同居させている場合、グループごと落とすとそれを巻き込む。
@@ -108,9 +118,9 @@ def purge(data, known):
         if not isinstance(entry, dict):
             return False
         command = entry.get("command", "")
-        if known:
+        if known is not None:
             return str(command) in known
-        return looks_like_ours(command)
+        return guess and looks_like_ours(command)
 
     removed = 0
     for event in list(hooks):
@@ -165,7 +175,12 @@ def save_if_changed(path, data, original):
 
 def cmd_install(path, ledger_path, specs):
     data, original = load(path)
-    removed = purge(data, recorded_hooks(ledger_path))
+    # install だけは、記録が無いときも推測で掃除する（guess=True）。
+    # 掃除したうえで必ず入れ直すため、誤検出しても登録は残る（自分の綴りへ
+    # 置き換わるだけである）。ここを fail-closed にすると、台帳の無い旧版から
+    # 上げた環境で二重登録が永久に残る。
+    # 消したまま戻さない uninstall 側は、同じ理由で fail-closed である。
+    removed = purge(data, recorded_hooks(ledger_path), guess=True)
 
     added = []
     commands = []
@@ -185,7 +200,13 @@ def cmd_install(path, ledger_path, specs):
     if ledger_path:
         led = ledger.load(ledger_path)
         led["hooks"] = commands
-        ledger.save(ledger_path, led)
+        try:
+            ledger.save(ledger_path, led)
+        except OSError as e:
+            # 台帳が書けないなら、次回の取り外しは推測しか残らない。
+            # 設定だけ書いて先へ進めるのは、取り外せない状態を作ることである。
+            sys.stderr.write("台帳を書けない (%s): %s\n" % (ledger_path, e))
+            return 1
 
     if not save_if_changed(path, data, original):
         print("  フックは既に登録済み")
@@ -199,12 +220,23 @@ def cmd_install(path, ledger_path, specs):
     return 0
 
 
-def cmd_remove(path, ledger_path):
+def cmd_remove(path, ledger_path, guess=False):
     if not os.path.exists(path):
         print("  settings.local.json が無い")
         return 0
+    # 壊れた JSON はここで落とす。fail-closed の判定より先に読むのは、
+    # 「記録が無いから何もしない」で壊れたファイルを見逃さないためである。
     data, original = load(path)
-    removed = purge(data, recorded_hooks(ledger_path))
+    known = recorded_hooks(ledger_path)
+    if known is None and not guess:
+        sys.stderr.write(
+            "  警告: 台帳にフックの記録が無いため settings.local.json を変更しない。\n"
+            "        どれが自分の登録か分からない状態で消すと、利用者のフックを\n"
+            "        巻き込む。台帳の無い旧版で導入した環境では --guess を付けて\n"
+            "        実行せよ（ファイル名で推測する）。\n"
+        )
+        return 2
+    removed = purge(data, known, guess=guess)
     # 1件も外していないなら書かない。書けば利用者の書式を黙って変えてしまう。
     if removed:
         save_if_changed(path, data, original)
@@ -237,7 +269,8 @@ def main(argv):
         return cmd_same(argv[2], argv[3])
     if len(argv) < 3 or argv[1] not in ("install", "remove"):
         sys.stderr.write(
-            "usage: settings-hooks.py {install|remove} <path> [--ledger <ledger>] [event:command ...]\n"
+            "usage: settings-hooks.py {install|remove} <path> "
+            "[--ledger <ledger>] [--guess] [event:command ...]\n"
         )
         return 64
 
@@ -249,11 +282,21 @@ def main(argv):
             return 64
         ledger_path = rest[1]
         rest = rest[2:]
+    guess = False
+    if rest and rest[0] == "--guess":
+        guess = True
+        rest = rest[1:]
 
     if argv[1] == "install":
         return cmd_install(argv[2], ledger_path, rest)
-    return cmd_remove(argv[2], ledger_path)
+    return cmd_remove(argv[2], ledger_path, guess)
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except OSError as e:
+        # 書き込めない・読めない環境で python のトレースバックを生で見せない。
+        # 利用者にとっては「何が起きたか」だけが要る情報である。
+        sys.stderr.write("ファイルを操作できない (%s)\n" % e)
+        sys.exit(1)
