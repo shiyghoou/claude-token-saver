@@ -85,14 +85,21 @@ if [ "${#hook_specs[@]}" -gt 0 ]; then
   # settings.local.json は通常 git 管理外の個人設定である。git から復元でき
   # ないので、最初の書き換え前に控えを取る。既にあれば上書きしない（原状の
   # 控えを、再実行で自分の書いた内容へ塗り替えては意味がない）。
+  # 既にあれば上書きしないのは意図である。控えの値打ちは「導入より前の内容」で
+  # あることに尽きる。再実行で更新すると、自分が書いた内容へ塗り替わって
+  # 復旧手段が失われる。既存の控えが壊れた JSON の写しであっても、それが
+  # 原状であるから直すのは原本のほうであり、控えを作り直す話ではない。
   if [ -f "$SETTINGS" ] && [ ! -e "$BACKUP" ]; then
     cp -p "$SETTINGS" "$BACKUP" || die "settings.local.json の控えを作れない"
     backup_path="$BACKUP"
+    # 控えは settings.local.json の書き換えより前に作られるため、この後で
+    # die しても残る。applied に載せなければ、利用者は残ったことを知らない。
+    applied+=("settings.local.json の控えを作成（導入前の内容）: $BACKUP")
   fi
 
   python3 "$CTS_HOME/lib/settings-hooks.py" install "$SETTINGS" \
     --ledger "$LEDGER" "${hook_specs[@]}" ||
-    die "settings.local.json を更新できない"
+    die "settings.local.json または台帳を更新できない"
   applied+=("settings.local.json へフックを登録")
 fi
 
@@ -136,7 +143,8 @@ for skill_dir in "$CTS_HOME"/skills/*/; do
     # 別の場所を指すリンク。自分が過去に張ったもの（クローンを移した等）なら
     # 張り替える。そうでなければ導入先の設置物なので触らない。
     link="$(readlink "$dest")"
-    recorded="$(python3 "$CTS_HOME/lib/ledger.py" get-skill "$LEDGER" "$name" | cut -f1)"
+    # 区切りは US(0x1f)。ledger.py の行プロトコルと合わせる。
+    recorded="$(python3 "$CTS_HOME/lib/ledger.py" get-skill "$LEDGER" "$name" | cut -d $'\037' -f1)"
     if [ -n "$recorded" ] && [ "$recorded" = "$link" ]; then
       : # 自分が張ったリンクである
     elif [ -z "$recorded" ] && looks_like_our_link "$link" "$name"; then
@@ -145,10 +153,18 @@ for skill_dir in "$CTS_HOME"/skills/*/; do
       warn "スキル $name は導入先が張ったリンクなので触らない（$link）"
       continue
     fi
-  elif [ -d "$dest" ] && [ ! -f "$dest/.claude-token-saver" ]; then
+  elif [ -d "$dest" ]; then
     # 実ディレクトリがあり、それが install.sh のコピーでないなら触らない。
     # 導入先が自前で置いたスキルを上書きすると、他人の作業を消す。
-    warn "スキル $name は導入先に既存のディレクトリがあるため触らない（.gitignore にも書かない）"
+    if [ ! -f "$dest/.claude-token-saver" ]; then
+      warn "スキル $name は導入先に既存のディレクトリがあるため触らない（.gitignore にも書かない）"
+      continue
+    fi
+  elif [ -e "$dest" ]; then
+    # リンクでもディレクトリでもない既存物（通常ファイル・FIFO など）。
+    # 分岐がリンクとディレクトリしか見ていないと、これが下の rm -rf へ落ちて
+    # 利用者のファイルを無警告で消す。知らない種類のものには触らない。
+    warn "スキル $name は導入先に既存のファイルがあるため触らない（.gitignore にも書かない）"
     continue
   fi
 
