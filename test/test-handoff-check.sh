@@ -1026,8 +1026,22 @@ test_本体で致命的エラーが起きても終了コード0で抜ける() {
   local dir="$TEST_TMP/injected"
   mkdir -p "$dir/lib"
   cp "$REPO_ROOT/scripts/lib/common.sh" "$dir/lib/common.sh"
+  # common.sh は自分の隣の paths.sh を source する。ここを cp し忘れると
+  # common.sh の source 自体が失敗し、handoff-check.sh:14 の
+  # `. "$SCRIPT_DIR/lib/common.sh" || exit 0` に吸われてフック全体が
+  # 即座に exit 0 で抜ける。その場合、このテストが検証したい「注入した
+  # 致命的エラーに対してサブシェルが exit 0 で抜ける」経路には一度も
+  # 到達せず、終了コードだけを見ると真空で緑になる（詳細は task-1-report.md
+  # の訂正を参照）。到達したことを別途 assert するのはこのためである。
   cp "$REPO_ROOT/scripts/lib/paths.sh" "$dir/lib/paths.sh"
-  awk '{ print } /^handoff_dir=/ { print ": \"$CTS_NO_SUCH_VARIABLE\"" }' \
+
+  # 注入箇所（handoff_dir= の直後）に本当に到達したことの証拠として、
+  # 未定義変数を踏む直前に痕跡ファイルを作らせる。終了コード 0 だけでは
+  # 「到達して倒れた」のか「到達せず何もしていない」のかを区別できない。
+  local trace="$TEST_TMP/injected-reached"
+  rm -f "$trace"
+  awk -v trace="$trace" \
+    '{ print } /^handoff_dir=/ { print "touch \"" trace "\""; print ": \"$CTS_NO_SUCH_VARIABLE\"" }' \
     "$HOOK" >"$dir/handoff-check.sh"
   grep -q 'CTS_NO_SUCH_VARIABLE' "$dir/handoff-check.sh" ||
     _fail "致命的エラーを差し込めていない"
@@ -1036,6 +1050,7 @@ test_本体で致命的エラーが起きても終了コード0で抜ける() {
     >"$TEST_TMP/.hook-out" 2>/dev/null
   local st=$?
   assert_eq "0" "$st" "致命的エラーを差し込んだときの終了コード"
+  assert_file_exists "$trace" "注入箇所（handoff_dir= の直後）へ到達した証拠"
 }
 
 # set -u は将来の書き間違いを静かな誤動作にしないための歯止めである。
