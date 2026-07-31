@@ -34,9 +34,10 @@ set -u
 bash --version | head -1
 proj=/tmp/proj
 rm -rf "$proj"
-mkdir -p "$proj/.claude/.handoff/pending"
+mkdir -p "$proj/.token-saver/handoff/pending"
+mkdir -p "$proj/.token-saver/handoff/consumed"
 printf '# 引き継ぎ\nカナリア-BASH32-本文\n' \
-  >"$proj/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  >"$proj/.token-saver/handoff/pending/2026-07-31-1840-a.md"
 
 printf '{"session_id":"abc","source":"startup","cwd":"%s"}' "$proj" \
   | bash /repo/scripts/handoff-check.sh >/tmp/out 2>/tmp/err
@@ -44,13 +45,13 @@ printf 'EXIT=%s\n' "$?"
 printf 'STDOUT_BYTES=%s\n' "$(wc -c </tmp/out | tr -d ' ')"
 printf 'STDERR_BYTES=%s\n' "$(wc -c </tmp/err | tr -d ' ')"
 printf 'CANARY=%s\n' "$(grep -c 'カナリア-BASH32-本文' /tmp/out)"
-printf 'PENDING=%s\n' "$(ls -A "$proj/.claude/.handoff/pending" | wc -l | tr -d ' ')"
-printf 'CONSUMED=%s\n' "$(ls -A "$proj/.claude/.handoff/consumed" | wc -l | tr -d ' ')"
+printf 'PENDING=%s\n' "$(ls -A "$proj/.token-saver/handoff/pending" | wc -l | tr -d ' ')"
+printf 'CONSUMED=%s\n' "$(ls -A "$proj/.token-saver/handoff/consumed" | wc -l | tr -d ' ')"
 printf 'STDERR_TEXT<<%s\n' "$(cat /tmp/err)"
 
 # 未消費ゼロなら無出力・終了コード 0 であること（未導入時と挙動が変わらない）。
-rm -rf "$proj/.claude/.handoff/pending"
-mkdir -p "$proj/.claude/.handoff/pending"
+rm -rf "$proj/.token-saver/handoff/pending"
+mkdir -p "$proj/.token-saver/handoff/pending"
 printf '{"session_id":"abc","source":"startup","cwd":"%s"}' "$proj" \
   | bash /repo/scripts/handoff-check.sh >/tmp/out2 2>/tmp/err2
 printf 'EMPTY_EXIT=%s\n' "$?"
