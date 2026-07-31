@@ -1,6 +1,9 @@
 # このリポジトリでは .claude/ 配下を追跡しない（開発中の作業痕跡が入るため）
 .claude/
 
+# サブエージェント駆動開発の作業ディレクトリ（台帳・ブリーフ・レビュー用の差分）
+.superpowers/
+
 # claude-token-saver (install.sh が追記。uninstall.sh で削除される)
 .claude/.handoff/
 .claude/.token-saver/
