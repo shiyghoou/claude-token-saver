@@ -95,6 +95,11 @@ cts_migrate_dir() {
     fi
     mv "$entry" "$to/$base" || die "移行できない: $entry"
     migrated=$((migrated + 1))
+    # 移した直後に記録する。この後の別ファイルの移行が die しても、
+    # 既に移した分を「ここまで適用した」一覧から漏らさないためである。
+    # 完了を待ってからまとめて1件積むと、途中で die したときに
+    # 何がどこへ移ったのか利用者に伝わらない。
+    applied+=("旧パス（.claude 配下）から $to/$base へ移行")
   done
   return 0
 }
@@ -114,6 +119,7 @@ if [ -f "$legacy_ledger" ]; then
     mkdir -p "$(dirname "$LEDGER")" || die "台帳の置き場所を作成できない"
     mv "$legacy_ledger" "$LEDGER" || die "台帳を移行できない"
     migrated=$((migrated + 1))
+    applied+=("旧パスの台帳を $LEDGER へ移行")
   fi
 fi
 
@@ -124,9 +130,13 @@ rmdir "$TARGET/$(cts_legacy_handoff_rel)/pending" \
 rmdir "$TARGET/$(cts_legacy_handoff_rel)" \
       "$TARGET/$(cts_legacy_state_rel)" 2>/dev/null || true
 
-if [ "$migrated" -gt 0 ]; then
-  applied+=("旧パス（.claude 配下）から $migrated 件を移行")
-  info "旧パス（.claude 配下）から $migrated 件を移行した"
+# applied への記録は各ファイル・台帳を移した直後に済んでいる（die 時に漏れ
+# させないため）。ここでは締めくくりとして利用者向けに件数を要約するだけで、
+# applied への追記はしない。移した件数だけでなく、衝突で旧側に残した件数も
+# 伝える。migrate_conflicts を数えるだけで語らないと、利用者は何件が衝突した
+# のか警告メッセージを1つずつ数えるしかなくなる。
+if [ "$migrated" -gt 0 ] || [ "$migrate_conflicts" -gt 0 ]; then
+  info "旧パス（.claude 配下）からの移行: $migrated 件を移行、$migrate_conflicts 件は衝突のため旧側に残した"
 fi
 
 # .gitignore を新規に作るかどうかは、この時点でしか分からない。

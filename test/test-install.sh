@@ -233,12 +233,36 @@ test_新側に同名があれば上書きせず警告する() {
   assert_contains "$INSTALL_OUT$INSTALL_ERR" "警告" "衝突を警告する"
 }
 
-test_移行が起きたら適用一覧に載せる() {
+# 「移行が起きたら適用一覧に載せる」という名前だったが、実際に検証していたのは
+# info の出力だけで、applied 配列そのものは検証していなかった（レビュー指摘）。
+# info による告知自体は「黙って動かさない」という別の性質として引き続き値打ちが
+# あるため、名前を実態に合わせて改名し、削除の非退行として残す。applied 配列の
+# 実際の使い道（die したときに「ここまで適用した」へ載ること）は、直後の
+# test_移行の途中で失敗しても移した分は適用一覧に伝わる で検証する。
+test_移行が起きたことを利用者に伝える() {
   _setup_target
   mkdir -p "$TARGET/.claude/.handoff/pending"
   printf 'A\n' >"$TARGET/.claude/.handoff/pending/a.md"
   _run_install
   assert_contains "$INSTALL_OUT$INSTALL_ERR" "移行" "移行したことを伝える"
+}
+
+# applied は「途中で die したときに何が残っているか」を利用者に伝える唯一の手段
+# （install.sh 冒頭の die() のコメント参照）。移行の完了を待ってから1件だけ積むと、
+# 一部のファイルを移した直後に別のファイルの移行で die したとき、既に移した分が
+# 「ここまで適用した」一覧から漏れる。pending は書き込み可能なまま移行させて
+# 先に完了させ、consumed の移行先だけ書き込み不可にして意図的に die させる。
+test_移行の途中で失敗しても移した分は適用一覧に伝わる() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.handoff/pending" "$TARGET/.claude/.handoff/consumed" \
+           "$TARGET/.token-saver/handoff/consumed"
+  printf 'A\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  printf 'B\n' >"$TARGET/.claude/.handoff/consumed/b.md"
+  chmod 555 "$TARGET/.token-saver/handoff/consumed"
+  _run_install
+  chmod 755 "$TARGET/.token-saver/handoff/consumed" 2>/dev/null || true
+  assert_ne "0" "$INSTALL_STATUS" "終了コード"
+  assert_contains "$INSTALL_ERR" "a.md" "先に移した pending が適用一覧に載る"
 }
 
 test_旧パスが無ければ移行を報告しない() {
@@ -259,6 +283,39 @@ test_旧パスのシンボリックリンクはリンクごと移す() {
     _fail "移行でシンボリックリンクが実体化した"
   fi
   assert_file_missing "$TARGET/.claude/.handoff/pending/link.md" "旧側のリンク"
+}
+
+# 新側に壊れたシンボリックリンクがあると [ -e ] は偽になる。[ -L ] を落とすと
+# 「無いも同然」と誤認して旧側の実ファイルで上書きしてしまう。衝突判定は
+# 実体の有無ではなく、そこに何か（リンクを含む）があるかで見なければならない。
+test_新側の壊れたリンクは実ファイルで上書きされない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.handoff/pending" "$TARGET/.token-saver/handoff/pending"
+  printf 'OLD\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  ln -s "$TEST_TMP/does-not-exist.md" "$TARGET/.token-saver/handoff/pending/a.md"
+  _run_install
+  assert_eq "OLD" "$(cat "$TARGET/.claude/.handoff/pending/a.md")" "旧側は残る"
+  if [ ! -L "$TARGET/.token-saver/handoff/pending/a.md" ]; then
+    _fail "新側の壊れたリンクが実ファイルで上書きされた"
+  fi
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "警告" "衝突を警告する"
+}
+
+test_台帳が新旧にあれば新台帳を上書きせず警告する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.token-saver" "$TARGET/.token-saver"
+  # lib/ledger.py の skills は配列（get_list）である。辞書で書くと
+  # get_list が [] とみなして丸ごと落ちてしまい、衝突の有無に関わらず
+  # マーカーが消える誤検出になるため、実際のスキーマに合わせる。
+  printf '{"skills":[{"name":"legacy-marker","src":"/x","mode":"link"}]}\n' \
+    >"$TARGET/.claude/.token-saver/installed.json"
+  printf '{"skills":[{"name":"new-marker","src":"/y","mode":"link"}]}\n' \
+    >"$TARGET/.token-saver/installed.json"
+  _run_install
+  assert_file_exists "$TARGET/.claude/.token-saver/installed.json" "旧台帳は残る"
+  assert_contains "$(cat "$TARGET/.token-saver/installed.json")" "new-marker" "新台帳の既存内容が保たれる"
+  assert_not_contains "$(cat "$TARGET/.token-saver/installed.json")" "legacy-marker" "旧台帳の内容を持ち込んでいない"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "警告" "衝突を警告する"
 }
 
 test_gitignore_はルート直下の1行で覆う() {
