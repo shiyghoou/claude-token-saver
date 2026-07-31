@@ -146,7 +146,7 @@ _check_assert_layer
 # 違反があればテストを1本も走らせずに打ち切る。1箇所の直し忘れを
 # 「他は緑だから大丈夫」と読ませないためである。
 _check_path_literals() {
-  local targets=() legacy_hits new_hits
+  local targets=() legacy_hits new_hits paths_sh
   [ -f "$REPO_ROOT/install.sh" ] && targets+=("$REPO_ROOT/install.sh")
   [ -f "$REPO_ROOT/uninstall.sh" ] && targets+=("$REPO_ROOT/uninstall.sh")
   [ -d "$REPO_ROOT/scripts" ] && targets+=("$REPO_ROOT/scripts")
@@ -158,13 +158,27 @@ _check_path_literals() {
     exit 1
   fi
 
-  legacy_hits="$(grep -rnE '\.claude/\.handoff|\.claude/\.token-saver' "${targets[@]}" 2>/dev/null \
-    | grep -v '/paths\.sh:' || true)"
+  paths_sh="$REPO_ROOT/scripts/lib/paths.sh"
+
+  # 除外は grep -v によるパターン一致ではなく、grep -rn が出す先頭フィールド
+  # （ファイルパスそのもの）を awk で文字列としてそのまま比較する。パターン
+  # 一致（例: `grep -v '/paths\.sh:'`）だと、行末コメントに "paths.sh:" という
+  # 文字列を書くだけで無関係な違反行ごと免除できてしまい、除外の対象が
+  # scripts/lib/paths.sh という1ファイルに固定されない（他所の同名ファイルも
+  # 素通りする）。文字列比較なら対象は絶対パス1本だけに固定される。
+  # $REPO_ROOT を正規表現として組み立てない（絶対パスに . や + が含まれる環境で
+  # 誤って広がる／狭まる恐れがあるため）。
+  #
+  # -H は必須である。対象が1ファイルだけのとき grep -rn は既定でファイル名を
+  # 出さないため、-H を付けないと単一対象の実行でファイル名の先頭フィールドが
+  # 消え、行番号が誤ってファイル名の位置に来て除外判定が壊れる。
+  legacy_hits="$(grep -rnHE '\.claude/\.handoff|\.claude/\.token-saver' "${targets[@]}" 2>/dev/null \
+    | awk -F: -v skip="$paths_sh" '$1 != skip { print }' || true)"
 
   # 旧パスとして既に報告した行を新パスの走査から除く。".claude/.token-saver"
   # は ".token-saver" も部分一致するため、除かないと同じ行が二重に出る。
-  new_hits="$(grep -rnE '\.token-saver' "${targets[@]}" 2>/dev/null \
-    | grep -v '/paths\.sh:' \
+  new_hits="$(grep -rnHE '\.token-saver' "${targets[@]}" 2>/dev/null \
+    | awk -F: -v skip="$paths_sh" '$1 != skip { print }' \
     | grep -vE '\.claude/\.handoff|\.claude/\.token-saver' \
     | awk '{ line = $0; sub(/^[^:]*:[0-9]+:/, "", line); if (line !~ /^[[:space:]]*#/) print }' \
     || true)"

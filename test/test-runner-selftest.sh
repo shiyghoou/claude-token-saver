@@ -134,7 +134,8 @@ _make_runner_dir() {
   : >"$TEST_TMP/install.sh"
   : >"$TEST_TMP/uninstall.sh"
   printf '#!/usr/bin/env bash\n# テスト用の空実装。\n' >"$TEST_TMP/scripts/handoff-check.sh"
-  cp "$REPO_ROOT/scripts/lib/paths.sh" "$TEST_TMP/scripts/lib/paths.sh"
+  cp "$REPO_ROOT/scripts/lib/paths.sh" "$TEST_TMP/scripts/lib/paths.sh" \
+    || _fail "paths.sh の複製に失敗した（移動または改名されていないか確認すること）"
   : >"$TEST_TMP/lib/.keep"
 }
 
@@ -537,4 +538,45 @@ test_実装コードの行頭コメントにある旧パスのリテラルは打
   _run_runner
   assert_ne "0" "$RUNNER_STATUS" "終了コード"
   assert_contains "$RUNNER_OUT" "install.sh" "違反したファイル名"
+}
+
+# paths.sh の除外は「行に paths.sh という文字列が含まれるか」ではなく
+# 「ファイルパスそのものが scripts/lib/paths.sh に一致するか」で行う。前者
+# （grep -v によるパターン一致）だと、違反行の行末コメントに "paths.sh:" と
+# 書くだけで、無関係な新パスの値ごと免除されてしまう。ゲート自身の案内文
+# （「定義は scripts/lib/paths.sh の1箇所だけに置くこと」）を読んだ書き手が
+# 自然に書きそうな参照コメントである。
+test_行末コメントにpaths_shへの参照があっても新パスの値は打ち切られる() {
+  _make_runner_dir
+  printf 'STATE=".token-saver"  # 定義は scripts/lib/paths.sh: cts_base_rel を見よ\n' \
+    >>"$TEST_TMP/install.sh"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "終了コード"
+  assert_contains "$RUNNER_OUT" "install.sh" "違反したファイル名"
+}
+
+# 除外はファイルパスの完全一致でなければならない。ファイル名だけで判定すると、
+# scripts/ や lib/ の下の別の場所に paths.sh という名前のファイルを置くだけで
+# 免除されてしまう。それはまさにこのゲートが防ぐべき「2つ目のパス定義ファイル」
+# そのものであり、免除されては本末転倒である。
+test_別の場所のpaths_shという名前のファイルは免除されない() {
+  _make_runner_dir
+  printf 'CTS_BASE=".token-saver"\n' >"$TEST_TMP/lib/paths.sh"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "終了コード"
+  assert_contains "$RUNNER_OUT" "lib/paths.sh" "違反したファイル名"
+}
+
+# 「対象が1つも無ければエラー」の守りは、_make_runner_dir が種まきする
+# 最小の実装コードのおかげで通常は発火しない。この守り自体が生きていることを
+# 別立てで確かめないと、種まきが守りを恒久的に迂回しているだけになる。
+test_実装コードが1つも無ければ対象ゼロのエラーで打ち切る() {
+  _make_runner_dir
+  rm -rf "$TEST_TMP/install.sh" "$TEST_TMP/uninstall.sh" "$TEST_TMP/scripts" "$TEST_TMP/lib"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "終了コード"
+  assert_contains "$RUNNER_OUT" "パス検査の対象が1つも無い" "対象ゼロのエラーメッセージ"
 }
