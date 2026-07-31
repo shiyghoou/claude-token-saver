@@ -71,10 +71,21 @@ test_フックの置き場所が新パスを組み立てる() {
 # いるため、このテストが守るのは値ではなく「SKILL.md が paths.sh の値に追随して
 # いるか」という一致性である。paths.sh 側の値が丸ごと間違っていれば、上のリテラル
 # 契約テストが単独で赤くなる。
+#
+# 緩い assert_contains だけでは「保存先とファイル名」節の書き込み指示行と、
+# その下の「例:」行のどちらが一致していても緑になる。指示行だけを壊して
+# 例を残す改変（レビューで実際に確認済み）でもこの緩い形は素通りするため、
+# 指示行そのもの（コードフェンス内のパステンプレート）に絞った厳しい形と、
+# 旧パスが指示として残っていないことの否定形を両方置く。
 test_SKILL_MDの保存先がpathsshと一致する() {
   _load_paths
   local skill_md
   skill_md="$(cat "$REPO_ROOT/skills/session-handoff/SKILL.md")"
   assert_contains "$skill_md" "$(cts_handoff_rel)/pending" \
     "SKILL.md の保存先が cts_handoff_rel() と一致する"
+  assert_contains "$skill_md" \
+    "<リポジトリルート>/$(cts_handoff_rel)/pending/<YYYY-MM-DD>" \
+    "SKILL.md の書き込み指示行そのものが cts_handoff_rel() と一致する"
+  assert_not_contains "$skill_md" "$(cts_legacy_handoff_rel)/pending" \
+    "SKILL.md が旧パスへの書き込みを指示していない"
 }
