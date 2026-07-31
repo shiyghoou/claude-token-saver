@@ -212,8 +212,8 @@ test_登録されるコマンドは絶対パスである() {
 test_登録されたフックがそのまま実行できる() {
   _setup_target
   _run_install
-  mkdir -p "$TARGET/.claude/.handoff/pending"
-  printf '実行できる引き継ぎ\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  mkdir -p "$TARGET/.token-saver/handoff/pending"
+  printf '実行できる引き継ぎ\n' >"$TARGET/.token-saver/handoff/pending/a.md"
 
   local cmd out
   cmd="$(_hook_commands SessionStart | grep handoff-check.sh)"
@@ -304,8 +304,8 @@ test_クローンのパスに空白があってもフックが実行できる() 
   _clone_repo "$clone"
   bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
 
-  mkdir -p "$TARGET/.claude/.handoff/pending"
-  printf '空白パスでも読める\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  mkdir -p "$TARGET/.token-saver/handoff/pending"
+  printf '空白パスでも読める\n' >"$TARGET/.token-saver/handoff/pending/a.md"
 
   local cmd out
   cmd="$(_hook_commands SessionStart | grep handoff-check.sh)"

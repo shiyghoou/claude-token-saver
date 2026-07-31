@@ -4,6 +4,12 @@
 # フックが依存不足で落ちるとセッション起動を妨げるため。
 # （timeout は GNU coreutils であり macOS の既定環境には無い。）
 
+# パスの単一情報源。common.sh 自身はフックから source されるため、
+# 自分の位置を基準に隣を読む。
+CTS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=paths.sh
+. "$CTS_LIB_DIR/paths.sh" || return 1
+
 # 標準入力から受け取ったフックのペイロードを保持する。
 # 読み切れなかった（タイムアウトした）ことは記録しない。「読み切れなかった＝
 # 判定できない」ではなく、読めた分から目的のフィールドを取り出せることが多いため、
@@ -221,8 +227,8 @@ cts_project_dir() {
   printf '%s' "$PWD"
 }
 
-cts_handoff_dir()  { printf '%s/.claude/.handoff' "$(cts_project_dir)"; }
-cts_state_dir()    { printf '%s/.claude/.token-saver' "$(cts_project_dir)"; }
+cts_handoff_dir()  { printf '%s/%s' "$(cts_project_dir)" "$(cts_handoff_rel)"; }
+cts_state_dir()    { printf '%s/%s' "$(cts_project_dir)" "$(cts_base_rel)"; }
 
 # 直前の cts_consume_file が成功したときの移動先。標準出力を汚さずに
 # 呼び出し側へ返すための変数である（フックの stdout は契約の一部）。

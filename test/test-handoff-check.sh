@@ -6,14 +6,14 @@ HOOK="$REPO_ROOT/scripts/handoff-check.sh"
 # 導入先リポジトリを模したディレクトリを作る。
 _setup_project() {
   PROJ="$TEST_TMP/proj"
-  mkdir -p "$PROJ/.claude/.handoff/pending" "$PROJ/.claude/.handoff/consumed"
+  mkdir -p "$PROJ/.token-saver/handoff/pending" "$PROJ/.token-saver/handoff/consumed"
   export CLAUDE_PROJECT_DIR="$PROJ"
 }
 
 # pending に引き継ぎファイルを置く。
 _write_pending() {
   local name="$1" body="$2"
-  printf '%s\n' "$body" >"$PROJ/.claude/.handoff/pending/$name"
+  printf '%s\n' "$body" >"$PROJ/.token-saver/handoff/pending/$name"
 }
 
 # フックを実行する。標準出力は $HOOK_OUT、終了コードは $HOOK_STATUS に入る。
@@ -124,7 +124,7 @@ test_pending_が空なら無出力で終了コード0() {
 
 test_handoff_ディレクトリ自体が無くても無出力で終了コード0() {
   _setup_project
-  rm -rf "$PROJ/.claude/.handoff"
+  rm -rf "$PROJ/.token-saver/handoff"
   local out
   _run_hook "$(_startup_payload)"
   out="$HOOK_OUT"
@@ -148,15 +148,15 @@ test_出力後に_consumed_へ移動する() {
   _setup_project
   _write_pending "2026-07-31-1840-643-stage.md" "本文"
   _run_hook "$(_startup_payload)"
-  assert_file_missing "$PROJ/.claude/.handoff/pending/2026-07-31-1840-643-stage.md"
-  assert_file_exists "$PROJ/.claude/.handoff/consumed/2026-07-31-1840-643-stage.md"
+  assert_file_missing "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-643-stage.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/2026-07-31-1840-643-stage.md"
 }
 
 test_consumed_へ移動したファイルの中身は失われない() {
   _setup_project
   _write_pending "2026-07-31-1840-643-stage.md" "消えてはいけない本文"
   _run_hook "$(_startup_payload)"
-  assert_contains "$(cat "$PROJ/.claude/.handoff/consumed/2026-07-31-1840-643-stage.md")" \
+  assert_contains "$(cat "$PROJ/.token-saver/handoff/consumed/2026-07-31-1840-643-stage.md")" \
     "消えてはいけない本文" "consumed のファイル内容"
 }
 
@@ -168,7 +168,7 @@ test_発火源が_compact_のときは発火しない() {
   out="$HOOK_OUT"
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_empty "$out"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/2026-07-31-1840-643-stage.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-643-stage.md"
 }
 
 test_発火源が_clear_のときは発火する() {
@@ -196,7 +196,7 @@ test_未知の発火源では発火しない() {
   _run_hook "$(printf '{"source":"someday-new-source","cwd":"%s"}' "$PROJ")"
   out="$HOOK_OUT"
   assert_empty "$out"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
 test_複数ファイルはファイル名の昇順ですべて出力される() {
@@ -222,9 +222,9 @@ test_複数ファイルはすべて_consumed_へ移動する() {
   _write_pending "a.md" "A"
   _write_pending "b.md" "B"
   _run_hook "$(_startup_payload)"
-  assert_file_exists "$PROJ/.claude/.handoff/consumed/a.md"
-  assert_file_exists "$PROJ/.claude/.handoff/consumed/b.md"
-  assert_empty "$(ls -A "$PROJ/.claude/.handoff/pending")" "pending の残存"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/b.md"
+  assert_empty "$(ls -A "$PROJ/.token-saver/handoff/pending")" "pending の残存"
 }
 
 test_出力には要約して指示を待つ旨の指示が3行とも含まれる() {
@@ -283,7 +283,7 @@ test_ファイル名に引用符や山括弧や改行があっても開始タグ
   _setup_project
   local name
   name="$(printf '2026-07-31-1840-a" x="><q\n侵入マーカー.md')"
-  printf '本文\n' >"$PROJ/.claude/.handoff/pending/$name"
+  printf '本文\n' >"$PROJ/.token-saver/handoff/pending/$name"
   _run_hook "$(_startup_payload)"
   assert_not_contains "$(_outside_fence "$HOOK_OUT")" "侵入マーカー" "区切りの外"
   assert_eq "1" "$(_count_open_tags "$(_fence_id "$HOOK_OUT")" "$HOOK_OUT")" "開始タグの行数"
@@ -298,9 +298,9 @@ test_ファイル名に引用符や山括弧や改行があっても開始タグ
 #
 # 注記を伴う経路を一通り踏ませ、区切りの外の行だけを返す。$1 をファイル名へ埋め込む。
 _notes_scenario() {
-  local mark="$1" pend="$PROJ/.claude/.handoff/pending"
-  rm -rf "$PROJ/.claude/.handoff"
-  mkdir -p "$pend" "$PROJ/.claude/.handoff/consumed"
+  local mark="$1" pend="$PROJ/.token-saver/handoff/pending"
+  rm -rf "$PROJ/.token-saver/handoff"
+  mkdir -p "$pend" "$PROJ/.token-saver/handoff/consumed"
   # 切り詰められる引き継ぎ。
   _make_sized_file "$pend/2026-07-31-1841-$mark.md" 16384 HEAD-MARK TAIL-MARK
   # 読めない引き継ぎ。
@@ -314,7 +314,7 @@ _notes_scenario() {
   # タイムスタンプで始まらない名前（順序の警告を踏ませる）。
   printf '本文\n' >"$pend/$mark.md"
   _run_hook "$(_startup_payload)"
-  chmod 644 "$PROJ/.claude/.handoff/consumed/2026-07-31-1842-$mark.md" 2>/dev/null || true
+  chmod 644 "$PROJ/.token-saver/handoff/consumed/2026-07-31-1842-$mark.md" 2>/dev/null || true
   _trust_region "$HOOK_OUT"
 }
 
@@ -352,20 +352,20 @@ test_区切りの識別子は実行ごとに変わる() {
 
 test_consumed_ディレクトリが無ければ作成する() {
   _setup_project
-  rm -rf "$PROJ/.claude/.handoff/consumed"
+  rm -rf "$PROJ/.token-saver/handoff/consumed"
   _write_pending "a.md" "本文"
   _run_hook "$(_startup_payload)"
-  assert_file_exists "$PROJ/.claude/.handoff/consumed/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/a.md"
 }
 
 test_同名ファイルが_consumed_にあっても既存を上書きしない() {
   _setup_project
-  printf '先に消費した内容\n' >"$PROJ/.claude/.handoff/consumed/a.md"
+  printf '先に消費した内容\n' >"$PROJ/.token-saver/handoff/consumed/a.md"
   _write_pending "a.md" "新しい内容"
   _run_hook "$(_startup_payload)"
-  assert_contains "$(cat "$PROJ/.claude/.handoff/consumed/a.md")" \
+  assert_contains "$(cat "$PROJ/.token-saver/handoff/consumed/a.md")" \
     "先に消費した内容" "既存の consumed ファイル"
-  assert_empty "$(ls -A "$PROJ/.claude/.handoff/pending")" "pending の残存"
+  assert_empty "$(ls -A "$PROJ/.token-saver/handoff/pending")" "pending の残存"
 }
 
 test_CLAUDE_PROJECT_DIR_が無いときは_JSON_の_cwd_を使う() {
@@ -390,7 +390,7 @@ test_source_が無いペイロードでは発火しない() {
   out="$HOOK_OUT"
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_empty "$out"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
 test_標準入力が空のときは発火しない() {
@@ -401,7 +401,7 @@ test_標準入力が空のときは発火しない() {
   out="$HOOK_OUT"
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_empty "$out"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
 test_壊れた_JSON_では発火しない() {
@@ -412,7 +412,7 @@ test_壊れた_JSON_では発火しない() {
   out="$HOOK_OUT"
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_empty "$out"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
 test_CTS_FORCE_を立てれば手動実行でも発火する() {
@@ -422,7 +422,7 @@ test_CTS_FORCE_を立てれば手動実行でも発火する() {
   CTS_FORCE=1 _run_hook ""
   out="$HOOK_OUT"
   assert_contains "$out" "手動で読む" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/consumed/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/a.md"
 }
 
 # ---- ペイロードの読み取りは入れ子に惑わされないこと ----------------------
@@ -436,7 +436,7 @@ test_入れ子の_source_が後ろにあっても本物を見る() {
   _run_hook "$(printf '{"source":"compact","cwd":"%s","meta":{"source":"startup"}}' "$PROJ")"
   out="$HOOK_OUT"
   assert_empty "$out"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
 test_入れ子の_source_が前にあっても本物を見る() {
@@ -447,7 +447,7 @@ test_入れ子の_source_が前にあっても本物を見る() {
   _run_hook "$(printf '{"meta":{"source":"startup"},"cwd":"%s","source":"compact"}' "$PROJ")"
   out="$HOOK_OUT"
   assert_empty "$out"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 
   # 逆向き（入れ子が compact、本物が startup）では発火すること。
   _run_hook "$(printf '{"meta":{"source":"compact"},"cwd":"%s","source":"startup"}' "$PROJ")"
@@ -467,14 +467,14 @@ test_エスケープされた引用符を含む_source_では発火しない() {
   # 値は start"up であって startup ではない。切り出しを誤ると startup に化ける。
   _run_hook "$(printf '{"source":"start\\"up","cwd":"%s"}' "$PROJ")"
   assert_empty "$HOOK_OUT"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
 test_入れ子の_cwd_が後ろにあっても本物を使う() {
   _setup_project
   local other="$TEST_TMP/other"
-  mkdir -p "$other/.claude/.handoff/pending"
-  printf '別プロジェクトの引き継ぎ\n' >"$other/.claude/.handoff/pending/x.md"
+  mkdir -p "$other/.token-saver/handoff/pending"
+  printf '別プロジェクトの引き継ぎ\n' >"$other/.token-saver/handoff/pending/x.md"
   _write_pending "a.md" "正しいプロジェクトの引き継ぎ"
   unset CLAUDE_PROJECT_DIR
   local out
@@ -488,8 +488,8 @@ test_入れ子の_cwd_が後ろにあっても本物を使う() {
 test_入れ子の_cwd_が前にあっても本物を使う() {
   _setup_project
   local other="$TEST_TMP/other"
-  mkdir -p "$other/.claude/.handoff/pending"
-  printf '別プロジェクトの引き継ぎ\n' >"$other/.claude/.handoff/pending/x.md"
+  mkdir -p "$other/.token-saver/handoff/pending"
+  printf '別プロジェクトの引き継ぎ\n' >"$other/.token-saver/handoff/pending/x.md"
   _write_pending "a.md" "正しいプロジェクトの引き継ぎ"
   unset CLAUDE_PROJECT_DIR
   local out
@@ -497,7 +497,7 @@ test_入れ子の_cwd_が前にあっても本物を使う() {
   out="$HOOK_OUT"
   assert_contains "$out" "正しいプロジェクトの引き継ぎ" "フック出力"
   assert_not_contains "$out" "別プロジェクトの引き継ぎ" "フック出力"
-  assert_file_exists "$other/.claude/.handoff/pending/x.md"
+  assert_file_exists "$other/.token-saver/handoff/pending/x.md"
 }
 
 # timeout は GNU coreutils であり macOS の既定環境に無い。無くても壊れないこと。
@@ -524,7 +524,7 @@ test_timeout_コマンドが無い環境でも発火源の判定は正しい() {
   PATH="$shadow" _run_hook "$(printf '{"source":"compact","cwd":"%s"}' "$PROJ")"
   out="$HOOK_OUT"
   assert_empty "$out" "compact での出力"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 
   PATH="$shadow" _run_hook "$(_startup_payload)"
   out="$HOOK_OUT"
@@ -556,7 +556,7 @@ test_標準入力が閉じなくても速やかに終了し判定できていれ
     _fail "標準入力の待機が長すぎる: ${elapsed} 秒"
   fi
   assert_contains "$(cat "$TEST_TMP/.hook-out")" "本文" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/consumed/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/a.md"
 }
 
 # 判定できないまま閉じない場合は、従来どおり発火しない（fail-closed）。
@@ -575,7 +575,7 @@ test_標準入力が閉じず発火源も判定できなければ発火しない
 
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_empty "$(cat "$TEST_TMP/.hook-out")" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
 # 標準入力そのものが閉じられていても標準エラーを汚さない。
@@ -587,7 +587,7 @@ test_標準入力が閉じられていても標準エラーを汚さない() {
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_empty "$(cat "$TEST_TMP/.hook-err")" "標準エラー"
   assert_empty "$(cat "$TEST_TMP/.hook-out")" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
 # 標準出力が閉じていると書けない。書けないまま消費すると引き継ぎが1件消える。
@@ -598,7 +598,7 @@ test_標準出力が閉じているときは消費しない() {
   HOOK_STATUS=$?
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_empty "$(cat "$TEST_TMP/.hook-err")" "標準エラー"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
 }
 
 # ---- 消費できなかったものは注入しない -----------------------------------
@@ -609,16 +609,16 @@ test_移動に失敗したら本文を注入せず警告を出す() {
   _skip_if_root && return 0
   _setup_project
   _write_pending "a.md" "注入されてはいけない本文"
-  chmod 555 "$PROJ/.claude/.handoff/pending"
+  chmod 555 "$PROJ/.token-saver/handoff/pending"
   local out
   _run_hook "$(_startup_payload)"
   out="$HOOK_OUT"
-  chmod 755 "$PROJ/.claude/.handoff/pending"
+  chmod 755 "$PROJ/.token-saver/handoff/pending"
 
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_not_contains "$out" "注入されてはいけない本文" "フック出力"
   assert_contains "$out" "消費できなかった" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
 # 並行セッションでの二重注入。mv が先なら勝った側だけが本文を得る。
@@ -646,8 +646,8 @@ test_他が先に消費した引き継ぎには警告を出さない() {
   payload="$(_startup_payload)"
   for round in $(seq 1 20); do
     rm -f "$TEST_TMP/race-stop"
-    rm -rf "$PROJ/.claude/.handoff"
-    mkdir -p "$PROJ/.claude/.handoff/pending"
+    rm -rf "$PROJ/.token-saver/handoff"
+    mkdir -p "$PROJ/.token-saver/handoff/pending"
     for i in 1 2 3 4 5; do
       _write_pending "2026-07-31-000$i-a.md" "本文 $i"
     done
@@ -655,8 +655,8 @@ test_他が先に消費した引き継ぎには警告を出さない() {
     # フックが1件目の消費に入った瞬間なので、そこを合図に残りを消す。
     # 消すだけで作り直さないので、警告に出たパスが後から存在することはない。
     (
-      while [ ! -d "$PROJ/.claude/.handoff/consumed" ] && [ ! -e "$TEST_TMP/race-stop" ]; do :; done
-      rm -f "$PROJ"/.claude/.handoff/pending/*.md 2>/dev/null
+      while [ ! -d "$PROJ/.token-saver/handoff/consumed" ] && [ ! -e "$TEST_TMP/race-stop" ]; do :; done
+      rm -f "$PROJ"/.token-saver/handoff/pending/*.md 2>/dev/null
     ) &
     racer=$!
     printf '%s' "$payload" | bash "$HOOK" >"$TEST_TMP/race-out" 2>/dev/null
@@ -688,7 +688,7 @@ test_2回連続で起動すると2回目は無出力() {
 test_巨大な引き継ぎは切り詰めてパスだけ渡す() {
   _setup_project
   # 2 MB 程度の pending を作る。倍々で伸ばすのはループを回すより速いため。
-  local chunk="$PROJ/.claude/.handoff/pending/a.md"
+  local chunk="$PROJ/.token-saver/handoff/pending/a.md"
   printf '巨大な引き継ぎの本文である。%s\n' "$(printf 'x%.0s' {1..64})" >"$chunk"
   local i
   for i in $(seq 1 15); do cat "$chunk" "$chunk" >"$chunk.tmp" && mv "$chunk.tmp" "$chunk"; done
@@ -701,13 +701,13 @@ test_巨大な引き継ぎは切り詰めてパスだけ渡す() {
     _fail "出力が大きすぎる: ${size} バイト"
   fi
   assert_contains "$HOOK_OUT" "切り詰めた" "フック出力"
-  assert_contains "$HOOK_OUT" "$PROJ/.claude/.handoff/consumed/a.md" "フック出力"
+  assert_contains "$HOOK_OUT" "$PROJ/.token-saver/handoff/consumed/a.md" "フック出力"
 }
 
 # 上限はバイトで効かせる。日本語の引き継ぎでも出力が膨らまないこと。
 test_日本語の巨大な引き継ぎでも出力のバイト数が上限に収まる() {
   _setup_project
-  local chunk="$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  local chunk="$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   local line
   line="$(printf 'あ%.0s' {1..40})"
   local i
@@ -725,7 +725,7 @@ test_日本語の巨大な引き継ぎでも出力のバイト数が上限に収
 # 引き継ぎではほぼ確実に不正な UTF-8 が出る。行の途中では切らないこと。
 test_マルチバイト文字の途中で切らない() {
   _setup_project
-  local chunk="$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  local chunk="$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   local line i
   line="$(printf 'あ%.0s' {1..40})"
   : >"$chunk"
@@ -743,11 +743,11 @@ test_マルチバイト文字の途中で切らない() {
 # 途中で切って壊れたバイト列を出すより、Read させるほうが確実である。
 test_改行の無い巨大な1行は本文を渡さずパスを示す() {
   _setup_project
-  local chunk="$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  local chunk="$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   printf 'あ%.0s' {1..5000} >"$chunk"
   _run_hook "$(_startup_payload)"
   assert_empty "$(_inside_fence "$HOOK_OUT")" "区切りの中"
-  assert_contains "$HOOK_OUT" "$PROJ/.claude/.handoff/consumed/2026-07-31-1840-a.md" "フック出力"
+  assert_contains "$HOOK_OUT" "$PROJ/.token-saver/handoff/consumed/2026-07-31-1840-a.md" "フック出力"
 }
 
 test_件数の上限を超えた分は次回へ持ち越す() {
@@ -760,20 +760,20 @@ test_件数の上限を超えた分は次回へ持ち越す() {
   assert_contains "$HOOK_OUT" "持ち越" "フック出力"
   assert_contains "$HOOK_OUT" "本文 1" "フック出力"
   assert_not_contains "$HOOK_OUT" "本文 8" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/2026-07-31-0008-a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/2026-07-31-0008-a.md"
 }
 
 # ---- ファイル名の扱い ----------------------------------------------------
 
 test_改行を含むファイル名でも件数と本文が正しい() {
   _setup_project
-  printf '改行入りの本文\n' >"$PROJ/.claude/.handoff/pending/$(printf 'a\nb').md"
+  printf '改行入りの本文\n' >"$PROJ/.token-saver/handoff/pending/$(printf 'a\nb').md"
   _write_pending "c.md" "普通の本文"
   _run_hook "$(_startup_payload)"
   assert_contains "$HOOK_OUT" "引き継ぎが 2 件ある" "フック出力"
   assert_contains "$HOOK_OUT" "改行入りの本文" "フック出力"
   assert_contains "$HOOK_OUT" "普通の本文" "フック出力"
-  assert_empty "$(ls -A "$PROJ/.claude/.handoff/pending")" "pending の残存"
+  assert_empty "$(ls -A "$PROJ/.token-saver/handoff/pending")" "pending の残存"
 }
 
 test_空白と日本語を含むファイル名でも消費できる() {
@@ -781,27 +781,27 @@ test_空白と日本語を含むファイル名でも消費できる() {
   _write_pending "2026-07-31-1840 引き継ぎ メモ.md" "日本語名の本文"
   _run_hook "$(_startup_payload)"
   assert_contains "$HOOK_OUT" "日本語名の本文" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/consumed/2026-07-31-1840 引き継ぎ メモ.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/2026-07-31-1840 引き継ぎ メモ.md"
 }
 
 test_ハイフンで始まるファイル名でも消費できる() {
   _setup_project
-  printf 'ハイフン名の本文\n' >"$PROJ/.claude/.handoff/pending/-n.md"
+  printf 'ハイフン名の本文\n' >"$PROJ/.token-saver/handoff/pending/-n.md"
   _run_hook "$(_startup_payload)"
   assert_contains "$HOOK_OUT" "ハイフン名の本文" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/consumed/-n.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/-n.md"
 }
 
 # SKILL.md は consumed から pending へ mv で戻せると書いている。
 # ln -s で戻す人がいても無音で放置しない（ただし引き継ぎ置き場の中に限る）。
 test_引き継ぎ置き場の中を指すリンクは対象にする() {
   _setup_project
-  printf 'リンク先の本文\n' >"$PROJ/.claude/.handoff/consumed/2026-07-31-1840-real.md"
+  printf 'リンク先の本文\n' >"$PROJ/.token-saver/handoff/consumed/2026-07-31-1840-real.md"
   ln -s "../consumed/2026-07-31-1840-real.md" \
-    "$PROJ/.claude/.handoff/pending/2026-07-31-1840-link.md"
+    "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-link.md"
   _run_hook "$(_startup_payload)"
   assert_contains "$HOOK_OUT" "リンク先の本文" "フック出力"
-  assert_empty "$(ls -A "$PROJ/.claude/.handoff/pending")" "pending の残存"
+  assert_empty "$(ls -A "$PROJ/.token-saver/handoff/pending")" "pending の残存"
 }
 
 # find -L のもとでは -xtype l がすべてのリンクに真になる。生きたリンクで
@@ -809,9 +809,9 @@ test_引き継ぎ置き場の中を指すリンクは対象にする() {
 # -xtype l を -type l に直しても 191 件全緑。テストが正誤を区別できていなかった）。
 test_生きたリンクではリンク切れと言わない() {
   _setup_project
-  printf 'リンク先の本文\n' >"$PROJ/.claude/.handoff/consumed/2026-07-31-1840-real.md"
+  printf 'リンク先の本文\n' >"$PROJ/.token-saver/handoff/consumed/2026-07-31-1840-real.md"
   ln -s "../consumed/2026-07-31-1840-real.md" \
-    "$PROJ/.claude/.handoff/pending/2026-07-31-1840-link.md"
+    "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-link.md"
   _run_hook "$(_startup_payload)"
   assert_contains "$HOOK_OUT" "リンク先の本文" "フック出力"
   assert_not_contains "$HOOK_OUT" "リンク切れ" "フック出力"
@@ -823,21 +823,21 @@ test_生きたリンクではリンク切れと言わない() {
 test_引き継ぎ置き場の外を指すリンクは本文を読み込まない() {
   _setup_project
   printf 'ここは秘密である\n' >"$TEST_TMP/secret.txt"
-  ln -s "$TEST_TMP/secret.txt" "$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  ln -s "$TEST_TMP/secret.txt" "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   _run_hook "$(_startup_payload)"
   assert_not_contains "$HOOK_OUT" "ここは秘密である" "フック出力"
   assert_contains "$HOOK_OUT" "引き継ぎ置き場の外" "フック出力"
   # 元ファイルは消さない。動かすのはリンクのほうである。
   assert_file_exists "$TEST_TMP/secret.txt"
   # 繰り返し警告が積まれないよう、リンク自体は consumed へ退ける。
-  assert_empty "$(ls -A "$PROJ/.claude/.handoff/pending")" "pending の残存"
+  assert_empty "$(ls -A "$PROJ/.token-saver/handoff/pending")" "pending の残存"
 }
 
 test_相対パスで置き場の外へ出るリンクも本文を読み込まない() {
   _setup_project
   printf '外の内容である\n' >"$PROJ/outside.txt"
   # pending → .handoff → .claude → PROJ。3つ上がれば置き場の外である。
-  ln -s "../../../outside.txt" "$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  ln -s "../../../outside.txt" "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   _run_hook "$(_startup_payload)"
   assert_not_contains "$HOOK_OUT" "外の内容である" "フック出力"
   assert_contains "$HOOK_OUT" "引き継ぎ置き場の外" "フック出力"
@@ -848,7 +848,7 @@ test_相対パスで置き場の外へ出るリンクも本文を読み込まな
 # 勧めているので、相対リンクの張り間違いが無音の消失になってはいけない。
 test_壊れたシンボリックリンクは警告する() {
   _setup_project
-  ln -s "$TEST_TMP/no-such-file.md" "$PROJ/.claude/.handoff/pending/2026-07-31-1840-broken.md"
+  ln -s "$TEST_TMP/no-such-file.md" "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-broken.md"
   _write_pending "2026-07-31-1841-a.md" "本文"
   _run_hook "$(_startup_payload)"
   assert_contains "$HOOK_OUT" "2026-07-31-1840-broken.md" "フック出力"
@@ -860,17 +860,17 @@ test_壊れたシンボリックリンクは警告する() {
 # ファイル名は攻撃者が決められるので、攻撃文字列を常設させる媒体にもなる。
 test_リンク切れの引き継ぎは退けられ二度目は警告しない() {
   _setup_project
-  ln -s "$TEST_TMP/no-such-file.md" "$PROJ/.claude/.handoff/pending/2026-07-31-1840-broken.md"
+  ln -s "$TEST_TMP/no-such-file.md" "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-broken.md"
   _run_hook "$(_startup_payload)"
   assert_contains "$HOOK_OUT" "リンク切れ" "1回目のフック出力"
-  assert_empty "$(ls -A "$PROJ/.claude/.handoff/pending")" "pending の残存"
+  assert_empty "$(ls -A "$PROJ/.token-saver/handoff/pending")" "pending の残存"
   _run_hook "$(_startup_payload)"
   assert_empty "$HOOK_OUT" "2回目のフック出力"
 }
 
 test_壊れたシンボリックリンクだけでも警告する() {
   _setup_project
-  ln -s "$TEST_TMP/no-such-file.md" "$PROJ/.claude/.handoff/pending/2026-07-31-1840-broken.md"
+  ln -s "$TEST_TMP/no-such-file.md" "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-broken.md"
   _run_hook "$(_startup_payload)"
   assert_contains "$HOOK_OUT" "リンク切れ" "フック出力"
   assert_eq "0" "$HOOK_STATUS" "終了コード"
@@ -885,13 +885,13 @@ test_リンク切れが無ければ何も言わない() {
 
 test_サブディレクトリは無視する() {
   _setup_project
-  mkdir -p "$PROJ/.claude/.handoff/pending/draft"
-  printf '下書き\n' >"$PROJ/.claude/.handoff/pending/draft/x.md"
+  mkdir -p "$PROJ/.token-saver/handoff/pending/draft"
+  printf '下書き\n' >"$PROJ/.token-saver/handoff/pending/draft/x.md"
   _write_pending "2026-07-31-1840-a.md" "本文"
   _run_hook "$(_startup_payload)"
   assert_contains "$HOOK_OUT" "本文" "フック出力"
   assert_not_contains "$HOOK_OUT" "下書き" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/draft/x.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/draft/x.md"
 }
 
 # ファイル名の昇順＝時刻の昇順という前提が破れたことに気づけること。
@@ -921,9 +921,9 @@ test_標準エラーは常に空である() {
 
   _skip_if_root && return 0
   _write_pending "2026-07-31-1841-b.md" "本文"
-  chmod 555 "$PROJ/.claude/.handoff/pending"
+  chmod 555 "$PROJ/.token-saver/handoff/pending"
   _run_hook "$(_startup_payload)"
-  chmod 755 "$PROJ/.claude/.handoff/pending"
+  chmod 755 "$PROJ/.token-saver/handoff/pending"
   assert_empty "$(cat "$TEST_TMP/.hook-err")" "移動失敗時の標準エラー"
 }
 
@@ -931,9 +931,9 @@ test_読み取れないファイルは無音で握りつぶさない() {
   _skip_if_root && return 0
   _setup_project
   _write_pending "2026-07-31-1840-a.md" "読めない本文"
-  chmod 000 "$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  chmod 000 "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   _run_hook "$(_startup_payload)"
-  chmod 644 "$PROJ/.claude/.handoff/consumed/2026-07-31-1840-a.md" 2>/dev/null || true
+  chmod 644 "$PROJ/.token-saver/handoff/consumed/2026-07-31-1840-a.md" 2>/dev/null || true
   assert_contains "$HOOK_OUT" "読めなかった" "フック出力"
   assert_empty "$(cat "$TEST_TMP/.hook-err")" "標準エラー"
 }
@@ -943,8 +943,8 @@ test_読み取れないファイルは無音で握りつぶさない() {
 test_CLAUDE_PROJECT_DIR_は_JSON_の_cwd_に優先する() {
   _setup_project
   local other="$TEST_TMP/other"
-  mkdir -p "$other/.claude/.handoff/pending"
-  printf 'cwd 側の引き継ぎ\n' >"$other/.claude/.handoff/pending/x.md"
+  mkdir -p "$other/.token-saver/handoff/pending"
+  printf 'cwd 側の引き継ぎ\n' >"$other/.token-saver/handoff/pending/x.md"
   _write_pending "a.md" "PROJECT_DIR 側の引き継ぎ"
   local out
   _run_hook "$(printf '{"source":"startup","cwd":"%s"}' "$other")"
@@ -1026,6 +1026,7 @@ test_本体で致命的エラーが起きても終了コード0で抜ける() {
   local dir="$TEST_TMP/injected"
   mkdir -p "$dir/lib"
   cp "$REPO_ROOT/scripts/lib/common.sh" "$dir/lib/common.sh"
+  cp "$REPO_ROOT/scripts/lib/paths.sh" "$dir/lib/paths.sh"
   awk '{ print } /^handoff_dir=/ { print ": \"$CTS_NO_SUCH_VARIABLE\"" }' \
     "$HOOK" >"$dir/handoff-check.sh"
   grep -q 'CTS_NO_SUCH_VARIABLE' "$dir/handoff-check.sh" ||
@@ -1051,7 +1052,7 @@ test_フックは_set_u_と_pipefail_を宣言している() {
 # 「読めた（ただし空）」に化ける。
 test_切り詰め経路でパイプの途中が失敗したら読めなかったと言う() {
   _setup_project
-  _make_sized_file "$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md" \
+  _make_sized_file "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md" \
     16384 HEAD-MARK TAIL-MARK
   local shadow="$TEST_TMP/bin"
   mkdir -p "$shadow"
@@ -1072,23 +1073,23 @@ test_合計バイト上限は件数上限より先に効く() {
   _setup_project
   local i
   for i in 1 2 3 4 5; do
-    _make_sized_file "$PROJ/.claude/.handoff/pending/2026-07-31-000$i-a.md" \
+    _make_sized_file "$PROJ/.token-saver/handoff/pending/2026-07-31-000$i-a.md" \
       8192 "HEAD-$i" "TAIL-$i"
   done
   assert_eq "8192" \
-    "$(wc -c <"$PROJ/.claude/.handoff/pending/2026-07-31-0001-a.md" | tr -d ' ')" \
+    "$(wc -c <"$PROJ/.token-saver/handoff/pending/2026-07-31-0001-a.md" | tr -d ' ')" \
     "作ったファイルのバイト数"
   _run_hook "$(_startup_payload)"
   assert_contains "$HOOK_OUT" "1 件を次回へ持ち越した" "フック出力"
   assert_contains "$HOOK_OUT" "HEAD-4" "フック出力"
   assert_not_contains "$HOOK_OUT" "HEAD-5" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/pending/2026-07-31-0005-a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/2026-07-31-0005-a.md"
 }
 
 # 1件あたりの上限ちょうどでは切り詰めない（実測: -le を -lt にする改変が全緑だった）。
 test_1件の上限ちょうどのファイルは切り詰めない() {
   _setup_project
-  local f="$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  local f="$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   _make_sized_file "$f" 8192 HEAD-MARK TAIL-MARK
   assert_eq "8192" "$(wc -c <"$f" | tr -d ' ')" "作ったファイルのバイト数"
   _run_hook "$(_startup_payload)"
@@ -1099,7 +1100,7 @@ test_1件の上限ちょうどのファイルは切り詰めない() {
 
 test_1件の上限を超えたファイルは切り詰める() {
   _setup_project
-  local f="$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  local f="$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   _make_sized_file "$f" 8256 HEAD-MARK TAIL-MARK
   assert_eq "8256" "$(wc -c <"$f" | tr -d ' ')" "作ったファイルのバイト数"
   _run_hook "$(_startup_payload)"
@@ -1114,7 +1115,7 @@ test_1件の上限を超えたファイルは切り詰める() {
 # 内側の 2>/dev/null では塞げない（実測: stderr 168 バイト）。
 test_本文に_NUL_があっても標準エラーを汚さない() {
   _setup_project
-  printf 'NUL の前\000NUL の後\n' >"$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  printf 'NUL の前\000NUL の後\n' >"$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   _run_hook "$(_startup_payload)"
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_empty "$(cat "$TEST_TMP/.hook-err")" "標準エラー"
@@ -1123,7 +1124,7 @@ test_本文に_NUL_があっても標準エラーを汚さない() {
 
 test_切り詰める本文に_NUL_があっても標準エラーを汚さない() {
   _setup_project
-  local f="$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  local f="$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   # NUL は切り詰めで残る側（先頭 8192 バイト）に置く。末尾に置くと head に
   # 落とされてしまい、この経路を踏まない。
   _make_sized_file "$TEST_TMP/filler" 16384 HEAD-MARK TAIL-MARK
@@ -1139,11 +1140,11 @@ test_切り詰める本文に_NUL_があっても標準エラーを汚さない(
 # 読めてはいる。サイズ非ゼロを根拠に「読めなかった」と言うのは誤りである。
 test_改行だけのファイルでは読めなかったと言わない() {
   _setup_project
-  printf '\n\n\n' >"$PROJ/.claude/.handoff/pending/2026-07-31-1840-a.md"
+  printf '\n\n\n' >"$PROJ/.token-saver/handoff/pending/2026-07-31-1840-a.md"
   _run_hook "$(_startup_payload)"
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_not_contains "$HOOK_OUT" "読めなかった" "フック出力"
-  assert_file_exists "$PROJ/.claude/.handoff/consumed/2026-07-31-1840-a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/2026-07-31-1840-a.md"
 }
 
 # ---- 標準入力の総待ち時間 ------------------------------------------------
@@ -1195,8 +1196,8 @@ test_cwd_が存在しないディレクトリなら_PWD_へ落ちる() {
   _setup_project
   unset CLAUDE_PROJECT_DIR
   # run.sh は各テストを $TEST_TMP を CWD として実行する。そこへ pending を置く。
-  mkdir -p "$PWD/.claude/.handoff/pending"
-  printf 'PWD 側の引き継ぎ\n' >"$PWD/.claude/.handoff/pending/a.md"
+  mkdir -p "$PWD/.token-saver/handoff/pending"
+  printf 'PWD 側の引き継ぎ\n' >"$PWD/.token-saver/handoff/pending/a.md"
   local out
   _run_hook '{"source":"startup","cwd":"/no/such/directory"}'
   out="$HOOK_OUT"
