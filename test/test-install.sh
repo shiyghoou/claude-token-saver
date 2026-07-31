@@ -192,6 +192,75 @@ test_claude_配下に引き継ぎのディレクトリを作らない() {
   assert_file_missing "$TARGET/.claude/.token-saver" "旧の状態置き場"
 }
 
+test_旧パスの引き継ぎを新パスへ移す() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.handoff/pending" "$TARGET/.claude/.handoff/consumed"
+  printf 'A\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  printf 'B\n' >"$TARGET/.claude/.handoff/consumed/b.md"
+  _run_install
+  assert_eq "A" "$(cat "$TARGET/.token-saver/handoff/pending/a.md")" "pending の中身"
+  assert_eq "B" "$(cat "$TARGET/.token-saver/handoff/consumed/b.md")" "consumed の中身"
+  assert_file_missing "$TARGET/.claude/.handoff/pending/a.md" "旧 pending"
+  assert_file_missing "$TARGET/.claude/.handoff/consumed/b.md" "旧 consumed"
+}
+
+test_旧パスの台帳を新パスへ移す() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.token-saver"
+  printf '{"skills":{}}\n' >"$TARGET/.claude/.token-saver/installed.json"
+  _run_install
+  assert_file_exists "$TARGET/.token-saver/installed.json" "新台帳"
+  assert_file_missing "$TARGET/.claude/.token-saver/installed.json" "旧台帳"
+}
+
+test_移行後は空になった旧ディレクトリを消す() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.handoff/pending" "$TARGET/.claude/.token-saver"
+  printf 'A\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  _run_install
+  assert_file_missing "$TARGET/.claude/.handoff" "旧引き継ぎ置き場"
+  assert_file_missing "$TARGET/.claude/.token-saver" "旧状態置き場"
+}
+
+test_新側に同名があれば上書きせず警告する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.handoff/pending" "$TARGET/.token-saver/handoff/pending"
+  printf 'OLD\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  printf 'NEW\n' >"$TARGET/.token-saver/handoff/pending/a.md"
+  _run_install
+  assert_eq "NEW" "$(cat "$TARGET/.token-saver/handoff/pending/a.md")" "新側は無傷"
+  assert_eq "OLD" "$(cat "$TARGET/.claude/.handoff/pending/a.md")" "旧側は残る"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "警告" "衝突を警告する"
+}
+
+test_移行が起きたら適用一覧に載せる() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.handoff/pending"
+  printf 'A\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  _run_install
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "移行" "移行したことを伝える"
+}
+
+test_旧パスが無ければ移行を報告しない() {
+  _setup_target
+  _run_install
+  assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "移行" "新規導入では移行に触れない"
+}
+
+test_旧パスのシンボリックリンクはリンクごと移す() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.handoff/pending"
+  printf 'OUTSIDE\n' >"$TEST_TMP/outside.md"
+  ln -s "$TEST_TMP/outside.md" "$TARGET/.claude/.handoff/pending/link.md"
+  _run_install
+  # リンクが実体化していないこと。実体化すると、リンク先の検証を
+  # 読み取り時に行う設計（handoff-check.sh）が空回りする。
+  if [ ! -L "$TARGET/.token-saver/handoff/pending/link.md" ]; then
+    _fail "移行でシンボリックリンクが実体化した"
+  fi
+  assert_file_missing "$TARGET/.claude/.handoff/pending/link.md" "旧側のリンク"
+}
+
 test_gitignore_はルート直下の1行で覆う() {
   _setup_target
   _run_install

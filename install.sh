@@ -65,6 +65,70 @@ mkdir -p "$TARGET/$(cts_handoff_rel)/pending" \
   die "ディレクトリを作成できない"
 applied+=("$(cts_base_rel)/ のディレクトリを作成")
 
+# --- 1b. 旧パスからの移行 ----------------------------------------------------
+# 引き継ぎと台帳は以前 .claude/ 配下にあった。台帳を読む前に移す。台帳自身が
+# 移動対象であり、先に読むと旧版の記録を見落として二重登録になる。
+#
+# 上書きは絶対にしない。引き継ぎは作業の記録であり、失うと事故の調査ができない。
+# 衝突した1件は旧側に残し、利用者へ判断を渡す。
+#
+# mv で移すため、シンボリックリンクは追わずリンク自体が移る。リンク先の検証は
+# 読み取り時（scripts/handoff-check.sh）が担う。ここで実体化させると、
+# その検証が空回りする。
+migrated=0
+migrate_conflicts=0
+
+cts_migrate_dir() {
+  local from="$1" to="$2" entry base
+  [ -d "$from" ] || return 0
+  mkdir -p "$to" || die "移行先を作成できない: $to"
+  for entry in "$from"/* "$from"/.*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base="$(basename "$entry")"
+    case "$base" in
+      . | ..) continue ;;
+    esac
+    if [ -e "$to/$base" ] || [ -L "$to/$base" ]; then
+      migrate_conflicts=$((migrate_conflicts + 1))
+      warn "移行先に同名があるため移していない: $to/$base（旧側に残した）"
+      continue
+    fi
+    mv "$entry" "$to/$base" || die "移行できない: $entry"
+    migrated=$((migrated + 1))
+  done
+  return 0
+}
+
+cts_migrate_dir "$TARGET/$(cts_legacy_handoff_rel)/pending" \
+                "$TARGET/$(cts_handoff_rel)/pending"
+cts_migrate_dir "$TARGET/$(cts_legacy_handoff_rel)/consumed" \
+                "$TARGET/$(cts_handoff_rel)/consumed"
+
+# 台帳は1ファイルなので個別に扱う。
+legacy_ledger="$TARGET/$(cts_legacy_ledger_rel)"
+if [ -f "$legacy_ledger" ]; then
+  if [ -e "$LEDGER" ]; then
+    migrate_conflicts=$((migrate_conflicts + 1))
+    warn "台帳が新旧の両方にあるため移していない: $legacy_ledger（旧側に残した）"
+  else
+    mkdir -p "$(dirname "$LEDGER")" || die "台帳の置き場所を作成できない"
+    mv "$legacy_ledger" "$LEDGER" || die "台帳を移行できない"
+    migrated=$((migrated + 1))
+  fi
+fi
+
+# 空になった旧ディレクトリだけ片付ける。rmdir は空でなければ何もしないため、
+# 衝突で残した実ファイルは従来どおり残る。
+rmdir "$TARGET/$(cts_legacy_handoff_rel)/pending" \
+      "$TARGET/$(cts_legacy_handoff_rel)/consumed" 2>/dev/null || true
+rmdir "$TARGET/$(cts_legacy_handoff_rel)" \
+      "$TARGET/$(cts_legacy_state_rel)" 2>/dev/null || true
+
+if [ "$migrated" -gt 0 ]; then
+  applied+=("旧パス（.claude 配下）から $migrated 件を移行")
+  info "旧パス（.claude 配下）から $migrated 件を移行した"
+fi
+
 # .gitignore を新規に作るかどうかは、この時点でしか分からない。
 # uninstall.sh が「空になったから消してよい」と判断する根拠になる。
 gitignore_existed=1
