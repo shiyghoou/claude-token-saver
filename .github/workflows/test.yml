@@ -31,3 +31,25 @@ jobs:
 
       - name: テストを実行する
         run: bash test/run.sh
+
+  # macOS の /bin/bash は 3.2 である。bash 4.4 未満では set -u 下の素の配列展開が
+  # 空配列で unbound variable になり、それはシェル自身を落とす致命的エラーなので
+  # ERR トラップでは捕まらない。実測では終了コード 1・stdout 0 バイトで、
+  # しかも消費だけが先に済むため引き継ぎが永久に失われた。
+  #
+  # test/run.sh 自体が mapfile を使うため、スイートを 3.2 では回せない。
+  # スイート側は静的検査（ガード無しの配列展開の検出）で守り、ここでは実際の
+  # bash 3.2 でフックを end-to-end に走らせて、その静的検査が現実と対応している
+  # ことを確かめる。docker が無ければ落とす（黙って飛ばすと、この防御が
+  # 「あるつもり」のまま消える）。
+  bash32:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker があることを確かめる
+        run: docker --version
+
+      - name: bash 3.2 でフックを end-to-end 実行する
+        run: bash test/bash32-e2e.sh
