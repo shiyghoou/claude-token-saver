@@ -5,11 +5,11 @@
 # （timeout は GNU coreutils であり macOS の既定環境には無い。）
 
 # 標準入力から受け取ったフックのペイロードを保持する。
+# 読み切れなかった（タイムアウトした）ことは記録しない。「読み切れなかった＝
+# 判定できない」ではなく、読めた分から目的のフィールドを取り出せることが多いため、
+# 呼び出し側はこれを見て捨てる判断をしない。記録だけして誰も読まない変数は、
+# 「使われている」と誤解させるだけなので置かない。
 CTS_HOOK_PAYLOAD=""
-# ペイロードを読み切れなかった（タイムアウトした）ら 1。
-# ただし「読み切れなかった＝判定できない」ではない。読めた分から目的の
-# フィールドを取り出せることは多いので、これだけで捨てる判断はしない。
-CTS_PAYLOAD_TIMED_OUT=0
 
 # 標準入力の待ち時間の上限（秒）。フックはセッション起動の同期処理であり、
 # 待たせること自体が「起動を妨げない」という設計意図に反する。
@@ -19,7 +19,6 @@ CTS_READ_TIMEOUT="${CTS_READ_TIMEOUT:-1}"
 # bash 組み込みの read -t で読む（外部の timeout に頼らない）。
 cts_read_payload() {
   CTS_HOOK_PAYLOAD=""
-  CTS_PAYLOAD_TIMED_OUT=0
   if [ -t 0 ]; then
     return 0
   fi
@@ -36,14 +35,12 @@ cts_read_payload() {
     # 1行 JSON は rc=1 で返るため、ここを捨てると本来の入力まで失う）。
     CTS_HOOK_PAYLOAD="$CTS_HOOK_PAYLOAD$line"
     if [ "$rc" -gt 128 ]; then
-      CTS_PAYLOAD_TIMED_OUT=1
       break
     fi
     [ "$rc" -eq 0 ] || break
     # 1行ずつタイムアウトが効くため、細切れに届き続ける入力では
     # 全体の待ち時間が伸びうる。総量にも上限を設ける。
     if [ $((SECONDS - started)) -ge $((CTS_READ_TIMEOUT * 3)) ]; then
-      CTS_PAYLOAD_TIMED_OUT=1
       break
     fi
   done
@@ -169,6 +166,44 @@ cts_fence_id() {
 # ファイル名・パスを出すところでは、区切りの中か外かを問わず必ず通す。
 cts_sanitize_text() {
   printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177"<>'
+}
+
+# シンボリックリンクを1段ずつたどり、実体の絶対パスを返す。たどれなければ 1。
+# realpath / readlink -f を使わないのは、どちらも macOS の既定環境に無いためである
+# （readlink 自体は -f 無しなら POSIX の範囲で使える）。
+# 循環リンクで回り続けないよう、たどる段数に上限を置く。
+cts_resolve_path() {
+  local p="$1" dir base link n=0
+  while [ "$n" -lt 40 ]; do
+    dir="$(dirname -- "$p")"
+    base="$(basename -- "$p")"
+    dir="$(cd -P -- "$dir" 2>/dev/null && pwd -P)" || return 1
+    [ -n "$dir" ] || return 1
+    case "$dir" in
+      */) p="$dir$base" ;;
+      *) p="$dir/$base" ;;
+    esac
+    [ -L "$p" ] || break
+    link="$(readlink -- "$p" 2>/dev/null)" || return 1
+    case "$link" in
+      /*) p="$link" ;;
+      *) p="$dir/$link" ;;
+    esac
+    n=$((n + 1))
+  done
+  [ "$n" -lt 40 ] || return 1
+  printf '%s' "$p"
+}
+
+# path が dir 自身か、その配下にあるなら 0。どちらも解決済みの絶対パスであること。
+cts_path_is_within() {
+  local path="$1" dir="$2"
+  [ -n "$path" ] && [ -n "$dir" ] || return 1
+  [ "$path" = "$dir" ] && return 0
+  case "$path" in
+    "$dir"/*) return 0 ;;
+  esac
+  return 1
 }
 
 # 導入先リポジトリのルート。CLAUDE_PROJECT_DIR → ペイロードの cwd → カレント。

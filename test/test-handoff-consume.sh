@@ -146,6 +146,28 @@ test_CLAUDE_PROJECT_DIR_が無いときは_PWD_を使う() {
   assert_file_exists "$PROJ/.claude/.handoff/pending"
 }
 
+# root は権限ビットを無視する。chmod に依存するテストは成立しないので飛ばす。
+_skip_if_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    printf '    skip: root では権限ビットが効かない\n'
+    return 0
+  fi
+  return 1
+}
+
+# 一括処理での失敗を握りつぶすと、消費できていないのに成功として返る。
+# 呼び出し側（人・スクリプト）は「消費できたつもり」で pending を放置する。
+test_一括消費で移動に失敗したら終了コードで知らせる() {
+  _skip_if_root && return 0
+  _setup_project
+  _write_pending "a.md" "A"
+  chmod 555 "$PROJ/.claude/.handoff/pending"
+  _run_consume
+  chmod 755 "$PROJ/.claude/.handoff/pending"
+  assert_ne "0" "$CONSUME_STATUS" "終了コード"
+  assert_file_exists "$PROJ/.claude/.handoff/pending/a.md"
+}
+
 test_サブディレクトリは移動対象にしない() {
   _setup_project
   mkdir -p "$PROJ/.claude/.handoff/pending/draft"
