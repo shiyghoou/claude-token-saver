@@ -247,11 +247,32 @@ test_移行が起きたことを利用者に伝える() {
   assert_contains "$INSTALL_OUT$INSTALL_ERR" "移行" "移行したことを伝える"
 }
 
+# 移行の対象は pending/ consumed/ installed.json の3つに限る。それ以外の
+# 迷子ファイル（引き継ぎの器の直下に直接置かれた1ファイル）は移されず、
+# rmdir が「空でない」ため失敗して器が残る。器が残ること自体はよいが、
+# 黙っていると次の git status に新規の未追跡ファイルとして突然現れる
+# （旧パスの gitignore ブロックは、この直後の .gitignore 再生成で新パスへ
+# 差し替わるため、旧側はもう無視されない）。警告で気づけることを確かめる。
+test_旧パスの迷子ファイルは移行されず警告する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.handoff"
+  printf '迷子\n' >"$TARGET/.claude/.handoff/notes.md"
+  _run_install
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "未移行" "取り残しを警告する"
+  assert_file_exists "$TARGET/.claude/.handoff/notes.md" "迷子ファイルは残る（消さない）"
+}
+
 # applied は「途中で die したときに何が残っているか」を利用者に伝える唯一の手段
 # （install.sh 冒頭の die() のコメント参照）。移行の完了を待ってから1件だけ積むと、
 # 一部のファイルを移した直後に別のファイルの移行で die したとき、既に移した分が
 # 「ここまで適用した」一覧から漏れる。pending は書き込み可能なまま移行させて
 # 先に完了させ、consumed の移行先だけ書き込み不可にして意図的に die させる。
+#
+# root（CI コンテナ等）で走らせるとこのテストは赤になる。root は書き込み不可の
+# ディレクトリでも mv を成功させてしまうため、chmod 555 が意図した「移行の途中
+# で失敗する」状況をそもそも作れず、die が起きずに INSTALL_STATUS が 0 のまま
+# 通ってしまう。CI コンテナでだけこれが再現したときに原因探しで時間を溶かさない
+# よう、ここに明記しておく。テストを root で走らせないこと。
 test_移行の途中で失敗しても移した分は適用一覧に伝わる() {
   _setup_target
   mkdir -p "$TARGET/.claude/.handoff/pending" "$TARGET/.claude/.handoff/consumed" \

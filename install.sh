@@ -75,6 +75,16 @@ applied+=("$(cts_base_rel)/ のディレクトリを作成")
 # mv で移すため、シンボリックリンクは追わずリンク自体が移る。リンク先の検証は
 # 読み取り時（scripts/handoff-check.sh）が担う。ここで実体化させると、
 # その検証が空回りする。
+#
+# 塞いでいない狭い経路が1つある: 新版で install した後、同じ場所へ旧版の
+# install.sh を実行すると、旧版は新パスの存在を知らないため旧パスへ台帳を
+# 新規作成し、二重登録になる。次に新版の install.sh（またはこの移行）を
+# 走らせると、新旧どちらにも台帳がある状態になり、上の「台帳が新旧の両方に
+# あるため移していない」で warn するだけに留まり両方残る。さらに
+# uninstall.sh は新パスの台帳を優先して読むため、旧台帳だけに記録された
+# フックは外されない。version の逆行というこの経路自体が想定外の運用で
+# あり、ここで自動修復はしない。起きた形跡（台帳が新旧両方にある）は
+# 警告で見える設計になっている、という点だけ書き残す。
 migrated=0
 migrate_conflicts=0
 
@@ -129,6 +139,22 @@ rmdir "$TARGET/$(cts_legacy_handoff_rel)/pending" \
       "$TARGET/$(cts_legacy_handoff_rel)/consumed" 2>/dev/null || true
 rmdir "$TARGET/$(cts_legacy_handoff_rel)" \
       "$TARGET/$(cts_legacy_state_rel)" 2>/dev/null || true
+
+# 移行の対象は pending/ consumed/ installed.json の3つに限る（設計どおり）。
+# それ以外の取り残し（例: 引き継ぎの器の直下に置かれた迷子の1ファイル）は
+# rmdir を必ず失敗させ、器が残る。器が残ること自体は黙っていてよいが、その
+# 中身が「新旧の gitignore ブロックのどちらにも書かれない」ことは黙っていては
+# いけない。旧ブロックは install.sh がこの後 .gitignore を再生成する時点で
+# 消える（新ブロックは新パスしか無視しない）ため、残った旧ディレクトリの
+# 中身は次の git status で利用者に「新規の未追跡ファイル」として突然現れる。
+# 衝突（同名がある）は既に warn 済みだが、衝突でない取りこぼし（同名が
+# 無いのに移行対象外という理由だけで残った物）はここでしか気づけない。
+legacy_leftover=""
+[ -e "$TARGET/$(cts_legacy_handoff_rel)" ] && legacy_leftover="$legacy_leftover $(cts_legacy_handoff_rel)"
+[ -e "$TARGET/$(cts_legacy_state_rel)" ] && legacy_leftover="$legacy_leftover $(cts_legacy_state_rel)"
+if [ -n "$legacy_leftover" ]; then
+  warn "旧パスに未移行のファイルが残っている（pending/consumed/installed.json 以外は移行対象外である）:$legacy_leftover"
+fi
 
 # applied への記録は各ファイル・台帳を移した直後に済んでいる（die 時に漏れ
 # させないため）。ここでは締めくくりとして利用者向けに件数を要約するだけで、
