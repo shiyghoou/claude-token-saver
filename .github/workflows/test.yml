@@ -1,0 +1,33 @@
+# テストは「走らせた人が申告する」ものにしない。ゲート群（アサーション層の
+# 生存確認・件数の台帳・検証を含まないテストの検出）は、実行されなければ
+# 何も守らないため、push と PR で必ず回す。
+name: test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 依存を確認する
+        run: |
+          bash --version | head -1
+          python3 --version
+          git --version
+
+      # install.sh / uninstall.sh のテストは使い捨てリポジトリを作って commit する。
+      # runner には既定の identity が無いため、ここで与える。
+      - name: git の identity を設定する
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "ci"
+          git config --global init.defaultBranch main
+
+      - name: テストを実行する
+        run: bash test/run.sh

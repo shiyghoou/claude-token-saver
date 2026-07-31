@@ -53,6 +53,7 @@ test_assert_file_missing_は存在を失敗させる() {
 # 最後の判定が偽のときにそこで抜けてしまいうる。明示的に確かめる。
 test_assert_file_missing_は_set_e_下でも成功を返す() {
   local status
+  # runner-allow: 終了コード自体を検証するため、意図してサブシェルで呼んでいる。
   ( set -e; . "$TEST_DIR/lib/assert.sh"; assert_file_missing "$TEST_TMP/nothing"; exit 0 ) \
     >/dev/null 2>&1
   status=$?
@@ -114,12 +115,20 @@ _make_runner_dir() {
   mkdir -p "$RUNNER_DIR/lib"
   cp "$REPO_ROOT/test/run.sh" "$RUNNER_DIR/run.sh"
   cp "$REPO_ROOT/test/lib/assert.sh" "$RUNNER_DIR/lib/assert.sh"
+  # 台帳が無いこと自体がエラーになるため、既定で緩い台帳を置く。
+  # 台帳そのものを検証するテストは、これを上書きするか消して使う。
+  printf '1\n' >"$RUNNER_DIR/expected-min-count"
 }
 
 # 本文は字下げして埋め込む規約（ファイル冒頭の注意を参照）。書き出すときに
 # 字下げを剥がし、生成されるテストファイル側では関数定義を行頭へ戻す。
+#
+# @A@ は書き出し時に assert_ へ展開する。run.sh は「失敗が飲まれる位置での
+# アサーション呼び出し」を静的に探すため、その細工を素の文字列で埋め込むと
+# このファイル自身が引っ掛かる（検証したい細工と、検証する側のファイルが
+# 文字列で衝突する）。トークンを介して、生成されるファイルにだけ現れさせる。
 _put_test_file() {
-  printf '%s\n' "$2" | sed 's/^  //' >"$RUNNER_DIR/test-$1.sh"
+  printf '%s\n' "$2" | sed 's/^  //; s/@A@/assert_/g' >"$RUNNER_DIR/test-$1.sh"
 }
 
 # 親側の CTS_MIN_TESTS が漏れると下限の検査結果が変わるため、必ず外して呼ぶ。
@@ -255,11 +264,152 @@ test_実行件数の下限はパターン指定時には検査されない() {
   assert_eq "0" "$RUNNER_STATUS" "ランナーの終了コード"
 }
 
-test_下限のファイルが無ければ件数は検査されない() {
+# 台帳ひとつの消失で、件数が減ったことを知る唯一の手段が無言で失われてはならない。
+test_下限のファイルが無ければエラーになる() {
+  _make_runner_dir
+  _put_test_file subject '  test_ok() { assert_eq a a; }'
+  rm -f "$RUNNER_DIR/expected-min-count"
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "台帳" "ランナー出力"
+}
+
+# 無検査にしたいときは明示させる。既定を無検査にしてはいけない。
+test_件数の検査は明示的にのみ無効化できる() {
+  _make_runner_dir
+  _put_test_file subject '  test_ok() { assert_eq a a; }'
+  rm -f "$RUNNER_DIR/expected-min-count"
+  RUNNER_OUT="$(CTS_MIN_TESTS=0 bash "$RUNNER_DIR/run.sh" 2>&1)"
+  RUNNER_STATUS=$?
+  assert_eq "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "検査しない" "ランナー出力"
+}
+
+# 総件数だけでは、実テストを空のテストで置き換えて件数を満たす詐称を見抜けない。
+test_ファイル別の下限を下回ると失敗になる() {
+  _make_runner_dir
+  _put_test_file subject '  test_ok() { assert_eq a a; }'
+  printf 'test-subject.sh 3\n' >"$RUNNER_DIR/expected-min-count"
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "test-subject.sh" "ランナー出力"
+}
+
+# 台帳に載っているファイルが消えたことを、総件数の充足で隠せないこと。
+test_台帳にあるテストファイルが消えていればエラーになる() {
+  _make_runner_dir
+  _put_test_file subject '  test_a() { assert_eq a a; }
+  test_b() { assert_eq a a; }'
+  printf '2\ntest-subject.sh 1\ntest-gone.sh 1\n' >"$RUNNER_DIR/expected-min-count"
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "test-gone.sh" "ランナー出力"
+}
+
+# 一部だけ回すときも、選んだファイルのファイル別下限は検査できる。
+test_ファイル別の下限はパターン指定時にも検査される() {
+  _make_runner_dir
+  _put_test_file subject '  test_ok() { assert_eq a a; }'
+  printf '99\ntest-subject.sh 3\n' >"$RUNNER_DIR/expected-min-count"
+  _run_runner subject
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "test-subject.sh" "ランナー出力（ファイル別の下限）"
+  assert_not_contains "$RUNNER_OUT" "実行 1 件 / 下限 99 件" "ランナー出力（総件数は検査しない）"
+}
+
+# ---- 検証を含まないテスト ------------------------------------------------
+
+# 空の本文でも「ok」と出る。件数の下限をフィラーで満たす詐称を防ぐ。
+test_検証を含まないテスト関数は失敗として計上される() {
+  _run_runner_with '  test_nothing() { :; }'
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "検証を含まない" "ランナー出力"
+  assert_contains "$RUNNER_OUT" "test_nothing" "ランナー出力（関数名）"
+}
+
+# _fail で直接落とすテストは正当である（アサーション経由でなくてもよい）。
+test_failで落とすテストは検証ありと見なす() {
+  _run_runner_with '  test_via_fail() { [ 1 = 1 ] || _fail "ありえない"; }'
+  assert_eq "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "ok   test_via_fail" "ランナー出力"
+}
+
+# 失敗が飲まれる位置での呼び出しは、緑になってしまう前に静的に落とす。
+test_コマンド置換内のアサーションは失敗として計上される() {
+  _run_runner_with '  test_smothered() { x="$(@A@eq a b)"; @A@eq a a; }'
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "飲まれる" "ランナー出力"
+}
+
+test_サブシェル内のアサーションは失敗として計上される() {
+  _run_runner_with '  test_smothered() { ( . "$TEST_DIR/lib/assert.sh"; @A@eq a b ); @A@eq a a; }'
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "飲まれる" "ランナー出力"
+}
+
+# ---- アサーション層そのものが壊れた場合 ----------------------------------
+# ここが独立したオラクルである。スイート内のアサーションで検べると、_fail が
+# 壊れた時点で検べる側も壊れるため何も検出できない。ランナーを複製し、その
+# assert.sh に改変を加えて、ランナーが自力で気づくことを確かめる。
+
+# 原本の末尾へ改変を追記する。bash は後に定義した関数を採るため、これで
+# 任意の関数を差し替えられる。原本から行を削る方式にすると、原本の行構成が
+# 変わったときに黙って「改変していない」状態になる。
+_break_assert_layer() {
+  cp "$REPO_ROOT/test/lib/assert.sh" "$RUNNER_DIR/lib/assert.sh"
+  printf '%s\n' "$1" | sed 's/^  //' >>"$RUNNER_DIR/lib/assert.sh"
+}
+
+# _fail が exit ではなく return になると、失敗したあとの文が実行され続け、
+# 最後の文が成功すればテストは緑になる。終了コードだけを見ても捕まらない。
+test_failが呼び出し元を終了させなければ実行を打ち切る() {
+  _make_runner_dir
+  _put_test_file subject '  test_ok() { assert_eq a a; }'
+  _break_assert_layer '_fail() { printf "    %s\n" "$*" >&2; return 1; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "アサーション層" "ランナー出力"
+}
+
+# _fail が常に成功すると、全アサーションが一斉に無効化される。
+test_failが常に成功するなら実行を打ち切る() {
+  _make_runner_dir
+  _put_test_file subject '  test_ok() { assert_eq a a; }'
+  _break_assert_layer '_fail() { printf "    %s\n" "$*" >&2; return 0; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "アサーション層" "ランナー出力"
+}
+
+# 個別のアサーションが「常に成功」に化けた場合も打ち切ること。
+test_個別のアサーションが常に成功するなら実行を打ち切る() {
+  _make_runner_dir
+  _put_test_file subject '  test_ok() { assert_eq a a; }'
+  _break_assert_layer '  _fail() { printf "    %s\n" "$*" >&2; exit 1; }
+  assert_contains() { return 0; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "assert_contains" "ランナー出力"
+}
+
+# 「常に失敗」への改変も、理由付きで打ち切れること。
+test_アサーションが常に失敗するなら実行を打ち切る() {
+  _make_runner_dir
+  _put_test_file subject '  test_ok() { assert_eq a a; }'
+  _break_assert_layer '  _fail() { printf "    %s\n" "$*" >&2; exit 1; }
+  assert_eq() { _fail "always"; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "アサーション層" "ランナー出力"
+}
+
+# 健全な assert.sh では打ち切らないこと（このゲート自体が誤検知しないこと）。
+test_健全なアサーション層では打ち切らない() {
   _make_runner_dir
   _put_test_file subject '  test_ok() { assert_eq a a; }'
   _run_runner
   assert_eq "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_not_contains "$RUNNER_OUT" "アサーション層" "ランナー出力"
 }
 
 # ---- テストの隔離 --------------------------------------------------------
@@ -268,8 +418,11 @@ test_下限のファイルが無ければ件数は検査されない() {
 # 後に走る側がそれを見ないことを確かめる。実行順は run.sh のバイト順ソートに
 # 依存するため、名前の _1_ / _2_ で順序を固定している。
 
+# 痕跡は run.sh がこの実行のために作った専用ディレクトリへ置く。共有の /tmp に
+# 固定名で置くと、(1) 並行実行が互いのファイルを奪い合って偽の赤になり、
+# (2) 事前に張られたシンボリックリンクを追従して無関係なファイルを上書きする。
 _isolation_probe_path() {
-  printf '%s/cts-isolation-probe' "$(dirname "$TEST_TMP")"
+  printf '%s/isolation-probe' "$CTS_RUN_DIR"
 }
 
 test_隔離_1_痕跡を残す() {
