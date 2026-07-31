@@ -853,21 +853,35 @@ test_旧パスの台帳を読んで外す() {
   assert_file_missing "$TARGET/.claude/skills/session-handoff" "スキルのリンク"
 }
 
-test_旧台帳を読んでも旧台帳へ書き込まない() {
+# 旧台帳は移行元であり、外し切れた（警告ゼロの）ケースでは `rm -f` で必ず
+# 消える。「読むだけで、無いことがある」を assert_file_missing だけで確かめると、
+# else 分岐が毎回ここを通り then 分岐が到達不能になる（旧台帳が消えなかった
+# ケースを一度も踏まない）タウトロジーになる。then 分岐がそもそも死んでいた
+# 理由は、このテストのセットアップ（クリーンな uninstall）では warnings が
+# 常に空になり、常に rm -f されるからである。
+#
+# 消えて良い理由は「移行元を残すと install.sh の移行が次回また同じ台帳を
+# 拾ってしまう」ためであり、消してよいことと「読んでいる最中に書き換えない」
+# ことは別の主張である。後者を確かめるため、読み取りが終わるまで書き込みが
+# 起きないことを、旧台帳を読み取り専用（444）にして検証する。
+# フォールバックの実装が「読んでから書き戻す」形に変わると、権限のある
+# ディレクトリ内でも読み取り専用ファイルへの書き込みは open が拒否するため、
+# python3 側が例外を投げて uninstall.sh は非 0 で終了する。`rm -f` は
+# ファイル自体の権限ではなく親ディレクトリの書き込み権限を見るため、
+# 444 のままでも削除自体は成功する。これにより「削除はする・書き込みはしない」
+# という2つの性質を1本のテストで区別できる。
+test_旧台帳は読まれたのち消費される() {
   _setup_target
   _run_install
   mkdir -p "$TARGET/.claude/.token-saver"
   mv "$TARGET/.token-saver/installed.json" \
      "$TARGET/.claude/.token-saver/installed.json"
-  local before after
-  before="$(cat "$TARGET/.claude/.token-saver/installed.json")"
+  chmod 444 "$TARGET/.claude/.token-saver/installed.json"
   _run_uninstall
-  if [ -f "$TARGET/.claude/.token-saver/installed.json" ]; then
-    after="$(cat "$TARGET/.claude/.token-saver/installed.json")"
-    assert_eq "$before" "$after" "旧台帳の内容"
-  else
-    assert_file_missing "$TARGET/.claude/.token-saver/installed.json" "旧台帳は消えてよい"
-  fi
+  chmod 755 "$TARGET/.claude/.token-saver" 2>/dev/null || true
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード（読み取り専用でも書き込みは発生しないので成功する）"
+  assert_file_missing "$TARGET/.claude/.token-saver/installed.json" "旧台帳は消費されて消える"
+  assert_file_missing "$TARGET/.claude/.token-saver" "旧パスの器も片付く"
 }
 
 # 新パスの台帳を rm -f で完全に消す点が既存の記録無し検証と異なる。

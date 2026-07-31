@@ -282,6 +282,11 @@ if [ "$have_ledger" = 1 ] || [ "$GUESS" = 1 ]; then
   rmdir "$handoff_dir" 2>/dev/null || true
   rmdir "$state_dir" 2>/dev/null || true
 
+  # 旧パスの器も同様に片付ける。旧台帳フォールバックで空になった器を残すと、
+  # 直後の rmdir "$TARGET/.claude" が「空でない」ため常に失敗し、旧経路だけ
+  # アンインストール後の git status が導入前と一致しないままになる。
+  rmdir "$TARGET/$(cts_legacy_state_rel)" 2>/dev/null || true
+
   # 中身が無くなったファイルのうち、install.sh より前には無かったものを消す。
   # install.sh が作ったものでも、利用者がその後コミットしていれば消さない。
   # 台帳のフラグは「作った」しか語らず、現在の追跡状態を語らないためである。
