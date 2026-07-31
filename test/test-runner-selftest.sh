@@ -581,6 +581,24 @@ test_実装コードが1つも無ければ対象ゼロのエラーで打ち切�
   assert_contains "$RUNNER_OUT" "パス検査の対象が1つも無い" "対象ゼロのエラーメッセージ"
 }
 
+# 対象の列挙は install.sh / uninstall.sh の2つを名指しするのではなく、
+# ルート直下の *.sh をまるごと拾う。名指しのままだと、明日 migrate.sh や
+# doctor.sh がルートへ増えたときにゲートの対象へ入らず、無警告の穴になる。
+# この「グロブで拾う」という性質そのものは、名指し2ファイルへ戻す改変でも
+# 通常のセルフテストが緑のままになりうる（既存のテストは install.sh /
+# uninstall.sh しか使わないため）。ここでは対象に無い名前の新規ファイル
+# （migrate.sh）を置き、そこの違反がファイル名ごと報告されることを確かめる。
+# これがグロブであって2ファイルの決め打ちでないことを示す唯一の証拠になる。
+test_ルート直下の新規sh_ファイルもパス検査の対象になる() {
+  _make_runner_dir
+  printf 'echo ".token-saver/handoff"\n' >"$TEST_TMP/migrate.sh"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "終了コード"
+  assert_contains "$RUNNER_OUT" "実装コードにパスのリテラルが残っている" "ゲートのエラーメッセージ"
+  assert_contains "$RUNNER_OUT" "migrate.sh" "違反したファイル名（グロブでなければ検出されない）"
+}
+
 # ---- リポジトリ本体の汚染の検査 --------------------------------------------
 # 実測: test-uninstall.sh の一部のテストが、スキルがディレクトリのコピーとして
 # 設置された状態で `rm -f "$dest"` を使っていた。`rm -f` はディレクトリを
