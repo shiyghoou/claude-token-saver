@@ -31,8 +31,8 @@ _run_uninstall_guess() {
 
 # 台帳を任意の内容へ差し替える。空・壊れた JSON・スキーマ違いを作るのに使う。
 _write_ledger() {
-  mkdir -p "$TARGET/.claude/.token-saver"
-  printf '%s' "$1" >"$TARGET/.claude/.token-saver/installed.json"
+  mkdir -p "$TARGET/.token-saver"
+  printf '%s' "$1" >"$TARGET/.token-saver/installed.json"
 }
 
 # 指定フックのコマンド一覧を HOOK_COMMANDS へ読み込む。
@@ -118,26 +118,26 @@ test_導入先の他の設定キーは残す() {
 test_引き継ぎの実ファイルは消さない() {
   _setup_target
   _run_install
-  printf '消えてはいけない引き継ぎ\n' >"$TARGET/.claude/.handoff/pending/a.md"
-  printf '消えてはいけない消費済み\n' >"$TARGET/.claude/.handoff/consumed/b.md"
+  printf '消えてはいけない引き継ぎ\n' >"$TARGET/.token-saver/handoff/pending/a.md"
+  printf '消えてはいけない消費済み\n' >"$TARGET/.token-saver/handoff/consumed/b.md"
   _run_uninstall
-  assert_file_exists "$TARGET/.claude/.handoff/pending/a.md"
-  assert_file_exists "$TARGET/.claude/.handoff/consumed/b.md"
+  assert_file_exists "$TARGET/.token-saver/handoff/pending/a.md"
+  assert_file_exists "$TARGET/.token-saver/handoff/consumed/b.md"
 }
 
 test_引き継ぎが残っていれば警告する() {
   _setup_target
   _run_install
-  printf '未消費\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  printf '未消費\n' >"$TARGET/.token-saver/handoff/pending/a.md"
   _run_uninstall
-  assert_contains "$UNINSTALL_OUT" ".claude/.handoff" "出力"
+  assert_contains "$UNINSTALL_OUT" ".token-saver/handoff" "出力"
 }
 
 test_gitignore_の追記を削除する() {
   _setup_target
   _run_install
   _run_uninstall
-  assert_not_contains "$(_gitignore_text)" ".claude/.token-saver/" ".gitignore"
+  assert_not_contains "$(_gitignore_text)" ".token-saver/" ".gitignore"
 }
 
 test_gitignore_の他の行は残す() {
@@ -326,10 +326,10 @@ test_空になったディレクトリとファイルを残さない() {
   _setup_target
   _run_install
   _run_uninstall
-  assert_file_missing "$TARGET/.claude/.handoff/pending"
-  assert_file_missing "$TARGET/.claude/.handoff/consumed"
-  assert_file_missing "$TARGET/.claude/.handoff"
-  assert_file_missing "$TARGET/.claude/.token-saver"
+  assert_file_missing "$TARGET/.token-saver/handoff/pending"
+  assert_file_missing "$TARGET/.token-saver/handoff/consumed"
+  assert_file_missing "$TARGET/.token-saver/handoff"
+  assert_file_missing "$TARGET/.token-saver"
   assert_file_missing "$TARGET/.gitignore"
   assert_file_missing "$SETTINGS"
 }
@@ -337,9 +337,42 @@ test_空になったディレクトリとファイルを残さない() {
 test_実ファイルのある_handoff_は残す() {
   _setup_target
   _run_install
-  printf '残す\n' >"$TARGET/.claude/.handoff/pending/a.md"
+  printf '残す\n' >"$TARGET/.token-saver/handoff/pending/a.md"
   _run_uninstall
-  assert_file_exists "$TARGET/.claude/.handoff/pending/a.md"
+  assert_file_exists "$TARGET/.token-saver/handoff/pending/a.md"
+}
+
+test_新パスの空ディレクトリを片付ける() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  assert_file_missing "$TARGET/.token-saver/handoff/pending" "pending"
+  assert_file_missing "$TARGET/.token-saver/handoff" "handoff"
+  assert_file_missing "$TARGET/.token-saver" ".token-saver"
+}
+
+test_引き継ぎの実ファイルは残す() {
+  _setup_target
+  _run_install
+  printf 'A\n' >"$TARGET/.token-saver/handoff/consumed/a.md"
+  _run_uninstall
+  assert_file_exists "$TARGET/.token-saver/handoff/consumed/a.md" "引き継ぎ"
+}
+
+test_引き継ぎを残したことを新パスで案内する() {
+  _setup_target
+  _run_install
+  printf 'A\n' >"$TARGET/.token-saver/handoff/consumed/a.md"
+  _run_uninstall
+  assert_contains "$UNINSTALL_OUT" ".token-saver/handoff" "案内文のパス"
+  assert_not_contains "$UNINSTALL_OUT" ".claude/.handoff" "旧パスを案内しない"
+}
+
+test_新パスの台帳を消す() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  assert_file_missing "$TARGET/.token-saver/installed.json" "台帳"
 }
 
 test_導入と無関係な同名スキルのリンクは外さない() {
@@ -533,7 +566,7 @@ test_台帳を残さない() {
   _setup_target
   _run_install
   _run_uninstall
-  assert_file_missing "$TARGET/.claude/.token-saver/installed.json"
+  assert_file_missing "$TARGET/.token-saver/installed.json"
 }
 
 test_install_前から在った_gitignore_は消さない() {
@@ -672,7 +705,7 @@ test_二度目の取り外しでも推測に落ちない() {
 
 # 台帳の skills を任意の内容へ差し替える。
 _replace_ledger_skills() {
-  python3 - "$TARGET/.claude/.token-saver/installed.json" "$1" "$2" "$3" <<'PY'
+  python3 - "$TARGET/.token-saver/installed.json" "$1" "$2" "$3" <<'PY'
 import json, sys
 path, name, src, mode = sys.argv[1:5]
 with open(path) as f:
@@ -739,7 +772,7 @@ test_取り残しがあれば台帳を残す() {
   ln -s "$shared/session-handoff" "$TARGET/.claude/skills/session-handoff"
   _run_uninstall
   # 台帳を消すと、次回は記録の無い状態＝何もできない状態になる。
-  assert_file_exists "$TARGET/.claude/.token-saver/installed.json"
+  assert_file_exists "$TARGET/.token-saver/installed.json"
   assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "警告" "出力"
 }
 

@@ -4,10 +4,10 @@
 #   cd <導入先リポジトリ> && /path/to/claude-token-saver/uninstall.sh
 #   uninstall.sh [--guess] [<導入先ディレクトリ>]
 #
-# .claude/.handoff/ 配下の実ファイルは消さない。引き継ぎは作業の記録であり、
+# .token-saver/handoff/ 配下の実ファイルは消さない。引き継ぎは作業の記録であり、
 # アンインストールで失われてよいものではない。
 #
-# 何を外すかは台帳（.claude/.token-saver/installed.json）を正とする。
+# 何を外すかは台帳（.token-saver/installed.json）を正とする。
 # 台帳に記録が無ければ何もしない（fail-closed）。推測で外すと、利用者が自分で
 # 張った同名のリンクや自作のフックを巻き込んで消す。台帳の無い旧版で導入した
 # 環境のために --guess を用意する。それを付けたときだけ従来の推測へ落ちる。
@@ -48,10 +48,17 @@ TARGET="$(cd "$target_arg" 2>/dev/null && pwd -P)" || {
   exit 1
 }
 
+# パスの単一情報源。
+# shellcheck source=scripts/lib/paths.sh
+. "$CTS_HOME/scripts/lib/paths.sh" || {
+  printf 'エラー: scripts/lib/paths.sh を読めない（クローンが不完全である）\n' >&2
+  exit 1
+}
+
 SETTINGS="$TARGET/.claude/settings.local.json"
 BACKUP="$SETTINGS.cts-backup"
 GITIGNORE="$TARGET/.gitignore"
-LEDGER="$TARGET/.claude/.token-saver/installed.json"
+LEDGER="$TARGET/$(cts_ledger_rel)"
 
 warnings=()
 
@@ -226,20 +233,22 @@ gitignore_created=0
 if [ "${#warnings[@]}" -eq 0 ]; then
   rm -f "$LEDGER"
 else
-  info "  取り残しがあるため台帳を残した: .claude/.token-saver/installed.json"
+  info "  取り残しがあるため台帳を残した: $(cts_ledger_rel)"
 fi
 
-handoff_dir="$TARGET/.claude/.handoff"
+handoff_dir="$TARGET/$(cts_handoff_rel)"
 if [ -d "$handoff_dir" ] && [ -n "$(find "$handoff_dir" -type f -print -quit 2>/dev/null)" ]; then
   info ""
-  info "引き継ぎのファイルは残した: .claude/.handoff"
+  info "引き継ぎのファイルは残した: $(cts_handoff_rel)"
   info "  作業の記録であるため、アンインストールでは削除しない。不要なら手で削除せよ。"
   info "  .gitignore の除外は外れているので、版管理から外したいなら注意せよ。"
 fi
 
-state_dir="$TARGET/.claude/.token-saver"
-if [ -d "$state_dir" ] && [ -n "$(find "$state_dir" -type f -print -quit 2>/dev/null)" ]; then
-  info "状態ファイルは残した: .claude/.token-saver"
+state_dir="$TARGET/$(cts_base_rel)"
+# -maxdepth 1: .token-saver/ は handoff/ を内包するようになった。付けないと、
+# 引き継ぎが残っているだけで「状態ファイルは残した」と二重に案内する。
+if [ -d "$state_dir" ] && [ -n "$(find "$state_dir" -maxdepth 1 -type f -print -quit 2>/dev/null)" ]; then
+  info "状態ファイルは残した: $(cts_base_rel)"
 fi
 
 # 以降は、器そのものを消す後片付けである。ここへ導入した記録が無い相手に
@@ -248,9 +257,13 @@ fi
 # 事故がここで起きていた。
 if [ "$have_ledger" = 1 ] || [ "$GUESS" = 1 ]; then
   # install.sh が作った空の器を残さない。rmdir は空でなければ何もしないので、
-  # 実ファイルのある .handoff は従来どおり残る。
+  # 実ファイルのある引き継ぎは従来どおり残る。深い側から順に消す。
+  # $state_dir は $handoff_dir の親であるため、handoff を消した後に消す必要が
+  # ある。1つの rmdir 呼び出しに並べても引数の順に処理されるとはいえ、
+  # 意図を読み違えやすいので行を分ける。
   rmdir "$handoff_dir/pending" "$handoff_dir/consumed" 2>/dev/null || true
-  rmdir "$handoff_dir" "$state_dir" 2>/dev/null || true
+  rmdir "$handoff_dir" 2>/dev/null || true
+  rmdir "$state_dir" 2>/dev/null || true
 
   # 中身が無くなったファイルのうち、install.sh より前には無かったものを消す。
   # install.sh が作ったものでも、利用者がその後コミットしていれば消さない。
