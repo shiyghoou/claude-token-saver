@@ -14,10 +14,10 @@
 #
 # 総件数は環境変数 CTS_MIN_TESTS で上書きできる。CTS_MIN_TESTS=0 を指定したときだけ
 # 検査を無効にできる（台帳が無いことを黙って無検査にはしない）。
-284
+287
 test-handoff-check.sh 77
 test-handoff-consume.sh 16
 test-install.sh 71
 test-paths.sh 6
-test-runner-selftest.sh 54
+test-runner-selftest.sh 57
 test-uninstall.sh 60

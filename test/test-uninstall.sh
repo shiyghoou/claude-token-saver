@@ -750,7 +750,13 @@ test_記録にリンク先が無ければ触らない() {
   local shared="$TEST_TMP/shared"
   mkdir -p "$shared/session-handoff"
   printf '利用者のスキル\n' >"$shared/session-handoff/SKILL.md"
-  rm -f "$TARGET/.claude/skills/session-handoff"
+  # rm -f はディレクトリを消せず黙って失敗する。CTS_NO_SYMLINK やシンボリック
+  # リンクが使えない環境では _run_install がスキルをディレクトリのコピーとして
+  # 設置するため、rm -f では dest が残ったままになり、次の ln -s がその
+  # ディレクトリの中にリンクを作ってしまう（本体の外とはいえテストの隔離が
+  # 破れる経路そのものである）。rm -rf でリンク・ディレクトリのどちらでも
+  # 確実に片付けてから張り直す。
+  rm -rf "$TARGET/.claude/skills/session-handoff"
   ln -s "$shared/session-handoff" "$TARGET/.claude/skills/session-handoff"
   # src が空の記録は「何を指していたか分からない」であり、削除の許可ではない。
   _replace_ledger_skills session-handoff "" link
@@ -768,7 +774,9 @@ test_取り残しがあれば台帳を残す() {
   # 導入後に導入先がリンクを差し替えた状態。外せないので取り残しになる。
   local shared="$TEST_TMP/shared"
   mkdir -p "$shared/session-handoff"
-  rm -f "$TARGET/.claude/skills/session-handoff"
+  # rm -f はディレクトリを消せず黙って失敗する（詳細は同種のコメントを
+  # 参照）。rm -rf で確実に片付けてから張り直す。
+  rm -rf "$TARGET/.claude/skills/session-handoff"
   ln -s "$shared/session-handoff" "$TARGET/.claude/skills/session-handoff"
   _run_uninstall
   # 台帳を消すと、次回は記録の無い状態＝何もできない状態になる。

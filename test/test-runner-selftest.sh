@@ -580,3 +580,61 @@ test_実装コードが1つも無ければ対象ゼロのエラーで打ち切�
   assert_ne "0" "$RUNNER_STATUS" "終了コード"
   assert_contains "$RUNNER_OUT" "パス検査の対象が1つも無い" "対象ゼロのエラーメッセージ"
 }
+
+# ---- リポジトリ本体の汚染の検査 --------------------------------------------
+# 実測: test-uninstall.sh の一部のテストが、スキルがディレクトリのコピーとして
+# 設置された状態で `rm -f "$dest"` を使っていた。`rm -f` はディレクトリを
+# 消せず黙って失敗し、直後の `ln -s` が既存のディレクトリの中にリンクを
+# 作ってしまう。この経路は複製先の $TARGET（$TEST_TMP の下）に閉じているが、
+# テストが $REPO_ROOT を握っている以上、同種の書き込みが本体へ向かない保証は
+# 無い。ここでは「本体（複製先の REPO_ROOT）が実際に汚れたら run.sh 自身が
+# 赤になる」ことを検べる。
+
+# 複製先の REPO_ROOT（$TEST_TMP）は git 管理下に無い。`git status --porcelain`
+# だけに頼ると常に空文字列を返し、「何も検出しない」まま緑になる（守りが黙って
+# no-op になる、このリポジトリが最も嫌う形）。git が使えない場合の指紋（ファイル
+# 一覧・シンボリックリンク先・内容のチェックサム）が実際に効くことを、
+# あえて git 管理下に置かない複製先で確かめる。
+test_複製先が_git_管理下でなくても本体の汚染を検出する() {
+  _make_runner_dir
+  _put_test_file subject '  test_本体を汚す() {
+    : >"$REPO_ROOT/leaked-from-test"
+    assert_eq a a "何もしない"
+  }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "リポジトリ本体を変更した" "ランナー出力"
+  assert_contains "$RUNNER_OUT" "leaked-from-test" "汚したファイルの名前"
+}
+
+# 本物のリポジトリでは git が使える。追跡ファイルの書き換えと未追跡ファイルの
+# 増加の両方を見ることを、複製先を明示的に git 管理下へ置いて確かめる
+# （controller の候補: 「複製先のテストでは、種まきした $TEST_TMP を git init
+# して git 管理下にする」）。
+test_git管理下では追跡ファイルの書き換えと未追跡ファイルの増加の両方を検出する() {
+  _make_runner_dir
+  ( cd "$TEST_TMP" &&
+    git init -q . &&
+    git add install.sh &&
+    git -c user.email=t@example.com -c user.name=t commit -qm '種まき' ) >/dev/null 2>&1
+  _put_test_file subject '  test_追跡ファイルを書き換え未追跡ファイルも増やす() {
+    printf "leaked\n" >>"$REPO_ROOT/install.sh"
+    : >"$REPO_ROOT/leaked-from-test"
+    assert_eq a a "何もしない"
+  }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "リポジトリ本体を変更した" "ランナー出力"
+  assert_contains "$RUNNER_OUT" "install.sh" "追跡ファイルの書き換えを検出"
+  assert_contains "$RUNNER_OUT" "leaked-from-test" "未追跡ファイルの増加を検出"
+}
+
+# このゲート自体が誤検知しないこと。本体を汚さない健全なテストでは
+# 打ち切らない。
+test_本体が汚れていなければ打ち切らない() {
+  _make_runner_dir
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_eq "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_not_contains "$RUNNER_OUT" "リポジトリ本体を変更した" "ランナー出力"
+}

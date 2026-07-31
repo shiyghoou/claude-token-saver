@@ -194,6 +194,56 @@ _check_path_literals() {
 
 _check_path_literals
 
+# ---- リポジトリ本体の汚染の検査（実行前の指紋を取る） ---------------------
+# テストは $TEST_TMP を CWD として走るが、$REPO_ROOT を掴んでいるため本体へ
+# 書き込めてしまう。実測: test-uninstall.sh の一部のテストが、スキルが
+# シンボリックリンクでなくディレクトリのコピーとして設置された状態で
+# `rm -f "$dest"` を使っていた（`rm -f` はディレクトリを消せず黙って失敗する）。
+# 直後の `ln -s` は `$dest` が既存のディレクトリのままだとその中にリンクを
+# 作ってしまい、`session-handoff/session-handoff -> /tmp/.../shared/...` の
+# ような残骸を生む。この経路そのものは複製先（$TARGET は $TEST_TMP の下）に
+# 閉じているが、テストが $REPO_ROOT を握っている以上、同種の書き込みが本体へ
+# 向かないという保証は無い。実行前後で本体の状態を照合し、黙って見逃さない
+# ようにする。
+#
+# 追跡対象の変更と未追跡ファイルの増加の両方を見る。git に頼るのは、
+# 「何が本体か」を自前で列挙すると列挙漏れがそのまま穴になるためである。
+#
+# ただし test-runner-selftest.sh が複製する先の $REPO_ROOT（$TEST_TMP）は
+# git 管理下にない。その場合 `git status --porcelain` は常に空文字列を返し、
+# 「何も検出しない」まま緑になる（このリポジトリが最も嫌う、守りが黙って
+# no-op になる形である）。git が使えるかどうかを判定し、使えなければ
+# ファイル一覧・種別・シンボリックリンク先・内容のチェックサムを突き合わせる
+# 指紋へ切り替える。これなら git の有無に関わらずゲートが実際に働く。
+_repo_is_git() {
+  git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+# git が使えないときの指紋。.git 自体は対象から外す（git 管理下に無い
+# 前提の分岐なので通常は存在しないが、念のため）。通常ファイルは内容の
+# チェックサムまで見る。パスが同じでもサイズが変わらない書き換えを
+# 見逃さないためである。
+_repo_fingerprint_no_git() {
+  local p
+  while IFS= read -r p; do
+    if [ -L "$p" ]; then
+      printf '%s\tlink\t%s\n' "$p" "$(readlink "$p")"
+    elif [ -f "$p" ]; then
+      printf '%s\tfile\t%s\n' "$p" "$(cksum <"$p" 2>/dev/null)"
+    fi
+  done < <(find "$REPO_ROOT" -path "$REPO_ROOT/.git" -prune -o -print) | LC_ALL=C sort
+}
+
+_repo_fingerprint() {
+  if _repo_is_git; then
+    git -C "$REPO_ROOT" status --porcelain 2>/dev/null | LC_ALL=C sort
+  else
+    _repo_fingerprint_no_git
+  fi
+}
+
+_REPO_BEFORE="$(_repo_fingerprint)"
+
 PATTERN="${1:-}"
 
 # テスト1本あたりの上限時間（秒）。環境変数 CTS_TEST_TIMEOUT で変えられる。
@@ -480,6 +530,19 @@ for test_file in "${test_files[@]}"; do
     rm -rf "$tmp"
   done
 done
+
+# ---- リポジトリ本体の汚染の検査（実行後の指紋と照合する） -----------------
+# 件数の下限より前に見る。件数が足りていても本体が汚れていれば信用できない
+# ため、結果の一覧を先に出したうえでこちらも報告する。
+_repo_after="$(_repo_fingerprint)"
+if [ "$_REPO_BEFORE" != "$_repo_after" ]; then
+  printf 'エラー: テストがリポジトリ本体を変更した\n' >&2
+  printf '       テストは $TEST_TMP の中だけで動かねばならない。\n' >&2
+  printf '       実行前後の差:\n' >&2
+  diff <(printf '%s\n' "$_REPO_BEFORE") <(printf '%s\n' "$_repo_after") >&2 || true
+  fail_count=$((fail_count + 1))
+  failed_names+=("(リポジトリ本体の汚染)")
+fi
 
 # 実行件数の下限を検査する。ファイルが丸ごと消えても「成功 N 件」としか出ないため、
 # N が減ったこと自体を検出する必要がある。件数はスクリプトに埋めない（日々増減するため）。
