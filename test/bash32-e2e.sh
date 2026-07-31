@@ -35,7 +35,8 @@ bash --version | head -1
 proj=/tmp/proj
 rm -rf "$proj"
 mkdir -p "$proj/.token-saver/handoff/pending"
-mkdir -p "$proj/.token-saver/handoff/consumed"
+# consumed は用意しない。cts_consume_file（scripts/lib/common.sh）が
+# mkdir -p で自分で作るので、ここで先回りする必要は無い。
 printf '# 引き継ぎ\nカナリア-BASH32-本文\n' \
   >"$proj/.token-saver/handoff/pending/2026-07-31-1840-a.md"
 
