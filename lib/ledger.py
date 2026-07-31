@@ -22,7 +22,8 @@
 #   hooks             settings.local.json へ登録したコマンド文字列そのもの
 #   gitignore_created install.sh が .gitignore を新規作成したか
 #
-# 台帳自身は .claude/.token-saver/ に置く。既に .gitignore の対象である。
+# 台帳自身の置き場所は install.sh が決める（scripts/lib/paths.sh を正とする）。
+# .gitignore の対象であり、版管理へは入らない。
 
 import json
 import os

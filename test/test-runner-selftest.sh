@@ -118,6 +118,24 @@ _make_runner_dir() {
   # 台帳が無いこと自体がエラーになるため、既定で緩い台帳を置く。
   # 台帳そのものを検証するテストは、これを上書きするか消して使う。
   printf '1\n' >"$RUNNER_DIR/expected-min-count"
+
+  # 複製した run.sh は TEST_DIR/.. を REPO_ROOT に解決する。TEST_DIR は
+  # 複製先の run.sh 自身のディレクトリ（$RUNNER_DIR）なので、REPO_ROOT は
+  # $TEST_TMP に解決される。パスの単一情報源ゲートはその REPO_ROOT 側の
+  # install.sh / uninstall.sh / scripts / lib を対象に見るため、複製先には
+  # 実装コードが1つも無い。ゲートは「対象が1つも無ければエラー」で打ち切る
+  # 守りを持つため、これを外さずに既存のセルフテストを通すには、対象になり
+  # うる最小の実装コードをここへ用意する必要がある。
+  #
+  # scripts/lib/paths.sh だけは実物を複製する。除外が「本物の paths.sh」を
+  # 正しく除外できることを検証したいテストがあるため、内容が空のダミーでは
+  # 検証にならない（本物には新旧両方のパスのリテラルが実際に含まれる）。
+  mkdir -p "$TEST_TMP/scripts/lib" "$TEST_TMP/lib"
+  : >"$TEST_TMP/install.sh"
+  : >"$TEST_TMP/uninstall.sh"
+  printf '#!/usr/bin/env bash\n# テスト用の空実装。\n' >"$TEST_TMP/scripts/handoff-check.sh"
+  cp "$REPO_ROOT/scripts/lib/paths.sh" "$TEST_TMP/scripts/lib/paths.sh"
+  : >"$TEST_TMP/lib/.keep"
 }
 
 # 本文は字下げして埋め込む規約（ファイル冒頭の注意を参照）。書き出すときに
@@ -442,4 +460,81 @@ test_隔離_2_前のテストの痕跡が見えない() {
   assert_file_missing "$TEST_TMP/leaked-from-other-test"
   # 前のテストの一時ディレクトリは実行後に片付けられていること。
   assert_file_missing "$prev"
+}
+
+# ---- パスの単一情報源ゲート -----------------------------------------------
+# run.sh は実装コード（install.sh / uninstall.sh / scripts/** / lib/**）に
+# パスのリテラルが残っていれば、テストを1本も走らせずに打ち切る。
+# _make_runner_dir が複製先の REPO_ROOT 側（$TEST_TMP）へ最小の実装コードを
+# 用意しているので、ここへリテラルを足して打ち切りを検証する。
+
+test_実装コードに新パスのリテラルがあれば打ち切る() {
+  _make_runner_dir
+  printf 'echo ".token-saver/handoff"\n' >>"$TEST_TMP/scripts/handoff-check.sh"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "終了コード"
+  assert_contains "$RUNNER_OUT" "scripts/handoff-check.sh" "違反したファイル名"
+}
+
+test_実装コードに旧パスのリテラルがあれば打ち切る() {
+  _make_runner_dir
+  printf 'echo ".claude/.handoff"\n' >>"$TEST_TMP/install.sh"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "終了コード"
+  assert_contains "$RUNNER_OUT" "install.sh" "違反したファイル名"
+}
+
+test_paths_sh_自身のリテラルは許す() {
+  # scripts/lib/paths.sh の本物には新旧両方のパスのリテラルが実際に含まれる
+  # （cts_base_rel 等の定義そのものと、cts_legacy_* の旧パス）。それでも
+  # 打ち切られないことが、除外が効いていることの証明になる。
+  _run_runner_with '  test_ok() { @A@eq a a; }'
+  assert_eq "0" "$RUNNER_STATUS" "終了コード"
+  assert_not_contains "$RUNNER_OUT" "実装コードにパスのリテラルが残っている" "ゲートに掛からない"
+}
+
+test_テスト側のリテラルは許す() {
+  # test/ 配下（複製先では $RUNNER_DIR）はゲートの走査対象そのものに
+  # 含まれない。テスト本文にパスのリテラルを書いても打ち切られないこと。
+  _run_runner_with '  test_ok() {
+    local x=".token-saver"
+    @A@eq a a
+  }'
+  assert_eq "0" "$RUNNER_STATUS" "終了コード"
+  assert_not_contains "$RUNNER_OUT" "実装コードにパスのリテラルが残っている" "test/ は対象外"
+}
+
+test_ゲートはテストより前に走る() {
+  _make_runner_dir
+  printf 'echo ".token-saver"\n' >>"$TEST_TMP/install.sh"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "終了コード"
+  # 1本も実行されていないこと。「他は緑だから大丈夫」と読まれる余地を残さない。
+  assert_not_contains "$RUNNER_OUT" "  ok   " "テストが走っていない"
+}
+
+# 新パスは値としての直書きだけを禁じる。行頭コメント（行の最初の非空白文字が
+# # である行）は、なぜそう書いたかを述べる散文であり、値の重複を作らないので
+# 許される。
+test_実装コードの行頭コメントにある新パスのリテラルは許す() {
+  _make_runner_dir
+  printf '# .token-saver はここに置く\n' >>"$TEST_TMP/scripts/handoff-check.sh"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_eq "0" "$RUNNER_STATUS" "終了コード"
+  assert_not_contains "$RUNNER_OUT" "実装コードにパスのリテラルが残っている" "行頭コメントは対象外"
+}
+
+# 旧パスにはコメントの免除が無い。旧パスを語る記述そのものが、次に読む人を
+# 移行前の世界へ誘導するためである。
+test_実装コードの行頭コメントにある旧パスのリテラルは打ち切る() {
+  _make_runner_dir
+  printf '# .claude/.handoff は旧パスである\n' >>"$TEST_TMP/install.sh"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "終了コード"
+  assert_contains "$RUNNER_OUT" "install.sh" "違反したファイル名"
 }

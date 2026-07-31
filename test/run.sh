@@ -116,6 +116,70 @@ _check_assert_layer() {
 
 _check_assert_layer
 
+# ---- パスの単一情報源の検査 ----------------------------------------------
+# token-saver が管理するパスの定義は scripts/lib/paths.sh の1箇所だけに置く。
+# 実装コードに直書きが残ると、片方だけ直したときにテストが緑のまま通る
+# （実測: 同じ定義を2層に書いた結果、どちらの層も改変を検出できなくなった）。
+#
+# 対象は実装コードだけである。test/ を対象外にするのは意図である。テスト側も
+# paths.sh から導出させると、実装とテストが同じ定義を見るだけになり、パスが
+# まるごと間違っていても両者が一致して緑になる。契約テストはリテラルを直書きする。
+#
+# 旧パス（.claude/.handoff, .claude/.token-saver）と新パス（.token-saver）は
+# 扱いを分ける。
+#
+#   旧パス: コメントかどうかを問わず全面禁止する。旧パスを語る記述が残ると、
+#   次に読む人を移行前の世界へ誘導する。除外は paths.sh 自身だけである
+#   （移行と uninstall.sh のフォールバックのために、そこでだけ旧パスを
+#   名指しする必要がある）。
+#
+#   新パス: 値としての直書きだけを禁じ、行頭コメント（行の最初の非空白文字が
+#   # である行）は許す。二層問題を作るのは値の重複であって、なぜそう書いたかを
+#   述べる散文はそれを作らない。このリポジトリのコメントは「なぜ」を濃く語る
+#   文体であり、その語彙からパス名を奪うと本末転倒である
+#   （実例: uninstall.sh の「-maxdepth 1: .token-saver/ は handoff/ を
+#   内包するようになった」という説明は、そのディレクトリ名を書けなければ
+#   成立しない）。行末コメント（コードの後ろに # ... を付けた形）は除外しない。
+#   判定を単純に保つためであり、結果として「パスに言及する説明は独立した行に
+#   書く」という規律にもなる。
+#
+# 違反があればテストを1本も走らせずに打ち切る。1箇所の直し忘れを
+# 「他は緑だから大丈夫」と読ませないためである。
+_check_path_literals() {
+  local targets=() legacy_hits new_hits
+  [ -f "$REPO_ROOT/install.sh" ] && targets+=("$REPO_ROOT/install.sh")
+  [ -f "$REPO_ROOT/uninstall.sh" ] && targets+=("$REPO_ROOT/uninstall.sh")
+  [ -d "$REPO_ROOT/scripts" ] && targets+=("$REPO_ROOT/scripts")
+  [ -d "$REPO_ROOT/lib" ] && targets+=("$REPO_ROOT/lib")
+
+  if [ "${#targets[@]}" -eq 0 ]; then
+    printf 'エラー: パス検査の対象が1つも無い: %s\n' "$REPO_ROOT" >&2
+    printf '       実装コードが消えているか REPO_ROOT が誤っている。\n' >&2
+    exit 1
+  fi
+
+  legacy_hits="$(grep -rnE '\.claude/\.handoff|\.claude/\.token-saver' "${targets[@]}" 2>/dev/null \
+    | grep -v '/paths\.sh:' || true)"
+
+  # 旧パスとして既に報告した行を新パスの走査から除く。".claude/.token-saver"
+  # は ".token-saver" も部分一致するため、除かないと同じ行が二重に出る。
+  new_hits="$(grep -rnE '\.token-saver' "${targets[@]}" 2>/dev/null \
+    | grep -v '/paths\.sh:' \
+    | grep -vE '\.claude/\.handoff|\.claude/\.token-saver' \
+    | awk '{ line = $0; sub(/^[^:]*:[0-9]+:/, "", line); if (line !~ /^[[:space:]]*#/) print }' \
+    || true)"
+
+  if [ -n "$legacy_hits" ] || [ -n "$new_hits" ]; then
+    printf 'エラー: 実装コードにパスのリテラルが残っている\n' >&2
+    printf '       定義は scripts/lib/paths.sh の1箇所だけに置くこと。\n' >&2
+    [ -n "$legacy_hits" ] && printf '%s\n' "$legacy_hits" >&2
+    [ -n "$new_hits" ] && printf '%s\n' "$new_hits" >&2
+    exit 1
+  fi
+}
+
+_check_path_literals
+
 PATTERN="${1:-}"
 
 # テスト1本あたりの上限時間（秒）。環境変数 CTS_TEST_TIMEOUT で変えられる。
