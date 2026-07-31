@@ -14,10 +14,21 @@
 #
 # 総件数は環境変数 CTS_MIN_TESTS で上書きできる。CTS_MIN_TESTS=0 を指定したときだけ
 # 検査を無効にできる（台帳が無いことを黙って無検査にはしない）。
-287
+#
+# 注意: この総件数は「実行された回数」の下限であって「見ている観点の数」ではない。
+# ルート直下への移設（.token-saver/）の回では、旧いテストを改名しながら同趣旨の
+# アサーションを新しい名前でも足したため、件数は実際のカバレッジの伸びより速く
+# 増えている。判定は「削除は事故コストが高いので、重複が疑わしくても残して
+# 説明を書く」（controller 判断）。名前を変えず中身も同じ・アサーションの並びが
+# ほぼ同一の対だけを以下に挙げる。全数監査はしていないので、これが全てとは限らない。
+#   - test-install.sh: test_引き継ぎディレクトリを作る / test_新パスに引き継ぎのディレクトリを作る
+#     （どちらも .token-saver/handoff/{pending,consumed} の存在だけを見る同一の検証）
+#   - test-uninstall.sh: test_引き継ぎの実ファイルは消さない / test_実ファイルのある_handoff_は残す
+#     （pending 配下に実ファイルがあれば uninstall 後も残る、という同一の性質）
+290
 test-handoff-check.sh 77
 test-handoff-consume.sh 16
-test-install.sh 71
-test-paths.sh 6
-test-runner-selftest.sh 57
+test-install.sh 72
+test-paths.sh 7
+test-runner-selftest.sh 58
 test-uninstall.sh 60
