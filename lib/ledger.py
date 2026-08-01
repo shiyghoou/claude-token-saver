@@ -26,6 +26,7 @@
 # .gitignore の対象であり、版管理へは入らない。
 
 import json
+import errno
 import os
 import sys
 import tempfile
@@ -41,10 +42,16 @@ def write_atomic(path, text, mode=None):
     hyphen を含むスクリプト名（gitignore-block.py など）は import できないため、
     共有する小道具はこのモジュールに置く。
     """
+    if os.path.islink(path):
+        raise OSError(errno.ELOOP, "シンボリックリンクを置き換えない", path)
+
     if mode is None:
         try:
-            mode = os.stat(path).st_mode & 0o7777
-        except OSError:
+            stat_result = os.stat(path)
+            if stat_result.st_mode & 0o222 == 0:
+                raise PermissionError(errno.EACCES, "書き込み権限が無い", path)
+            mode = stat_result.st_mode & 0o7777
+        except FileNotFoundError:
             umask = os.umask(0)
             os.umask(umask)
             mode = 0o666 & ~umask
@@ -53,7 +60,7 @@ def write_atomic(path, text, mode=None):
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".cts-", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
             f.write(text)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -71,7 +78,7 @@ def load(path):
     uninstall は has_record が偽なら何もしない（推測へ落ちない）。
     """
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig", errors="surrogateescape", newline="") as f:
             data = json.loads(f.read() or "{}")
     except (OSError, ValueError):
         return {}

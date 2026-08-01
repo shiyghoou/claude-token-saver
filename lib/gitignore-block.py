@@ -90,20 +90,36 @@ def warn_unpaired(path, strays, action):
 
 
 def read_text(path):
-    if not os.path.exists(path):
+    if not os.path.lexists(path):
         return None
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
         return f.read()
 
 
-def render(lines):
-    return "\n".join(lines) + "\n" if lines else ""
+def split_text(text):
+    """LF だけを行境界として扱い、改行形式と末尾改行の有無を返す。"""
+    if not text:
+        return [], "\n", False
+    newline = "\r\n" if "\r\n" in text else "\n"
+    final_newline = text.endswith("\n")
+    raw = text.split("\n")
+    if final_newline:
+        raw.pop()
+    lines = [line[:-1] if line.endswith("\r") else line for line in raw]
+    return lines, newline, final_newline
+
+
+def render(lines, newline="\n", final_newline=True):
+    if not lines:
+        return ""
+    text = newline.join(lines)
+    return text + newline if final_newline else text
 
 
 def cmd_apply(path):
     original = read_text(path)
-    lines = (original or "").splitlines()
-    body = sys.stdin.read().splitlines()
+    lines, newline, final_newline = split_text(original or "")
+    body, _, _ = split_text(sys.stdin.read())
     block = [START] + body + [END]
 
     spans = find_blocks(lines)
@@ -134,7 +150,10 @@ def cmd_apply(path):
         out += block
         verb = "追記した"
 
-    new_text = render(out)
+    # 既存ファイルの末尾改行の有無をそのまま引き継ぐ。install がここで
+    # 無改行ファイルへ改行を足すと、uninstall の往復で利用者の末尾1バイトが
+    # 変わってしまう。
+    new_text = render(out, newline, final_newline if original is not None else True)
     if new_text == original:
         print("  .gitignore は最新である")
         return EXIT_UNCHANGED
@@ -148,7 +167,7 @@ def cmd_remove(path):
     original = read_text(path)
     if original is None:
         return EXIT_OK
-    lines = original.splitlines()
+    lines, newline, final_newline = split_text(original)
 
     spans = find_blocks(lines)
     strays = stray_markers(lines, spans)
@@ -168,7 +187,7 @@ def cmd_remove(path):
         if start > 0 and out[start - 1].strip() == "":
             del out[start - 1]
 
-    ledger.write_atomic(path, render(out))
+    ledger.write_atomic(path, render(out, newline, final_newline))
     print("  .gitignore の追記を削除した")
     return EXIT_OK
 

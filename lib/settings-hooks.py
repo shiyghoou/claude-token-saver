@@ -35,15 +35,16 @@ OURS = {"handoff-check.sh", "suggest-session-cut.sh"}
 
 
 def looks_like_ours(command):
-    """台帳が無いときの推測。コマンド文字列に自分のスクリプトが現れるか見る。
+    """台帳が無いときの推測。実行ファイル位置だけを候補にする。
 
     先頭トークンの basename だけでは取りこぼす:
       - 空白入りパスが非クォートで登録されている（旧版の登録）
       - `bash /path/handoff-check.sh` のようにインタプリタ経由
       - Windows のバックスラッシュ区切り
-    分解の仕方を変えた候補すべてを見て、どれかで一致すれば自分のものとする。
-    取りこぼすと「外した」と言いながら残り、毎セッション失敗し続けるため、
-    取りこぼしより誤検出を選ぶ。誤検出の側は台帳で防ぐ。
+    先頭トークン、または bash/sh/python などのインタプリタ直後だけを見る。
+    `echo handoff-check.sh` のような利用者の説明文を自分のフックと誤認しない。
+    旧版が空白入りパスを非クォートで保存した場合だけ、パスらしい文字列が
+    自分のスクリプト名で終わる形を互換用に受け入れる。
     """
     text = str(command).replace("\\", "/")
 
@@ -54,19 +55,33 @@ def looks_like_ours(command):
         except ValueError:
             pass
 
+    interpreters = {
+        "bash", "sh", "dash", "zsh", "ksh", "fish", "python", "python3",
+    }
     for parts in candidates:
-        for part in parts:
-            if os.path.basename(part.strip("'\"")) in OURS:
+        if not parts:
+            continue
+        if os.path.basename(parts[0].strip("'\"")) in OURS:
+            return True
+        if len(parts) > 1 and os.path.basename(parts[0].strip("'\"")) in interpreters:
+            if os.path.basename(parts[1].strip("'\"")) in OURS:
                 return True
+
+    # 旧版の非クォート登録（例: /tmp/my clone/scripts/handoff-check.sh）を
+    # 取り外せるようにする。ただしコマンド名が先頭に無い文字列だけを対象にし、
+    # `echo .../handoff-check.sh` は候補にしない。
+    first = text.lstrip().split(None, 1)[0] if text.lstrip() else ""
+    if first.startswith(("/", "./", "../")) or (len(first) >= 2 and first[1] == ":"):
+        return any(text.rstrip().endswith("/" + name) for name in OURS)
     return False
 
 
 def load(path):
     """(data, original_text) を返す。読めない・壊れている場合は落ちる。"""
-    if not os.path.exists(path):
+    if not os.path.lexists(path):
         return {}, None
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig", errors="surrogateescape", newline="") as f:
             original = f.read()
         text = original.strip()
         data = json.loads(text) if text else {}
@@ -83,6 +98,20 @@ def load(path):
     if "hooks" in data and not isinstance(data["hooks"], dict):
         sys.stderr.write("既存の %s の hooks がオブジェクトでない。設定は変更していない。\n" % path)
         sys.exit(1)
+    for event, groups in data.get("hooks", {}).items():
+        if not isinstance(event, str) or not isinstance(groups, list):
+            sys.stderr.write("既存の %s の hooks イベントが配列でない。設定は変更していない。\n" % path)
+            sys.exit(1)
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                sys.stderr.write("既存の %s の hooks グループが妥当でない。設定は変更していない。\n" % path)
+                sys.exit(1)
+            for entry in group["hooks"]:
+                if not isinstance(entry, dict) or (
+                    "command" in entry and not isinstance(entry["command"], str)
+                ):
+                    sys.stderr.write("既存の %s の hooks エントリが妥当でない。設定は変更していない。\n" % path)
+                    sys.exit(1)
     return data, original
 
 
@@ -154,6 +183,24 @@ def purge(data, known, guess=False):
     return removed
 
 
+def guess_candidates(data):
+    """台帳が無い install で、推測なら候補になる登録を列挙する。"""
+    candidates = []
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return candidates
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            for entry in group["hooks"]:
+                if isinstance(entry, dict) and looks_like_ours(entry.get("command", "")):
+                    candidates.append((event, entry.get("command", "")))
+    return candidates
+
+
 def save_if_changed(path, data, original):
     """内容が変わったときだけ書き戻す。
 
@@ -162,11 +209,12 @@ def save_if_changed(path, data, original):
     """
     if original is not None:
         try:
-            if json.loads(original.strip() or "{}") == data:
+            if json.loads(original.lstrip("\ufeff").strip() or "{}") == data:
                 return False
         except json.JSONDecodeError:
             pass
-    new_text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    bom = "\ufeff" if original is not None and original.startswith("\ufeff") else ""
+    new_text = bom + json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     if new_text == original:
         return False
     ledger.write_atomic(path, new_text)
@@ -175,18 +223,26 @@ def save_if_changed(path, data, original):
 
 def cmd_install(path, ledger_path, specs):
     data, original = load(path)
-    # install だけは、記録が無いときも推測で掃除する（guess=True）。
-    # 掃除したうえで必ず入れ直すため、誤検出しても登録は残る（自分の綴りへ
-    # 置き換わるだけである）。ここを fail-closed にすると、台帳の無い旧版から
-    # 上げた環境で二重登録が永久に残る。
-    # 消したまま戻さない uninstall 側は、同じ理由で fail-closed である。
-    removed = purge(data, recorded_hooks(ledger_path), guess=True)
+    known = recorded_hooks(ledger_path)
+    candidates = [] if known is not None else guess_candidates(data)
+    # 台帳が無い install も推測削除へ落とさない。旧版の残骸は二重登録のまま
+    # 残りうるが、利用者のフックを消すより安全である。候補だけを警告する。
+    if candidates:
+        for event, command in candidates:
+            sys.stderr.write(
+                "  警告: 台帳が無いため推測候補のフックを変更していない: %s [%s]\n"
+                % (event, command)
+            )
+    removed = purge(data, known, guess=False)
 
     added = []
     commands = []
     hooks = data.setdefault("hooks", {})
     for spec in specs:
-        event, command = spec.split(":", 1)
+        event, separator, command = spec.partition(":")
+        if not separator or not event or not command:
+            sys.stderr.write("フック指定が妥当でない: %r\n" % spec)
+            return 64
         # 空白を含むパスをそのまま入れると、シェルが単語分割して毎セッション
         # rc=127 で失敗する。クォートしてから登録する。
         quoted = shlex.quote(command)
@@ -210,14 +266,14 @@ def cmd_install(path, ledger_path, specs):
 
     if not save_if_changed(path, data, original):
         print("  フックは既に登録済み")
-        return 0
+        return 2 if candidates else 0
 
     for line in added:
         print("  フックを登録した: %s" % line)
     stale = removed - len(added)
     if stale > 0:
         print("  古い・重複したフックの登録を %d 件整理した" % stale)
-    return 0
+    return 2 if candidates else 0
 
 
 def cmd_remove(path, ledger_path, guess=False):
@@ -237,9 +293,12 @@ def cmd_remove(path, ledger_path, guess=False):
         )
         return 2
     removed = purge(data, known, guess=guess)
-    # 1件も外していないなら書かない。書けば利用者の書式を黙って変えてしまう。
-    if removed:
-        save_if_changed(path, data, original)
+    # 記録があるのに1件も外せないのは、導入後に利用者が差し替えたか、台帳が
+    # 古くなった状態である。成功扱いにして台帳を消すと次回は取り外せない。
+    if not removed:
+        sys.stderr.write("  警告: 台帳に記録されたフックを外せないため設定を変更していない。\n")
+        return 2
+    save_if_changed(path, data, original)
     print("  フックの登録を %d 件外した" % removed)
     return 0
 
@@ -254,9 +313,9 @@ def cmd_same(path, other):
         if not os.path.exists(p):
             return {}
         try:
-            with open(p, encoding="utf-8") as f:
+            with open(p, encoding="utf-8-sig", errors="surrogateescape", newline="") as f:
                 text = f.read().strip()
-            return json.loads(text) if text else {}
+            return json.loads(text.lstrip("\ufeff")) if text else {}
         except (OSError, ValueError):
             return None
 
@@ -265,7 +324,7 @@ def cmd_same(path, other):
 
 
 def main(argv):
-    if len(argv) >= 4 and argv[1] == "same":
+    if len(argv) == 4 and argv[1] == "same":
         return cmd_same(argv[2], argv[3])
     if len(argv) < 3 or argv[1] not in ("install", "remove"):
         sys.stderr.write(
@@ -276,19 +335,36 @@ def main(argv):
 
     rest = argv[3:]
     ledger_path = ""
-    if rest and rest[0] == "--ledger":
-        if len(rest) < 2:
-            sys.stderr.write("--ledger には台帳のパスが要る\n")
-            return 64
-        ledger_path = rest[1]
-        rest = rest[2:]
     guess = False
-    if rest and rest[0] == "--guess":
-        guess = True
-        rest = rest[1:]
+    specs = []
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if token == "--ledger":
+            if ledger_path or i + 1 >= len(rest):
+                sys.stderr.write("--ledger には台帳のパスが要る\n")
+                return 64
+            ledger_path = rest[i + 1]
+            i += 2
+            continue
+        if token == "--guess":
+            if argv[1] != "remove" or guess:
+                sys.stderr.write("--guess は remove で1回だけ指定できる\n")
+                return 64
+            guess = True
+            i += 1
+            continue
+        if token.startswith("-"):
+            sys.stderr.write("不明なオプションまたは引数: %s\n" % token)
+            return 64
+        specs.append(token)
+        i += 1
 
     if argv[1] == "install":
-        return cmd_install(argv[2], ledger_path, rest)
+        return cmd_install(argv[2], ledger_path, specs)
+    if specs:
+        sys.stderr.write("remove にフック指定は渡せない\n")
+        return 64
     return cmd_remove(argv[2], ledger_path, guess)
 
 

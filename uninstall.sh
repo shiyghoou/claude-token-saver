@@ -43,7 +43,7 @@ while [ "$#" -gt 0 ]; do
 done
 target_arg="${pos[0]:-$PWD}"
 
-TARGET="$(cd "$target_arg" 2>/dev/null && pwd -P)" || {
+TARGET="$(cd -- "$target_arg" 2>/dev/null && pwd -P)" || {
   printf 'エラー: 導入先ディレクトリが見つからない: %s\n' "$target_arg" >&2
   exit 1
 }
@@ -243,6 +243,9 @@ fi
 gitignore_created=0
 [ "$have_ledger" = 1 ] &&
   gitignore_created="$(python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" gitignore_created)"
+settings_created=0
+[ "$have_ledger" = 1 ] &&
+  settings_created="$(python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" settings_created)"
 
 # 台帳は、外し切れたときだけ役目を終える。取り残しがあるのに消すと、次回の
 # 実行が「記録の無い状態」＝何もできない状態になり、取り外し不能になる。
@@ -254,9 +257,21 @@ else
 fi
 
 handoff_dir="$TARGET/$(cts_handoff_rel)"
-if [ -d "$handoff_dir" ] && [ -n "$(find "$handoff_dir" -type f -print -quit 2>/dev/null)" ]; then
+legacy_handoff_dir="$TARGET/$(cts_legacy_handoff_rel)"
+handoff_notice=""
+for candidate_handoff in "$handoff_dir" "$legacy_handoff_dir"; do
+  if [ -d "$candidate_handoff" ] &&
+     [ -n "$(find "$candidate_handoff" \( -type f -o -type l \) -print -quit 2>/dev/null)" ]; then
+    if [ "$candidate_handoff" = "$handoff_dir" ]; then
+      handoff_notice="$handoff_notice $(cts_handoff_rel)"
+    else
+      handoff_notice="$handoff_notice $(cts_legacy_handoff_rel)"
+    fi
+  fi
+done
+if [ -n "$handoff_notice" ]; then
   info ""
-  info "引き継ぎのファイルは残した: $(cts_handoff_rel)"
+  info "引き継ぎのファイルは残した:$handoff_notice"
   info "  作業の記録であるため、アンインストールでは削除しない。不要なら手で削除せよ。"
   info "  .gitignore の除外は外れているので、版管理から外したいなら注意せよ。"
 fi
@@ -297,7 +312,8 @@ if [ "$have_ledger" = 1 ] || [ "$GUESS" = 1 ]; then
       rm -f "$GITIGNORE"
     fi
   fi
-  if [ -f "$SETTINGS" ] &&
+  if [ "$settings_created" = 1 ] && [ -f "$SETTINGS" ] &&
+     ! git -C "$TARGET" ls-files --error-unmatch .claude/settings.local.json >/dev/null 2>&1 &&
      [ "$(tr -d ' \t\n\r' <"$SETTINGS")" = "{}" ]; then
     rm -f "$SETTINGS"
   fi
