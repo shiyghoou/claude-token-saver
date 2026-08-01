@@ -268,14 +268,9 @@ _repo_fingerprint() {
 
 # git の指紋には死角が1つある。`git status --porcelain -uall` は
 # `.gitignore` で無視されたパスを一切列挙しない。このリポジトリの
-# `.gitignore` は `.claude/` を丸ごと無視しているため、その配下の汚染は
-# 最初から見えていない。`.token-saver/` も今のところ見えているだけで、
-# それはこのリポジトリ自身の `# claude-token-saver` ブロックが旧パス
-# （`.claude/.handoff/` 等）のまま更新されずに残っているという偶然による。
-# 誰かがこのリポジトリで `install.sh` を再実行すれば（保守として普通に
-# 起こりうる）、移行が走ってブロックは新パス（`.token-saver/`）へ再生成され、
-# その瞬間から `.token-saver/` も無視対象になり、この汚染ゲートは git の
-# 経路だけでは何も検出しなくなる。
+# `.gitignore` は `.claude/` を丸ごと無視しており、さらに
+# `# claude-token-saver` ブロックが新パス（`.token-saver/`）を無視する。
+# つまり token-saver が管理する場所は、git の指紋からはひとつも見えない。
 #
 # 対策の候補は2つあった。`--ignored=matching` に切り替えて無視パスも
 # 指紋へ含める案は採らない。それをやると `.superpowers/` や `.claude/` の
@@ -285,18 +280,49 @@ _repo_fingerprint() {
 # 「守りが黙って no-op になる」欠陥が、別の道から戻ってくるだけである。
 #
 # 採るのは、`git status` を主とした指紋はそのまま残し、`.gitignore` に
-# まったく依存しない存在確認を並走させる案である。対象は token-saver 自身が
-# 作りうる器（新パスと、まだこのリポジトリの `.gitignore` が無視できていない
-# 旧パス）に絞る。「今は無視されていないから」ではなく「無視されていても
-# 検出する」ことが目的なので、無視されているかどうかで対象を選ばない。
+# まったく依存しない指紋を並走させる案である。対象は token-saver 自身が
+# 作り・書き換える場所に絞る。「今は無視されていないから」ではなく
+# 「無視されていても検出する」ことが目的なので、無視されているかどうかで
+# 対象を選ばない。
+#
+# 見るのは「存在するかどうか」ではなく配下の中身である。存在確認だけだと、
+# 本物のリポジトリでは対象がすべて既に存在するため before/after が常に
+# 一致し、ゲートが丸ごと no-op になる（実測: `.token-saver/handoff/pending/`
+# へファイルを作っても、`.token-saver/installed.json` を上書きしても、
+# 全件緑・無警告だった）。`_repo_fingerprint_no_git` と同じ考え方で、
+# 配下を再帰して種別・シンボリックリンクの向き先・通常ファイルの
+# チェックサムまで突き合わせる。存在しないパスは absent として明示的に
+# 記録する（新規作成も差として現れるようにするため）。
 _repo_pollution_probe() {
-  local p
-  for p in "$REPO_ROOT/.token-saver" \
-           "$REPO_ROOT/.claude/.handoff" \
-           "$REPO_ROOT/.claude/.token-saver"; do
-    if [ -e "$p" ] || [ -L "$p" ]; then
-      printf '%s\n' "$p"
+  local rel p f
+  # test/ はパスの単一情報源ゲートの対象外である（理由は上の節を参照）。
+  # 検査する側がリテラルを直書きするのは意図である。
+  for rel in '.token-saver' \
+             '.claude/.handoff' \
+             '.claude/.token-saver' \
+             '.claude/settings.local.json' \
+             '.claude/settings.local.json.cts-backup' \
+             '.claude/skills'; do
+    p="$REPO_ROOT/$rel"
+    if [ ! -e "$p" ] && [ ! -L "$p" ]; then
+      printf '%s\tabsent\n' "$rel"
+      continue
     fi
+    # -P（既定）でシンボリックリンクを辿らない。`.claude/skills/<名前>` は
+    # このクローンの skills/ へ向くリンクであり、辿ると同じ内容を二重に
+    # 数えるうえ、リンク先の差し替えが「リンクの向き先の変化」として
+    # 見えなくなる。
+    find "$p" -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+      if [ -L "$f" ]; then
+        printf '%s\tlink\t%s\n' "$f" "$(readlink "$f")"
+      elif [ -d "$f" ]; then
+        printf '%s\tdir\n' "$f"
+      elif [ -f "$f" ]; then
+        printf '%s\tfile\t%s\n' "$f" "$(cksum <"$f" 2>/dev/null)"
+      else
+        printf '%s\tother\n' "$f"
+      fi
+    done
   done
 }
 
@@ -603,8 +629,8 @@ if [ "$_REPO_BEFORE" != "$_repo_after" ]; then
   failed_names+=("(リポジトリ本体の汚染)")
 fi
 
-# git の指紋は `.gitignore` に無視されたパスを見ない。並走させた存在確認で、
-# git の指紋が無視して見逃した汚染を拾う。git の指紋と同じ扱い（fail_count
+# git の指紋は `.gitignore` に無視されたパスを見ない。並走させた配下再帰の
+# 指紋で、git の指紋が無視して見逃した汚染を拾う。git の指紋と同じ扱い（fail_count
 # へ積むだけで打ち切らない）にするのは、結果の一覧を最後まで出し切ってから
 # 報告するという既存の方針を崩さないためである。
 _repo_pollution_after="$(_repo_pollution_probe)"

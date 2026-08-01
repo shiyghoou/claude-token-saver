@@ -698,6 +698,90 @@ test_gitignoreに隠れた汚染も存在確認で検出する() {
   assert_contains "$RUNNER_OUT" ".token-saver" "汚染したパス"
 }
 
+# 上のテストは `.token-saver/` が「最初は存在しない」状態から作られる場合しか
+# 見ていない。本物のリポジトリでは、これらの器はすべて既に存在する。存在の
+# 有無だけを見る並走指紋はその状態で before/after が常に一致し、配下がどれだけ
+# 汚れても丸ごと no-op になる（実測: 本物のリポジトリで
+# `.token-saver/handoff/pending/` へファイルを作っても、`installed.json` を
+# 上書きしても、全件緑・無警告だった）。以下は本物の状態、すなわち
+# 「器が既に存在し、その配下が変わる」を再現して検出力を確かめる。
+#
+# 種まき: `.gitignore` で `.token-saver/` と `.claude/` を隠したうえで、
+# 汚染される側の器と中身を先に作っておく。
+_seed_ignored_repo_with_existing_dirs() {
+  ( cd "$TEST_TMP" &&
+    git init -q . &&
+    printf '.token-saver/\n.claude/\n' >.gitignore &&
+    git add install.sh .gitignore &&
+    git -c user.email=t@example.com -c user.name=t commit -qm '種まき'
+  ) >/dev/null 2>&1 || _fail "複製先の git init に失敗した"
+  mkdir -p "$TEST_TMP/.token-saver/handoff/pending" \
+           "$TEST_TMP/.token-saver/handoff/consumed" \
+           "$TEST_TMP/.claude"
+  printf '{"version":"seed"}\n' >"$TEST_TMP/.token-saver/installed.json"
+  printf '# 実データ\n' >"$TEST_TMP/.token-saver/handoff/pending/existing.md"
+  printf '{"hooks":{}}\n' >"$TEST_TMP/.claude/settings.local.json"
+}
+
+test_既に存在する引き継ぎディレクトリの配下にファイルが増えても検出する() {
+  _make_runner_dir
+  _seed_ignored_repo_with_existing_dirs
+  _put_test_file subject '  test_既存の器の中へ足す() {
+    : >"$REPO_ROOT/.token-saver/handoff/pending/POLLUTION-PROBE.md"
+    @A@eq a a "何もしない"
+  }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" ".gitignore 越しの見逃し" "並走指紋が拾ったことを示す文言"
+  assert_contains "$RUNNER_OUT" "POLLUTION-PROBE.md" "増えたファイルの名前"
+}
+
+test_既に存在するファイルの中身が書き換わっても検出する() {
+  _make_runner_dir
+  _seed_ignored_repo_with_existing_dirs
+  # 上書き前と同じバイト数にする。サイズだけを見る指紋では捕まらないことを
+  # 明示するためである（cksum まで見て初めて差が出る）。
+  _put_test_file subject '  test_既存ファイルを上書きする() {
+    printf "{\"version\":\"CLOB\"}\n" >"$REPO_ROOT/.token-saver/installed.json"
+    @A@eq a a "何もしない"
+  }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" ".gitignore 越しの見逃し" "並走指紋が拾ったことを示す文言"
+  assert_contains "$RUNNER_OUT" "installed.json" "書き換わったファイルの名前"
+}
+
+test_既に存在するファイルがシンボリックリンクへ差し替わっても検出する() {
+  _make_runner_dir
+  _seed_ignored_repo_with_existing_dirs
+  _put_test_file subject '  test_既存ファイルをリンクへ差し替える() {
+    rm -f "$REPO_ROOT/.token-saver/handoff/pending/existing.md"
+    ln -s /nonexistent "$REPO_ROOT/.token-saver/handoff/pending/existing.md"
+    @A@eq a a "何もしない"
+  }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" ".gitignore 越しの見逃し" "並走指紋が拾ったことを示す文言"
+  assert_contains "$RUNNER_OUT" "$(printf 'existing.md\tlink\t/nonexistent')" \
+    "リンクへの差し替えが種別と向き先として指紋に現れること"
+}
+
+# フック登録先（.claude/settings.local.json）とその控えも token-saver が
+# 書き換える場所である。`.claude/` はこのリポジトリで丸ごと無視されており、
+# git の指紋からは最初から見えない。
+test_フック登録先の書き換えも検出する() {
+  _make_runner_dir
+  _seed_ignored_repo_with_existing_dirs
+  _put_test_file subject '  test_フック登録先を上書きする() {
+    printf "{\"hooks\":{\"leaked\":1}}\n" >"$REPO_ROOT/.claude/settings.local.json"
+    @A@eq a a "何もしない"
+  }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" ".gitignore 越しの見逃し" "並走指紋が拾ったことを示す文言"
+  assert_contains "$RUNNER_OUT" "settings.local.json" "書き換わったファイルの名前"
+}
+
 # このゲート自体が誤検知しないこと。本体を汚さない健全なテストでは
 # 打ち切らない。
 test_本体が汚れていなければ打ち切らない() {
