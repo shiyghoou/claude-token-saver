@@ -13,8 +13,28 @@ set -uo pipefail
 # 物理パスで解決する。シンボリックリンク経由で呼ばれたときに綴りの違う
 # パスが登録され、実パス経由の再実行で二重登録になるのを防ぐ。
 CTS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-TARGET="$(cd "${1:-$PWD}" 2>/dev/null && pwd -P)" || {
-  printf 'エラー: 導入先ディレクトリが見つからない: %s\n' "${1:-$PWD}" >&2
+target_args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h | --help)
+      printf 'usage: install.sh [<導入先ディレクトリ>]\n'
+      exit 0
+      ;;
+    -*)
+      printf 'エラー: 不明なオプション: %s\n' "$1" >&2
+      exit 1
+      ;;
+    *) target_args+=("$1") ;;
+  esac
+  shift
+done
+if [ "${#target_args[@]}" -gt 1 ]; then
+  printf 'エラー: 導入先ディレクトリは1つだけ指定できる\n' >&2
+  exit 1
+fi
+target_arg="${target_args[0]:-$PWD}"
+TARGET="$(cd -- "$target_arg" 2>/dev/null && pwd -P)" || {
+  printf 'エラー: 導入先ディレクトリが見つからない: %s\n' "$target_arg" >&2
   exit 1
 }
 
@@ -43,6 +63,9 @@ die() {
     printf 'ここまで適用した:\n' >&2
     printf '  - %s\n' "${applied[@]}" >&2
     printf '復旧するには uninstall.sh を実行せよ: %s/uninstall.sh %s\n' "$CTS_HOME" "$TARGET" >&2
+    if [ "${migrated:-0}" -gt 0 ]; then
+      printf '注意: 旧パスから移した引き継ぎは uninstall.sh では旧位置へ戻らない。必要なら手で戻せ。\n' >&2
+    fi
   fi
   exit 1
 }
@@ -52,8 +75,33 @@ warn() {
   printf '  警告: %s\n' "$*"
 }
 
+cts_reject_managed_symlinks() {
+  local path
+  for path in \
+    "$TARGET/.claude" \
+    "$TARGET/.claude/skills" \
+    "$TARGET/$(cts_legacy_handoff_rel)" \
+    "$TARGET/$(cts_legacy_handoff_rel)/pending" \
+    "$TARGET/$(cts_legacy_handoff_rel)/consumed" \
+    "$TARGET/$(cts_legacy_state_rel)" \
+    "$TARGET/$(cts_handoff_rel)" \
+    "$TARGET/$(cts_handoff_rel)/pending" \
+    "$TARGET/$(cts_handoff_rel)/consumed" \
+    "$TARGET/$(cts_base_rel)"; do
+    if [ -L "$path" ]; then
+      die "管理対象ディレクトリのシンボリックリンクを辿らない: $path"
+    fi
+  done
+}
+
 command -v python3 >/dev/null 2>&1 ||
   die "python3 が必要である（settings.local.json を壊さずに編集するため）。フック自体は python3 に依存しない。"
+
+cts_reject_managed_symlinks
+python3 "$CTS_HOME/lib/ledger.py" check-writable "$SETTINGS" ||
+  die "settings.local.json に安全に書き込めない"
+python3 "$CTS_HOME/lib/ledger.py" check-writable "$GITIGNORE" ||
+  die ".gitignore に安全に書き込めない"
 
 info "claude-token-saver を導入する: $TARGET"
 
@@ -90,7 +138,7 @@ migrate_conflicts=0
 
 cts_migrate_dir() {
   local from="$1" to="$2" entry base
-  [ -d "$from" ] || return 0
+  [ -d "$from" ] && [ ! -L "$from" ] || return 0
   mkdir -p "$to" || die "移行先を作成できない: $to"
   for entry in "$from"/* "$from"/.*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
@@ -168,7 +216,7 @@ fi
 # .gitignore を新規に作るかどうかは、この時点でしか分からない。
 # uninstall.sh が「空になったから消してよい」と判断する根拠になる。
 gitignore_existed=1
-[ -e "$GITIGNORE" ] || gitignore_existed=0
+[ -e "$GITIGNORE" ] || [ -L "$GITIGNORE" ] || gitignore_existed=0
 
 # --- 2. フックの登録 ---------------------------------------------------------
 
@@ -196,7 +244,17 @@ if [ "${#hook_specs[@]}" -gt 0 ]; then
   # あることに尽きる。再実行で更新すると、自分が書いた内容へ塗り替わって
   # 復旧手段が失われる。既存の控えが壊れた JSON の写しであっても、それが
   # 原状であるから直すのは原本のほうであり、控えを作り直す話ではない。
-  if [ -f "$SETTINGS" ] && [ ! -e "$BACKUP" ]; then
+  settings_created_this_run=0
+  if python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" settings_created | grep -qx 1; then
+    settings_created=1
+  else
+    settings_created=0
+  fi
+  if [ ! -e "$SETTINGS" ] && [ ! -L "$SETTINGS" ]; then
+    settings_created_this_run=1
+  fi
+  if [ "$settings_created_this_run" = 0 ] &&
+     [ "$settings_created" = 0 ] && [ -f "$SETTINGS" ] && [ ! -e "$BACKUP" ]; then
     cp -p "$SETTINGS" "$BACKUP" || die "settings.local.json の控えを作れない"
     backup_path="$BACKUP"
     # 控えは settings.local.json の書き換えより前に作られるため、この後で
@@ -205,8 +263,18 @@ if [ "${#hook_specs[@]}" -gt 0 ]; then
   fi
 
   python3 "$CTS_HOME/lib/settings-hooks.py" install "$SETTINGS" \
-    --ledger "$LEDGER" "${hook_specs[@]}" ||
-    die "settings.local.json または台帳を更新できない"
+    --ledger "$LEDGER" "${hook_specs[@]}"
+  settings_status=$?
+  case "$settings_status" in
+    0) ;;
+    2) warnings+=("settings.local.json に台帳無しの推測候補があるため、候補を削除せずフックを登録した") ;;
+    *) die "settings.local.json または台帳を更新できない" ;;
+  esac
+  if [ "$settings_created_this_run" = 1 ]; then
+    python3 "$CTS_HOME/lib/ledger.py" set-flag "$LEDGER" settings_created 1 ||
+      die "台帳を更新できない"
+    settings_created=1
+  fi
   applied+=("settings.local.json へフックを登録")
 fi
 
@@ -239,7 +307,7 @@ for skill_dir in "$CTS_HOME"/skills/*/; do
   src="${skill_dir%/}"
 
   # 既に正しくリンクされているなら何もしない。
-  if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
+  if [ -z "${CTS_NO_SYMLINK:-}" ] && [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
     installed_skills+=("$name")
     python3 "$CTS_HOME/lib/ledger.py" add-skill "$LEDGER" "$name" "$src" link ||
       die "台帳を更新できない"
@@ -317,7 +385,7 @@ case "$gitignore_status" in
   # applied は失敗時の唯一の説明手段である。実際に書いたときだけ積む。
   0) applied+=(".gitignore を更新") ;;
   3) ;;
-  2) warnings+=(".gitignore の claude-token-saver ブロックが壊れているため更新していない") ;;
+  2) warnings+=(".gitignore のブロックが不正または改行形式が混在しているため更新していない") ;;
   *) die ".gitignore を更新できない" ;;
 esac
 

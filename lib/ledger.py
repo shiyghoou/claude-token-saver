@@ -7,6 +7,7 @@
 #                                                 # <US> は 0x1f。理由は FS の定義を見よ。
 #   ledger.py set-flag   <ledger> <name> <0|1>
 #   ledger.py get-flag   <ledger> <name>          # 0 か 1 を出す
+#   ledger.py check-writable <path>               # atomic write 前の安全確認
 #   ledger.py has-record <ledger> <skills|hooks|any>   # 記録が在れば 0、無ければ 1
 #
 # 台帳が無いと uninstall.sh は「自分が置いたもの」を推測するしかなく、
@@ -26,6 +27,7 @@
 # .gitignore の対象であり、版管理へは入らない。
 
 import json
+import errno
 import os
 import sys
 import tempfile
@@ -41,10 +43,16 @@ def write_atomic(path, text, mode=None):
     hyphen を含むスクリプト名（gitignore-block.py など）は import できないため、
     共有する小道具はこのモジュールに置く。
     """
+    if os.path.islink(path):
+        raise OSError(errno.ELOOP, "シンボリックリンクを置き換えない", path)
+
     if mode is None:
         try:
-            mode = os.stat(path).st_mode & 0o7777
-        except OSError:
+            stat_result = os.stat(path)
+            if stat_result.st_mode & 0o222 == 0:
+                raise PermissionError(errno.EACCES, "書き込み権限が無い", path)
+            mode = stat_result.st_mode & 0o7777
+        except FileNotFoundError:
             umask = os.umask(0)
             os.umask(umask)
             mode = 0o666 & ~umask
@@ -53,7 +61,7 @@ def write_atomic(path, text, mode=None):
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".cts-", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
             f.write(text)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -71,7 +79,7 @@ def load(path):
     uninstall は has_record が偽なら何もしない（推測へ落ちない）。
     """
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig", errors="surrogateescape", newline="") as f:
             data = json.loads(f.read() or "{}")
     except (OSError, ValueError):
         return {}
@@ -80,6 +88,26 @@ def load(path):
 
 def save(path, data):
     write_atomic(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def check_writable(path):
+    """atomic write 前に対象と既存の親ディレクトリを書き込めるか確認する。"""
+    if os.path.islink(path):
+        raise OSError(errno.ELOOP, "シンボリックリンクを置き換えない", path)
+    if os.path.lexists(path):
+        if os.stat(path).st_mode & 0o222 == 0:
+            raise PermissionError(errno.EACCES, "書き込み権限が無い", path)
+
+    parent = os.path.abspath(os.path.dirname(path) or ".")
+    while not os.path.lexists(parent):
+        next_parent = os.path.dirname(parent)
+        if next_parent == parent:
+            break
+        parent = next_parent
+    if os.path.islink(parent):
+        raise OSError(errno.ELOOP, "親ディレクトリのシンボリックリンクを辿らない", parent)
+    if os.stat(parent).st_mode & 0o222 == 0:
+        raise PermissionError(errno.EACCES, "親ディレクトリに書き込み権限が無い", parent)
 
 
 def get_list(data, key):
@@ -232,6 +260,9 @@ def main(argv):
             return cmd_set_flag(path, *rest)
         if cmd == "get-flag" and len(rest) == 1:
             return cmd_get_flag(path, rest[0])
+        if cmd == "check-writable" and not rest:
+            check_writable(path)
+            return 0
         if cmd == "has-record" and len(rest) == 1 and rest[0] in ("skills", "hooks", "any"):
             return cmd_has_record(path, rest[0])
     except OSError as e:

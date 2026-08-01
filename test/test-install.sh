@@ -889,3 +889,169 @@ test_START_が2つあれば追記せず警告する() {
   assert_eq "$before" "$(cat "$TARGET/.gitignore")" ".gitignore"
   assert_contains "$INSTALL_OUT$INSTALL_ERR" "警告" "出力"
 }
+
+test_台帳無しのinstallは推測候補を消さず警告する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude" "$TEST_TMP/old/scripts"
+  : >"$TEST_TMP/old/scripts/handoff-check.sh"
+  printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' \
+    "$TEST_TMP/old/scripts/handoff-check.sh" >"$SETTINGS"
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_contains "$(_hook_commands SessionStart)" "$TEST_TMP/old/scripts/handoff-check.sh" \
+    "推測候補である利用者のフック"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "推測" "推測候補の警告"
+}
+
+test_インストール引数の不正値を拒否する() {
+  local out rc=0
+  out="$(bash "$INSTALL" --help 2>&1)" || rc=$?
+  assert_eq "0" "$rc" "--help の終了コード"
+  assert_contains "$out" "usage:" "--help の出力"
+
+  rc=0
+  out="$(bash "$INSTALL" -P 2>&1)" || rc=$?
+  assert_ne "0" "$rc" "-P の終了コード"
+  assert_contains "$out" "オプション" "-P の出力"
+
+  _setup_target
+  rc=0
+  out="$(bash "$INSTALL" "$TARGET" "$TARGET" 2>&1)" || rc=$?
+  assert_ne "0" "$rc" "余分な引数の終了コード"
+}
+
+test_既存_gitignoreの改行形式と末尾改行を往復で保つ() {
+  _setup_target
+  printf 'node_modules/\r\ndist/' >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_install
+  bash "$REPO_ROOT/uninstall.sh" "$TARGET" >/dev/null 2>&1
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail ".gitignore の CRLF と末尾改行が往復で変わった"
+}
+
+test_BOM付き設定と非UTF8_gitignoreをトレースバック無しで扱う() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  python3 - "$SETTINGS" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, "wb") as f:
+    f.write(b"\xef\xbb\xbf{\"permissions\":{}}\n")
+PY
+  printf 'node_modules/\377\n' >"$TARGET/.gitignore"
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "BOM/非UTF-8時の終了コード"
+  assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "Traceback" "BOM/非UTF-8時の出力"
+  python3 - "$SETTINGS" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8-sig") as f:
+    json.load(f)
+PY
+}
+
+test_既存の正しいリンクも_CTS_NO_SYMLINKでコピーへ切り替える() {
+  _setup_target
+  _run_install
+  if [ ! -L "$TARGET/.claude/skills/session-handoff" ]; then
+    _fail "初回インストールでスキルのリンクが作られていない"
+  fi
+  CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >/dev/null 2>&1
+  if [ -L "$TARGET/.claude/skills/session-handoff" ]; then
+    _fail "CTS_NO_SYMLINK=1 で既存リンクが残った"
+  fi
+  assert_file_exists "$TARGET/.claude/skills/session-handoff/.claude-token-saver"
+}
+
+test_旧パスのコンテナシンボリックリンクを辿らない() {
+  _setup_target
+  mkdir -p "$TEST_TMP/outside"
+  printf '外部の記録\n' >"$TEST_TMP/outside/a.md"
+  mkdir -p "$TARGET/.claude/.handoff"
+  ln -s "$TEST_TMP/outside" "$TARGET/.claude/.handoff/pending"
+  _run_install
+  assert_file_exists "$TEST_TMP/outside/a.md" "外部ディレクトリのファイル"
+  if [ ! -L "$TARGET/.claude/.handoff/pending" ]; then
+    _fail "旧パスのコンテナシンボリックリンクを置き換えた"
+  fi
+}
+
+test_シンボリックリンクの_gitignoreを置き換えない() {
+  _setup_target
+  printf '利用者の設定\n' >"$TEST_TMP/real.gitignore"
+  ln -s "$TEST_TMP/real.gitignore" "$TARGET/.gitignore"
+  local out rc=0
+  out="$(printf '.token-saver/\n' | python3 "$REPO_ROOT/lib/gitignore-block.py" apply "$TARGET/.gitignore" 2>&1)" || rc=$?
+  assert_ne "0" "$rc" "シンボリックリンクへの終了コード"
+  if [ ! -L "$TARGET/.gitignore" ]; then
+    _fail ".gitignore のシンボリックリンクを実体へ置き換えた"
+  fi
+  assert_eq "利用者の設定" "$(cat "$TEST_TMP/real.gitignore")" "リンク先の内容"
+  assert_not_contains "$out" "Traceback" "シンボリックリンクへの出力"
+}
+
+test_シンボリックリンクの_settingsを置き換えない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{"permissions":{}}\n' >"$TEST_TMP/real.settings"
+  ln -s "$TEST_TMP/real.settings" "$SETTINGS"
+  _run_install
+  assert_ne "0" "$INSTALL_STATUS" "settings シンボリックリンクへの終了コード"
+  if [ ! -L "$SETTINGS" ]; then
+    _fail "settings.local.json のシンボリックリンクを実体へ置き換えた"
+  fi
+  assert_eq '{"permissions":{}}' "$(cat "$TEST_TMP/real.settings")" "settings リンク先の内容"
+}
+
+test_不正なフック構造と引数をトレースバック無しで拒否する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude" "$TARGET/.token-saver"
+  printf '{"hooks":{"SessionStart":"配列ではない"}}\n' >"$SETTINGS"
+  local out rc=0
+  out="$(python3 "$REPO_ROOT/lib/settings-hooks.py" install "$SETTINGS" \
+    --ledger "$TARGET/.token-saver/installed.json" "SessionStart:$REPO_ROOT/scripts/handoff-check.sh" 2>&1)" || rc=$?
+  assert_ne "0" "$rc" "不正な hooks 構造の終了コード"
+  assert_not_contains "$out" "Traceback" "不正な hooks 構造の出力"
+
+  rc=0
+  out="$(python3 "$REPO_ROOT/lib/settings-hooks.py" install "$SETTINGS" \
+    --bogus "SessionStart:$REPO_ROOT/scripts/handoff-check.sh" 2>&1)" || rc=$?
+  assert_ne "0" "$rc" "不明な引数の終了コード"
+  assert_not_contains "$out" "Traceback" "不明な引数の出力"
+}
+
+test_読み取り専用の設定をatomic書き込みで置き換えない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{"permissions":{}}\n' >"$SETTINGS"
+  cp "$SETTINGS" "$TEST_TMP/settings.before"
+  chmod 444 "$SETTINGS"
+  _run_install
+  chmod 644 "$SETTINGS" 2>/dev/null || true
+  assert_ne "0" "$INSTALL_STATUS" "読み取り専用 settings の終了コード"
+  cmp -s "$TEST_TMP/settings.before" "$SETTINGS" || _fail "読み取り専用 settings を変更した"
+  assert_file_missing "$SETTINGS.cts-backup" "失敗時に残る settings の控え"
+  assert_file_missing "$TARGET/.token-saver/installed.json" "失敗時に残る台帳"
+  assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "Traceback" "読み取り専用 settings の出力"
+}
+
+test_管理対象親ディレクトリのシンボリックリンクを辿らない() {
+  _setup_target
+  mkdir -p "$TEST_TMP/outside"
+  ln -s "$TEST_TMP/outside" "$TARGET/.token-saver"
+  _run_install
+  assert_ne "0" "$INSTALL_STATUS" "管理対象親ディレクトリの終了コード"
+  assert_file_missing "$TEST_TMP/outside/handoff" "外部の引き継ぎディレクトリ"
+  assert_file_missing "$TEST_TMP/outside/installed.json" "外部の台帳"
+  assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "Traceback" "管理対象親ディレクトリの出力"
+}
+
+test_混在改行の_gitignoreは往復で変更しない() {
+  _setup_target
+  printf 'a\r\nb\nc' >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_install
+  bash "$REPO_ROOT/uninstall.sh" "$TARGET" >/dev/null 2>&1
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "混在改行の .gitignore を往復で変更した"
+}

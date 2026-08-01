@@ -444,7 +444,7 @@ EOF
   assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "SessionStart のコマンド"
 }
 
-test_二重登録を残さない() {
+test_台帳無しのインストールは旧フックを消さず警告する() {
   _setup_target
   local clone="$TEST_TMP/my clone"
   _clone_repo "$clone"
@@ -461,7 +461,9 @@ test_二重登録を残さない() {
 EOF
   bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
   _load_hook_commands SessionStart
-  assert_count 1 "$HOOK_COMMANDS" "handoff-check.sh" "handoff-check.sh の登録数"
+  # 波1では台帳無し install の推測削除を禁止する。旧フックは残るが、利用者の
+  # フックを巻き込まないことを優先し、警告を出して判断を委ねる。
+  assert_count 2 "$HOOK_COMMANDS" "handoff-check.sh" "handoff-check.sh の登録数"
 }
 
 test_未導入のリポジトリの_settings_を再整形しない() {
@@ -900,4 +902,71 @@ test_新旧どちらにも台帳が無ければ推測に落ちない() {
   # fail-closed。利用者のフックを勝手に消さない。
   _load_hook_commands SessionStart
   assert_contains "$HOOK_COMMANDS" "handoff-check.sh" "台帳が無ければフックを残す"
+}
+
+test_導入前から追跡済みの空_settingsは消さない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{}\n' >"$SETTINGS"
+  ( cd "$TARGET" &&
+    git add .claude/settings.local.json &&
+    git -c user.email=t@example.com -c user.name=t commit -qm 'settings を追跡' ) >/dev/null 2>&1
+  _run_install
+  _run_uninstall
+  assert_file_exists "$SETTINGS"
+}
+
+test_初回に生成した_settingsは再実行後のuninstallで消す() {
+  _setup_target
+  _run_install
+  _run_install
+  _run_uninstall
+  assert_file_missing "$SETTINGS" "初回に生成した settings.local.json"
+  assert_file_missing "$SETTINGS.cts-backup" "生成設定の控え"
+}
+
+test_既知フックを外せなければ台帳を残す() {
+  _setup_target
+  _run_install
+  printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo 利用者のフック"}]}]}}\n' \
+    >"$SETTINGS"
+  _run_uninstall
+  assert_file_exists "$TARGET/.token-saver/installed.json" "取り残しを記録する台帳"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "警告" "フックを外せない場合の警告"
+}
+
+test_旧パスだけに残った引き継ぎを案内する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.handoff/consumed" "$TARGET/.claude/.token-saver"
+  printf '旧パスの記録\n' >"$TARGET/.claude/.handoff/consumed/a.md"
+  printf '{"skills":[],"hooks":[]}\n' >"$TARGET/.claude/.token-saver/installed.json"
+  _run_uninstall
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" ".claude/.handoff" "旧パスの引き継ぎ案内"
+}
+
+test_引き継ぎのシンボリックリンクも案内する() {
+  _setup_target
+  mkdir -p "$TARGET/.token-saver/handoff/consumed" "$TARGET/.token-saver"
+  printf 'リンク先の記録\n' >"$TEST_TMP/note.md"
+  ln -s "$TEST_TMP/note.md" "$TARGET/.token-saver/handoff/consumed/note.md"
+  printf '{"skills":[],"hooks":[]}\n' >"$TARGET/.token-saver/installed.json"
+  _run_uninstall
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" ".token-saver/handoff" "引き継ぎリンクの案内"
+}
+
+test_guessでもスクリプト名だけを含む利用者コマンドを消さない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo handoff-check.sh"}]}]}}\n' \
+    >"$SETTINGS"
+  _run_uninstall_guess
+  assert_contains "$(_hook_commands SessionStart)" "echo handoff-check.sh" "利用者コマンド"
+}
+
+test_導入先の余分な位置引数を拒否する() {
+  _setup_target
+  local out rc=0
+  out="$(bash "$UNINSTALL" "$TARGET" "$TEST_TMP/other-target" 2>&1)" || rc=$?
+  assert_ne "0" "$rc" "余分な位置引数の終了コード"
+  assert_contains "$out" "1つ" "余分な位置引数の出力"
 }
