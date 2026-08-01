@@ -26,7 +26,10 @@ MARKDOWN_LINK_RE = re.compile(r"(!?)\[([^\]\r\n]*)\]\(([^)\r\n]*)\)")
 CREDENTIAL_RE = re.compile(
     r"(?:^(?:sk|ghp|github_pat|xox[baprs])[-_]"
     r"|^bearer[ ]+"
-    r"|(?:api[_-]?key|token|secret|password|credential|authorization)[ ]*[:=])",
+    r"|(?:api[_-]?key|token|secret|password|credential|authorization)[ ]*[:=]"
+    r"|(?:^|[^A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?=$|[^A-Za-z0-9])"
+    r"|(?:^|[^A-Za-z0-9])AIza[A-Za-z0-9_-]{20,}(?=$|[^A-Za-z0-9])"
+    r"|(?:^|[^A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}(?=$|[^A-Za-z0-9]))",
     re.IGNORECASE,
 )
 FALLBACK_WARNING = (

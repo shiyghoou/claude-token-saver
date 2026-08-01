@@ -407,14 +407,19 @@ row = {"type": "assistant", "timestamp": stamp,
            {"type": "tool_use", "name": "Agent", "input": {"subagent_type": ".."}},
            {"type": "tool_use", "name": "Agent",
             "input": {"subagent_type": "token=SECRET_AGENT_SENTINEL"}},
+           {"type": "tool_use", "name": "Agent",
+            "input": {"subagent_type": "AKIAIOSFODNN7EXAMPLE"}},
            {"type": "tool_use", "name": "mcp__server|PIPE_MCP_SENTINEL__call", "input": {}},
            {"type": "tool_use", "name": "mcp__<MCP_HTML_SENTINEL>__call", "input": {}},
+           {"type": "tool_use", "name": "mcp__AIzaSyA_example_key_1234567890__call", "input": {}},
            {"type": "tool_use", "name": "Read",
             "input": {"file_path": repo + "/safe|PIPE_PATH_SENTINEL.md"}},
            {"type": "tool_use", "name": "Read",
             "input": {"file_path": repo + "/safe[LINK_CELL_SENTINEL](target).md"}},
            {"type": "tool_use", "name": "Read",
             "input": {"file_path": repo + "/token=SECRET_PATH_SENTINEL.md"}},
+           {"type": "tool_use", "name": "Read",
+            "input": {"file_path": repo + "/glpat-exampletoken1234567890.md"}},
        ]}}
 results = [
     {"type": "user", "timestamp": stamp,
@@ -423,6 +428,15 @@ results = [
     {"type": "user", "timestamp": stamp,
      "toolUseResult": {"agentType": "safe-reviewer",
                        "resolvedModel": "sk-live-CREDENTIAL_MODEL_SENTINEL", "totalTokens": 1}},
+    {"type": "user", "timestamp": stamp,
+     "toolUseResult": {"agentType": "AKIAIOSFODNN7EXAMPLE",
+                       "resolvedModel": "safe-model", "totalTokens": 1}},
+    {"type": "user", "timestamp": stamp,
+     "toolUseResult": {"agentType": "safe-credential-agent",
+                       "resolvedModel": "AIzaSyA_example_key_1234567890", "totalTokens": 1}},
+    {"type": "user", "timestamp": stamp,
+     "toolUseResult": {"agentType": "glpat-exampletoken1234567890",
+                       "resolvedModel": "safe-model", "totalTokens": 1}},
 ]
 with open(path, "a", encoding="utf-8") as handle:
     for item in [row] + results:
@@ -439,7 +453,8 @@ PYEOF
   assert_not_contains "$report" '| .. |' "path-like metadata"
   for leaked in PIPE_MODEL_SENTINEL PATH_AGENT_SENTINEL SECRET_AGENT_SENTINEL \
     PIPE_MCP_SENTINEL SECRET_PATH_SENTINEL CONTROL_AGENT_SENTINEL PATH_MODEL_SENTINEL \
-    CREDENTIAL_MODEL_SENTINEL; do
+    CREDENTIAL_MODEL_SENTINEL AKIAIOSFODNN7EXAMPLE \
+    AIzaSyA_example_key_1234567890 glpat-exampletoken1234567890; do
     assert_not_contains "$report" "$leaked" "危険な表示値 $leaked"
   done
   assert_contains "$report" "plot-adversarial-reviewer" "安全なsubagent名"
