@@ -157,14 +157,15 @@ _stage_file() {
   CTS_STAGE_READ=""
 
   # 相対シンボリックリンクは pending から inflight へ移すと解決先が変わる。
-  # 本文候補だけは移動前に置き場内の実体を一時ファイルへ複製し、リンク自体は
-  # 通常どおりclaimしてcommitする。異常項目は本文を読まないので複製しない。
+  # 本文候補だけは移動前に置き場内の実体を一時ファイルへ上限分だけ複製し、
+  # リンク自体は通常どおりclaimしてcommitする。異常項目は本文を読まないので
+  # 複製しない。上限を超える実体全体をコピーしてディスクを枯らさないようにする。
   snapshot=""
   if [ "$read_body" -eq 1 ] && [ -L "$src" ]; then
     read_source="$(cts_resolve_path "$src")" || return 1
     cts_path_is_within "$read_source" "$handoff_real" || return 1
     snapshot="$inflight_dir/.read.$$.$(( ${#claim_stage[@]} + 1 ))"
-    if ! cat "$read_source" >"$snapshot" 2>/dev/null; then
+    if ! head -c "$((CTS_MAX_BYTES_PER_FILE + 1))" "$read_source" >"$snapshot" 2>/dev/null; then
       rm -f "$snapshot" 2>/dev/null || true
       return 1
     fi
@@ -176,7 +177,7 @@ _stage_file() {
   fi
   staged="$CTS_MOVED_DEST"
 
-  if ! cts_reserve_destination "$staged" "$consumed_dir"; then
+  if ! cts_reserve_destination "$staged" "$consumed_dir" 2>/dev/null; then
     # 宛先予約だけ失敗した場合は、可能な限り元のpendingへ戻す。
     if ! cts_move_file "$staged" "$pending_dir" 2>/dev/null; then
       claim_stage+=("$staged")
@@ -208,7 +209,8 @@ _stage_bad() {
   local src="$1" kind="$2"
   if _stage_file "$src" 0; then
     _record_bad "$src" "$kind" "$CTS_STAGE_FINAL"
-  else
+  elif [ -e "$src" ] || [ -L "$src" ]; then
+    # 競合相手が先に退けた異常項目について、存在しないパスを案内しない。
     _record_bad "$src" "$kind" "$src"
   fi
 }
@@ -450,7 +452,7 @@ while [ "$i" -lt "${#claim_stage[@]}" ]; do
   dest="${claim_dest[$i]}"
   lock="${claim_lock[$i]}"
   if [ -n "$stage" ]; then
-    if [ -z "$dest" ] || ! cts_commit_reserved_file "$stage" "$dest" "$lock"; then
+    if [ -z "$dest" ] || ! cts_commit_reserved_file "$stage" "$dest" "$lock" 2>/dev/null; then
       _abort
     fi
     read_source="${claim_read[$i]}"
