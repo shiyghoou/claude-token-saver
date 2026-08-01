@@ -223,9 +223,28 @@ test_同名宛先への並行移動でも既存と両方を保持する() {
 test_サブディレクトリは移動対象にしない() {
   _setup_project
   mkdir -p "$PROJ/.token-saver/handoff/pending/draft"
+  printf 'ネストした下書き\n' >"$PROJ/.token-saver/handoff/pending/draft/inner.md"
   _write_pending "a.md" "A"
   _run_consume
   assert_eq "0" "$CONSUME_STATUS" "終了コード"
   assert_file_exists "$PROJ/.token-saver/handoff/pending/draft"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/draft/inner.md"
+  assert_file_missing "$PROJ/.token-saver/handoff/consumed/inner.md"
   assert_file_exists "$PROJ/.token-saver/handoff/consumed/a.md"
+}
+
+test_生きたシンボリックリンクを一括消費する() {
+  _setup_project
+  local target="$TEST_TMP/real-note.md"
+  printf 'リンク先の本文\n' >"$target"
+  ln -s "$target" "$PROJ/.token-saver/handoff/pending/link.md"
+  _run_consume
+  assert_eq "0" "$CONSUME_STATUS" "終了コード"
+  assert_file_missing "$PROJ/.token-saver/handoff/pending/link.md"
+  if [ ! -L "$PROJ/.token-saver/handoff/consumed/link.md" ]; then
+    _fail "symlinkを実体化せずconsumedへ移す"
+  fi
+  assert_contains "$(cat "$PROJ/.token-saver/handoff/consumed/link.md")" \
+    "リンク先の本文" "consumedのsymlink"
+  assert_file_exists "$target" "リンク先の実体"
 }

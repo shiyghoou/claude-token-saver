@@ -204,6 +204,18 @@ test_旧パスの引き継ぎを新パスへ移す() {
   assert_file_missing "$TARGET/.claude/.handoff/consumed/b.md" "旧 consumed"
 }
 
+test_旧パスのdotfile引き継ぎを新パスへ移す() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.handoff/pending"
+  printf 'dotfileの本文\n' >"$TARGET/.claude/.handoff/pending/.draft.md.swp"
+  _run_install
+  assert_eq "dotfileの本文" \
+    "$(cat "$TARGET/.token-saver/handoff/pending/.draft.md.swp")" \
+    "dotfileの移行内容"
+  assert_file_missing "$TARGET/.claude/.handoff/pending/.draft.md.swp" \
+    "旧側のdotfile"
+}
+
 test_旧パスの台帳を新パスへ移す() {
   _setup_target
   mkdir -p "$TARGET/.claude/.token-saver"

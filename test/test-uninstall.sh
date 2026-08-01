@@ -210,6 +210,7 @@ test_壊れた_settings_は上書きせず失敗する() {
 test_残った_settings_は妥当な_JSON_である() {
   _setup_target
   _run_install
+  assert_file_exists "$SETTINGS" "install後のsettings.local.json"
   _run_uninstall
   # 中身が空なら uninstall が消すので、残っている場合だけ検査する。
   [ -f "$SETTINGS" ] || return 0
@@ -254,6 +255,8 @@ test_同じ接頭辞のユーザーのコメント行を誤認しない() {
   assert_contains "$gi" "# claude-token-saver は便利" ".gitignore"
   assert_contains "$gi" "dist/" ".gitignore"
   assert_contains "$gi" ".env" ".gitignore"
+  assert_not_contains "$gi" "$GITIGNORE_START" "管理ブロックのSTART"
+  assert_not_contains "$gi" "$GITIGNORE_END" "管理ブロックのEND"
 }
 
 test_ブロックと無関係な末尾の空行は消さない() {
