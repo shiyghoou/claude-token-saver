@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# token-report.sh launcher の契約 fixture。実リポジトリ配下へは書かず、
+# fixture 内の scripts/measure-token-usage.py wrapper と固定 date で振る舞いを検証する。
+
+set -u
+
+_fixture() {
+  FIXTURE_HOME="$TEST_TMP/home"
+  FIXTURE_REPO="$TEST_TMP/fixture repo"
+  FIXTURE_SCRIPTS="$FIXTURE_REPO/scripts"
+  FIXTURE_LIB="$FIXTURE_SCRIPTS/lib"
+  FIXTURE_BIN="$TEST_TMP/bin"
+  FIXTURE_LOG="$TEST_TMP/engine-args.log"
+  mkdir -p "$FIXTURE_HOME" "$FIXTURE_REPO/.git" "$FIXTURE_SCRIPTS" "$FIXTURE_LIB" "$FIXTURE_BIN"
+
+  cp "$REPO_ROOT/scripts/token-report.sh" "$FIXTURE_SCRIPTS/token-report.sh"
+  cp "$REPO_ROOT/scripts/lib/paths.sh" "$FIXTURE_LIB/paths.sh"
+  chmod +x "$FIXTURE_SCRIPTS/token-report.sh"
+
+  cat >"$FIXTURE_SCRIPTS/measure-token-usage.py" <<'PYEOF'
+#!/usr/bin/env python3
+import os
+import sys
+
+
+def parse_out(argv):
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--out":
+            if index + 1 < len(argv):
+                return argv[index + 1]
+            return None
+        if arg.startswith("--out="):
+            return arg.split("=", 1)[1]
+        index += 1
+    return None
+
+
+def main():
+    argv = sys.argv[1:]
+    log_path = os.environ.get("CTS_LAUNCHER_LOG")
+    if log_path:
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(argv))
+            handle.write("\n")
+
+    mode = os.environ.get("CTS_ENGINE_MODE", "report")
+    out_path = parse_out(argv)
+    if out_path and mode in ("report", "empty"):
+        try:
+            with open(out_path, "w", encoding="utf-8") as handle:
+                if mode == "report":
+                    handle.write("# Claude Code トークン計測レポート\n\n")
+                    handle.write("## 計測条件\n\n")
+                    handle.write("- fixture: launcher\n")
+                else:
+                    handle.write("")
+        except OSError as exc:
+            print(f"cannot write report: {exc}", file=sys.stderr)
+            return 1
+
+    exit_code = int(os.environ.get("CTS_ENGINE_EXIT", "0"))
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PYEOF
+  chmod +x "$FIXTURE_SCRIPTS/measure-token-usage.py"
+
+  cat >"$FIXTURE_BIN/date" <<'SHEOF'
+#!/bin/bash
+if [ "${1:-}" = "+%Y%m%d-%H%M%S" ]; then
+  printf '%s\n' "${CTS_FAKE_DATE:-20260801-123456}"
+  exit 0
+fi
+exec /bin/date "$@"
+SHEOF
+  chmod +x "$FIXTURE_BIN/date"
+}
+
+_run_launcher() {
+  (
+    cd "$FIXTURE_REPO" &&
+    PATH="$FIXTURE_BIN:/usr/bin:/bin" \
+      CTS_LAUNCHER_LOG="$FIXTURE_LOG" \
+      "$BASH" "$FIXTURE_SCRIPTS/token-report.sh" "$@"
+  )
+}
+
+_install_path_wrapper() {
+  tool="$1"
+  target="$(command -v "$tool")"
+  cat >"$FIXTURE_BIN/$tool" <<EOF
+#!/bin/bash
+exec "$target" "\$@"
+EOF
+  chmod +x "$FIXTURE_BIN/$tool"
+}
+
+_run_launcher_without_python() {
+  for tool in basename dirname mkdir mktemp rm sed; do
+    _install_path_wrapper "$tool"
+  done
+  (
+    cd "$FIXTURE_REPO" &&
+    PATH="$FIXTURE_BIN" \
+      CTS_LAUNCHER_LOG="$FIXTURE_LOG" \
+      "$BASH" "$FIXTURE_SCRIPTS/token-report.sh" "$@"
+  )
+}
+
+test_既定のtoken_reportsへ日時付きレポートを作る() {
+  _fixture
+  _run_launcher >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  out="$FIXTURE_REPO/.token-saver/token-reports/20260801-123456.md"
+  assert_eq "0" "$status" "既定出力の終了コード"
+  assert_file_exists "$out"
+  report="$(cat "$out")"
+  assert_contains "$report" "## 計測条件" "既定レポート"
+}
+
+test_同じ秒の既存レポートを上書きせず連番にする() {
+  _fixture
+  mkdir -p "$FIXTURE_REPO/.token-saver/token-reports"
+  ln -s "$TEST_TMP/missing-target" \
+    "$FIXTURE_REPO/.token-saver/token-reports/20260801-123456.md"
+  _run_launcher >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  out="$FIXTURE_REPO/.token-saver/token-reports/20260801-123456-2.md"
+  [ -L "$FIXTURE_REPO/.token-saver/token-reports/20260801-123456.md" ] ||
+    _fail "連番衝突の元になった dangling symlink が消えている"
+  assert_eq "0" "$status" "連番出力の終了コード"
+  assert_file_exists "$out"
+}
+
+test_explicit_outを使い親ディレクトリを勝手に作らない() {
+  _fixture
+  out="$TEST_TMP/missing/out/report.md"
+  _run_launcher --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  err="$(cat "$TEST_TMP/launcher.err")"
+  assert_eq "1" "$status" "explicit out の終了コード"
+  assert_file_missing "$out"
+  assert_file_missing "$TEST_TMP/missing/out"
+  assert_contains "$err" "cannot write report" "親未作成エラー"
+}
+
+test_daysとall_projectsとpathsをengineへ渡す() {
+  _fixture
+  _run_launcher --days 3 --all-projects --paths --top 7 >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  args="$(cat "$FIXTURE_LOG")"
+  assert_eq "0" "$status" "引数転送の終了コード"
+  assert_contains "$args" "--days
+3" "days 引数"
+  assert_contains "$args" "--all-projects" "all-projects 引数"
+  assert_contains "$args" "--paths" "paths 引数"
+  assert_contains "$args" "--top
+7" "top 引数"
+  assert_contains "$args" "--out
+$FIXTURE_REPO/.token-saver/token-reports/20260801-123456.md" "既定 out 引数"
+}
+
+test_計測器が非ゼロならlauncherも非ゼロにする() {
+  _fixture
+  CTS_ENGINE_MODE=touchless CTS_ENGINE_EXIT=17 \
+    _run_launcher >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  assert_eq "17" "$status" "計測器エラー伝播"
+}
+
+test_成功rcでも空レポートなら失敗にする() {
+  _fixture
+  CTS_ENGINE_MODE=empty _run_launcher >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  err="$(cat "$TEST_TMP/launcher.err")"
+  assert_ne "0" "$status" "空レポート拒否"
+  assert_contains "$err" "空" "空レポートの理由"
+}
+
+test_前回の既存レポートだけで成功扱いにしない() {
+  _fixture
+  out="$TEST_TMP/stale-report.md"
+  printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- stale\n' >"$out"
+  touch -t 200001010000 "$out"
+  CTS_ENGINE_MODE=touchless _run_launcher --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  err="$(cat "$TEST_TMP/launcher.err")"
+  assert_ne "0" "$status" "freshness 検査"
+  assert_contains "$err" "更新" "stale report の理由"
+}
+
+test_python3が無ければ理由を表示して失敗する() {
+  _fixture
+  _run_launcher_without_python >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  err="$(cat "$TEST_TMP/launcher.err")"
+  assert_ne "0" "$status" "python3 不在"
+  assert_contains "$err" "python3" "python3 文言"
+  assert_contains "$err" "見つかりません" "python3 不在理由"
+}
