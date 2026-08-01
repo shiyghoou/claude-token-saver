@@ -230,31 +230,90 @@ cts_project_dir() {
 cts_handoff_dir()  { printf '%s/%s' "$(cts_project_dir)" "$(cts_handoff_rel)"; }
 cts_state_dir()    { printf '%s/%s' "$(cts_project_dir)" "$(cts_base_rel)"; }
 
-# 直前の cts_consume_file が成功したときの移動先。標準出力を汚さずに
+# 直前の移動処理が成功したときの移動先。標準出力を汚さずに
 # 呼び出し側へ返すための変数である（フックの stdout は契約の一部）。
 CTS_CONSUMED_DEST=""
+CTS_MOVED_DEST=""
+CTS_RESERVED_DEST=""
+CTS_RESERVED_LOCK=""
 
-# pending のファイルを consumed へ移す。既存の同名ファイルは上書きしない。
-# 引き継ぎは作業の記録であり、失うと事故の調査ができなくなるため。
-# 成功したら 0 を返し CTS_CONSUMED_DEST に移動先を入れる。失敗したら 1。
+# 宛先を予約する。存在確認と mv の間に別プロセスが同じ .dupN を選ぶ
+# TOCTOU を避けるため、候補ごとに mkdir をロックとして使う。
+# 予約先は壊れたシンボリックリンクも「存在する」と扱う。
+cts_reserve_destination() {
+  local src="$1" dest_dir="$2"
+  local base dest lock n=0
+  CTS_RESERVED_DEST=""
+  CTS_RESERVED_LOCK=""
+  mkdir -p -- "$dest_dir" || return 1
+
+  base="$(basename -- "$src")" || return 1
+  while [ "$n" -lt 10000 ]; do
+    if [ "$n" -eq 0 ]; then
+      dest="$dest_dir/$base"
+    else
+      dest="$dest_dir/${base}.dup${n}"
+    fi
+    lock="$dest.cts-lock"
+
+    if mkdir "$lock" 2>/dev/null; then
+      if [ -e "$dest" ] || [ -L "$dest" ]; then
+        rmdir "$lock" 2>/dev/null || true
+        n=$((n + 1))
+        continue
+      fi
+      CTS_RESERVED_DEST="$dest"
+      CTS_RESERVED_LOCK="$lock"
+      return 0
+    fi
+    n=$((n + 1))
+  done
+  return 1
+}
+
+cts_release_destination() {
+  local lock="${1:-${CTS_RESERVED_LOCK:-}}"
+  [ -n "$lock" ] || return 0
+  rmdir "$lock" 2>/dev/null || true
+  return 0
+}
+
+# 予約済みの宛先へ移す。成功後はロックを解放する。
+cts_commit_reserved_file() {
+  local src="$1" dest="$2" lock="$3"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    cts_release_destination "$lock"
+    return 1
+  fi
+  if ! mv -- "$src" "$dest"; then
+    cts_release_destination "$lock"
+    return 1
+  fi
+  cts_release_destination "$lock"
+  return 0
+}
+
+# src を dest_dir へ移す。既存の同名ファイルは上書きしない。
+# 成功したら CTS_MOVED_DEST に移動先を入れる。失敗したら 1。
+cts_move_file() {
+  local src="$1" dest_dir="$2"
+  CTS_MOVED_DEST=""
+  cts_reserve_destination "$src" "$dest_dir" || return 1
+  if ! mv -- "$src" "$CTS_RESERVED_DEST"; then
+    cts_release_destination "$CTS_RESERVED_LOCK"
+    return 1
+  fi
+  CTS_MOVED_DEST="$CTS_RESERVED_DEST"
+  cts_release_destination "$CTS_RESERVED_LOCK"
+  return 0
+}
+
+# pending のファイルを consumed へ移す。呼び出し側が利用してきた
+# CTS_CONSUMED_DEST と戻り値は維持し、内部だけ競合安全な移動へ委譲する。
 cts_consume_file() {
   local src="$1" consumed_dir="$2"
   CTS_CONSUMED_DEST=""
-  mkdir -p -- "$consumed_dir" || return 1
-
-  local base dest
-  base="$(basename -- "$src")"
-  dest="$consumed_dir/$base"
-
-  local n=1
-  while [ -e "$dest" ]; do
-    dest="$consumed_dir/${base}.dup${n}"
-    n=$((n + 1))
-  done
-
-  # mv は同一ファイルシステム上で原子的である。並行セッションが同じ
-  # pending を掴んだ場合、勝った側だけが成功し、負けた側はここで失敗する。
-  mv -- "$src" "$dest" || return 1
-  CTS_CONSUMED_DEST="$dest"
+  cts_move_file "$src" "$consumed_dir" || return 1
+  CTS_CONSUMED_DEST="$CTS_MOVED_DEST"
   return 0
 }

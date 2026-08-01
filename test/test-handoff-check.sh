@@ -180,13 +180,14 @@ test_発火源が_clear_のときは発火する() {
   assert_contains "$out" "clear でも読む" "フック出力"
 }
 
-test_発火源が_resume_のときは発火する() {
+test_発火源が_resume_のときは発火しない() {
   _setup_project
-  _write_pending "a.md" "resume でも読む"
+  _write_pending "a.md" "resume では読まない"
   local out
   _run_hook "$(printf '{"source":"resume","cwd":"%s"}' "$PROJ")"
   out="$HOOK_OUT"
-  assert_contains "$out" "resume でも読む" "フック出力"
+  assert_empty "$out"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
 test_未知の発火源では発火しない() {
@@ -817,6 +818,23 @@ test_生きたリンクではリンク切れと言わない() {
   assert_not_contains "$HOOK_OUT" "リンク切れ" "フック出力"
 }
 
+test_移動後に無効になる相対リンクでも実体のpathを示す() {
+  _setup_project
+  local target="$PROJ/.token-saver/handoff/pending/2026-07-31-1900-target.md"
+  printf '上限超過後も残るリンク先の本文\n' >"$target"
+  ln -s "./2026-07-31-1900-target.md" \
+    "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-link.md"
+  _write_pending "2026-07-31-1841-a.md" "埋め草1"
+  _write_pending "2026-07-31-1842-b.md" "埋め草2"
+  _write_pending "2026-07-31-1843-c.md" "埋め草3"
+  _write_pending "2026-07-31-1844-d.md" "埋め草4"
+  _write_pending "2026-07-31-1845-e.md" "埋め草5"
+  _run_hook "$(_startup_payload)"
+  assert_contains "$HOOK_OUT" "上限超過後も残るリンク先の本文" "フック出力"
+  assert_contains "$HOOK_OUT" "$target" "移動後も有効なpath"
+  assert_file_exists "$target"
+}
+
 # pending には誰でもファイルを置ける。解決先を確かめずにたどると、
 # ~/.aws/credentials を指すリンク1本でモデルのコンテキストへ秘密が入る。
 # mv が動かすのはリンク自体なので元ファイルは残り、痕跡なく繰り返せる。
@@ -967,6 +985,10 @@ test_SKILL_md_の上限の記述が実装と一致する() {
   assert_contains "$body" "$((per / 1024)) KB" "SKILL.md"
   assert_contains "$body" "$((total / 1024)) KB" "SKILL.md"
   assert_contains "$body" "${files} 件" "SKILL.md"
+  assert_contains "$body" '`startup` / `clear`' "SKILL.md の発火源"
+  assert_not_contains "$body" '`startup` / `clear` / `resume`' "SKILL.md の発火源"
+  assert_contains "$body" 'pending/.inflight.<pid>/' "SKILL.md の復元説明"
+  assert_contains "$body" '標準出力が閉じた場合' "SKILL.md の復元説明"
 }
 
 # ---- bash 3.2（macOS 標準の /bin/bash）で落ちないこと ---------------------
@@ -1149,6 +1171,107 @@ test_切り詰める本文に_NUL_があっても標準エラーを汚さない(
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_empty "$(cat "$TEST_TMP/.hook-err")" "標準エラー"
   assert_contains "$HOOK_OUT" "切り詰めた" "フック出力"
+}
+
+# ---- 波2: 実行時境界 ------------------------------------------------------
+
+test_ハードリンクは本文を注入せず異常として退避する() {
+  _setup_project
+  printf 'ハードリンク経由の秘密\n' >"$TEST_TMP/secret.md"
+  ln "$TEST_TMP/secret.md" "$PROJ/.token-saver/handoff/pending/2026-07-31-1850-hard.md"
+  _write_pending "2026-07-31-1851-good.md" "通常の引き継ぎ"
+  _run_hook "$(_startup_payload)"
+  assert_not_contains "$HOOK_OUT" "ハードリンク経由の秘密" "フック出力"
+  assert_contains "$HOOK_OUT" "ハードリンク" "フック出力"
+  assert_contains "$HOOK_OUT" "通常の引き継ぎ" "フック出力"
+  assert_file_exists "$TEST_TMP/secret.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/2026-07-31-1850-hard.md"
+}
+
+test_ディレクトリシンボリックリンクとFIFOは本文を注入せず退避する() {
+  _setup_project
+  mkdir -p "$TEST_TMP/linked-dir"
+  ln -s "$TEST_TMP/linked-dir" \
+    "$PROJ/.token-saver/handoff/pending/2026-07-31-1850-dir.md"
+  mkfifo "$PROJ/.token-saver/handoff/pending/2026-07-31-1851-fifo.md"
+  _write_pending "2026-07-31-1852-good.md" "特殊エントリの後の本文"
+  _run_hook "$(_startup_payload)"
+  assert_not_contains "$HOOK_OUT" "linked-dir" "フック出力"
+  assert_contains "$HOOK_OUT" "通常ファイルでもリンクでもない" "フック出力"
+  assert_contains "$HOOK_OUT" "特殊エントリの後の本文" "フック出力"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/2026-07-31-1850-dir.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/2026-07-31-1851-fifo.md"
+}
+
+test_異常項目の報告は10件に制限し超過件数だけを示す() {
+  _setup_project
+  local i name size
+  for i in 1 2 3 4 5 6 7 8 9 10 11; do
+    name="2026-07-31-1850-broken-${i}.md"
+    ln -s "$TEST_TMP/no-such-${i}.md" "$PROJ/.token-saver/handoff/pending/$name"
+  done
+  _run_hook "$(_startup_payload)"
+  assert_count 10 "$HOOK_OUT" "リンク切れ" "リンク切れの報告件数"
+  assert_contains "$HOOK_OUT" "異常な引き継ぎを他に 1 件省略した" "フック出力"
+  size="$(wc -c <"$TEST_TMP/.hook-out" | tr -d ' ')"
+  [ "$size" -le 20000 ] || _fail "異常項目の出力が大きすぎる: ${size} バイト"
+}
+
+test_消費失敗が5件続いても後続の本文を繰り上げる() {
+  _setup_project
+  local i shadow real_mv
+  for i in 1 2 3 4 5; do
+    _write_pending "2026-07-31-000${i}-fail.md" "失敗する本文 ${i}"
+  done
+  _write_pending "2026-07-31-0006-good.md" "繰り上げられた本文"
+
+  shadow="$TEST_TMP/mv-shadow"
+  real_mv="$(command -v mv)"
+  mkdir -p "$shadow"
+  printf '#!/bin/sh\ncase "$*" in\n  *000[1-5]-fail.md*) exit 1 ;;\nesac\nexec %s "$@"\n' \
+    "$real_mv" >"$shadow/mv"
+  chmod +x "$shadow/mv"
+
+  PATH="$shadow:$PATH" _run_hook "$(_startup_payload)"
+  assert_contains "$HOOK_OUT" "繰り上げられた本文" "フック出力"
+  assert_not_contains "$HOOK_OUT" "失敗する本文" "フック出力"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/2026-07-31-0001-fail.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/2026-07-31-0006-good.md"
+}
+
+test_合計上限を超える候補は消費せず4件で止める() {
+  _setup_project
+  local i f
+  for i in 1 2 3 4; do
+    f="$PROJ/.token-saver/handoff/pending/2026-07-31-001${i}-8191.md"
+    dd if=/dev/zero of="$f" bs=8191 count=1 2>/dev/null
+  done
+  f="$PROJ/.token-saver/handoff/pending/2026-07-31-0015-8192.md"
+  dd if=/dev/zero of="$f" bs=8192 count=1 2>/dev/null
+  _run_hook "$(_startup_payload)"
+  for i in 1 2 3 4; do
+    assert_file_exists "$PROJ/.token-saver/handoff/consumed/2026-07-31-001${i}-8191.md"
+  done
+  assert_file_exists "$f"
+  assert_file_missing "$PROJ/.token-saver/handoff/consumed/2026-07-31-0015-8192.md"
+  assert_contains "$HOOK_OUT" "1 件を次回へ持ち越した" "フック出力"
+}
+
+test_stdoutが閉じたらclaim済み本文をpendingへ戻す() {
+  _setup_project
+  _write_pending "2026-07-31-1850-closed.md" "stdout切断後も残る本文"
+  local inflight
+  printf '%s' "$(_startup_payload)" |
+    bash "$HOOK" 2>"$TEST_TMP/.hook-err" |
+    head -n 0 >"$TEST_TMP/.head-out" || true
+  assert_empty "$(cat "$TEST_TMP/.hook-err")" "標準エラー"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/2026-07-31-1850-closed.md"
+  assert_file_missing "$PROJ/.token-saver/handoff/consumed/2026-07-31-1850-closed.md"
+  inflight="$(find "$PROJ/.token-saver/handoff/pending" -maxdepth 1 -name '.inflight.*' -print)"
+  assert_empty "$inflight" "inflightの残存"
+
+  _run_hook "$(_startup_payload)"
+  assert_contains "$HOOK_OUT" "stdout切断後も残る本文" "再実行後のフック出力"
 }
 
 # コマンド置換は末尾の改行を落とす。改行だけのファイルは body が空になるが、
