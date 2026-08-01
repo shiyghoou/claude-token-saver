@@ -29,7 +29,25 @@ jobs:
           git config --global user.name "ci"
           git config --global init.defaultBranch main
 
+      - name: シェルスクリプトの構文を検査する
+        run: |
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(git ls-files -z -- '*.sh')
+
+      - name: ShellCheckを導入する
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          shellcheck --version
+
+      - name: ShellCheckを実行する
+        run: |
+          git ls-files -z -- '*.sh' | xargs -0 shellcheck --shell=bash
+
       - name: テストを実行する
+        env:
+          CTS_NO_SKIP: "1"
         run: bash test/run.sh
 
   # macOS の /bin/bash は 3.2 である。bash 4.4 未満では set -u 下の素の配列展開が
