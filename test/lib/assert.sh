@@ -30,6 +30,9 @@ assert_empty() {
 
 assert_contains() {
   local haystack="$1" needle="$2" label="${3:-出力}"
+  if [ -z "$needle" ]; then
+    _fail "${label}の needle が空である（呼び出し側の変数が空の可能性）"
+  fi
   case "$haystack" in
     *"$needle"*) ;;
     *) _fail "${label}に [${needle}] が含まれない: [${haystack}]" ;;
@@ -38,6 +41,9 @@ assert_contains() {
 
 assert_not_contains() {
   local haystack="$1" needle="$2" label="${3:-出力}"
+  if [ -z "$needle" ]; then
+    _fail "${label}の needle が空である（呼び出し側の変数が空の可能性）"
+  fi
   case "$haystack" in
     *"$needle"*) _fail "${label}に [${needle}] が含まれてはいけない: [${haystack}]" ;;
   esac
