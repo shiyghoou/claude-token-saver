@@ -160,9 +160,10 @@ _put_test_file() {
     >"$RUNNER_DIR/test-$1.sh"
 }
 
-# 親側の CTS_MIN_TESTS が漏れると下限の検査結果が変わるため、必ず外して呼ぶ。
+# 親側の CTS_MIN_TESTS / CTS_NO_SKIP が漏れると、自己テストが検証する既定動作の
+# 結果が変わるため、必ず外して呼ぶ。スキップ禁止の動作は専用テストで明示する。
 _run_runner() {
-  RUNNER_OUT="$(env -u CTS_MIN_TESTS bash "$RUNNER_DIR/run.sh" "$@" 2>&1)"
+  RUNNER_OUT="$(env -u CTS_MIN_TESTS -u CTS_NO_SKIP bash "$RUNNER_DIR/run.sh" "$@" 2>&1)"
   RUNNER_STATUS=$?
 }
 

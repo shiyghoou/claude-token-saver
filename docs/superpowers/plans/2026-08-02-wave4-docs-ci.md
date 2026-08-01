@@ -23,6 +23,7 @@
 
 **Files:**
 - Modify: `.github/workflows/test.yml:17-40`
+- Modify: `test/test-runner-selftest.sh:163-167`
 - Test: Git管理下の全 `*.sh`、既存の `test/run.sh`
 
 **Interfaces:**
@@ -99,7 +100,22 @@ ShellCheckの警告を根拠なく除外せず、既存コードの実際の指�
 
 これにより、依存環境不足によるスキップをCIの成功へ含めない。bash 3.2の独立ジョブとDockerの明示的失敗条件は変更しない。
 
-- [ ] **Step 6: CI変更のYAML差分を確認してコミットする**
+- [ ] **Step 6: 自己テスト用の子ランナーからCI専用設定を分離する**
+
+`test/test-runner-selftest.sh` の `_run_runner` は、親プロセスから継承した `CTS_MIN_TESTS` と `CTS_NO_SKIP` を解除してから、ランナーを起動する。
+
+```bash
+# 親側の CTS_MIN_TESTS / CTS_NO_SKIP が漏れると、自己テストが検証する既定動作の
+# 結果が変わるため、必ず外して呼ぶ。スキップ禁止の動作は専用テストで明示する。
+_run_runner() {
+  RUNNER_OUT="$(env -u CTS_MIN_TESTS -u CTS_NO_SKIP bash "$RUNNER_DIR/run.sh" "$@" 2>&1)"
+  RUNNER_STATUS=$?
+}
+```
+
+`test_CTS_NO_SKIP_ならスキップを失敗として計上する` は、従来どおり `CTS_NO_SKIP=1` を明示してCI専用挙動を検証する。
+
+- [ ] **Step 7: CI変更と自己テスト分離の差分を確認してコミットする**
 
 Run:
 
