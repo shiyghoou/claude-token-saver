@@ -968,6 +968,10 @@ test_SKILL_md_の上限の記述が実装と一致する() {
   assert_contains "$body" "$((per / 1024)) KB" "SKILL.md"
   assert_contains "$body" "$((total / 1024)) KB" "SKILL.md"
   assert_contains "$body" "${files} 件" "SKILL.md"
+  assert_contains "$body" '`startup` / `clear`' "SKILL.md の発火源"
+  assert_not_contains "$body" '`startup` / `clear` / `resume`' "SKILL.md の発火源"
+  assert_contains "$body" 'pending/.inflight.<pid>/' "SKILL.md の復元説明"
+  assert_contains "$body" '標準出力が閉じた場合' "SKILL.md の復元説明"
 }
 
 # ---- bash 3.2（macOS 標準の /bin/bash）で落ちないこと ---------------------
