@@ -42,6 +42,11 @@ pending_dir="$(cts_handoff_dir)/pending"
 # サブディレクトリは対象にしない。下書きを置く場所として使えるようにするため。
 # 名前に改行を含むファイルで壊れないよう NUL 区切りで受け渡す。
 # -L はシンボリックリンクをたどる（handoff-check.sh と揃える）。
+rc=0
 while IFS= read -r -d '' f; do
-  cts_consume_file "$f" "$consumed_dir" || exit 1
+  if ! cts_consume_file "$f" "$consumed_dir"; then
+    printf '消費できなかった: %s\n' "$f" >&2
+    rc=1
+  fi
 done < <(find -L "$pending_dir" -maxdepth 1 -type f -print0 2>/dev/null | LC_ALL=C sort -z)
+exit "$rc"
