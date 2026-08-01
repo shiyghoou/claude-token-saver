@@ -523,8 +523,10 @@ test_gitignore_に変化が無ければ書き込まない() {
   touch -t 202001010000 "$TARGET/.gitignore"
   local before after
   _require_mtime "$TARGET/.gitignore"
+  # runner-allow: 取得可能性を先に確認した上で、mtime値を比較するために捕捉する。
   before="$(_mtime "$TARGET/.gitignore")"
   _run_install
+  # runner-allow: 取得可能性を先に確認した上で、mtime値を比較するために捕捉する。
   after="$(_mtime "$TARGET/.gitignore")"
   assert_eq "$before" "$after" ".gitignore の mtime"
 }
@@ -602,8 +604,10 @@ test_settings_に変化が無ければ書き込まない() {
   touch -t 202001010000 "$SETTINGS"
   local before after
   _require_mtime "$SETTINGS"
+  # runner-allow: 取得可能性を先に確認した上で、mtime値を比較するために捕捉する。
   before="$(_mtime "$SETTINGS")"
   _run_install
+  # runner-allow: 取得可能性を先に確認した上で、mtime値を比較するために捕捉する。
   after="$(_mtime "$SETTINGS")"
   assert_eq "$before" "$after" "settings.local.json の mtime"
 }

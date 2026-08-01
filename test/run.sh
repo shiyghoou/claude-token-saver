@@ -154,13 +154,14 @@ _check_assert_layer
 #     なって、パスがまるごと間違っていても両者が一致して緑になる。
 #   - docs/ と README.md は対象外。散文であり、パスへ触れること自体が目的の
 #     文書を検査対象にする理由が無い。
+#   - .github/** は実装ワークフローを含むため対象に含める。
 #   - skills/** は対象外。Markdown にはコメント構文が無く、新パスに許している
 #     「行頭コメントは免除する」という緩和が効かない。素朴に対象へ含めると
 #     散文の中でパスへ言及すること自体が書けなくなる。その代わりに
 #     test/test-paths.sh の一致性テスト（SKILL.md が cts_handoff_rel() に
 #     追随しているかを確かめるテスト）で守る。
 _check_path_literals() {
-  local targets=() legacy_hits new_hits paths_sh sh_file
+  local targets=() scan_files=() legacy_hits new_hits paths_sh sh_file scan_file target
   # ルート直下は2ファイルの決め打ちではなく *.sh を丸ごと対象にする。
   # install.sh / uninstall.sh の2つを名指しすると、明日 migrate.sh や
   # doctor.sh がルートへ増えたときにゲートの対象へ入らず、無警告の穴になる。
@@ -169,6 +170,7 @@ _check_path_literals() {
   done
   [ -d "$REPO_ROOT/scripts" ] && targets+=("$REPO_ROOT/scripts")
   [ -d "$REPO_ROOT/lib" ] && targets+=("$REPO_ROOT/lib")
+  [ -d "$REPO_ROOT/.github" ] && targets+=("$REPO_ROOT/.github")
 
   if [ "${#targets[@]}" -eq 0 ]; then
     printf 'エラー: パス検査の対象が1つも無い: %s\n' "$REPO_ROOT" >&2
@@ -195,11 +197,66 @@ _check_path_literals() {
 
   # 旧パスとして既に報告した行を新パスの走査から除く。".claude/.token-saver"
   # は ".token-saver" も部分一致するため、除かないと同じ行が二重に出る。
-  new_hits="$(grep -rnHE '\.token-saver' "${targets[@]}" 2>/dev/null \
-    | awk -F: -v skip="$paths_sh" '$1 != skip { print }' \
-    | grep -vE '\.claude/\.handoff|\.claude/\.token-saver' \
-    | awk '{ line = $0; sub(/^[^:]*:[0-9]+:/, "", line); if (line !~ /^[[:space:]]*#/) print }' \
-    || true)"
+  # 新パス側は grep の一致行だけを渡すと、heredocの開始・終端を追跡できない。
+  # 先に対象ディレクトリを通常ファイルへ展開し、AWKで全行を読む。
+  for target in "${targets[@]}"; do
+    while IFS= read -r -d '' scan_file; do
+      scan_files+=("$scan_file")
+    done < <(find "$target" -type f -print0 2>/dev/null)
+  done
+
+  new_hits=""
+  if [ "${#scan_files[@]}" -ne 0 ]; then
+    new_hits="$(awk -v skip="$paths_sh" '
+      # 戻り値はdelimiter、heredoc_dashは<<-のときだけ1にする。
+      function heredoc_start(line,   p, rest, first) {
+        heredoc_dash = 0
+        p = index(line, "<<")
+        if (p == 0) return ""
+        rest = substr(line, p + 2)
+        if (substr(rest, 1, 1) == "<") return ""
+        if (substr(rest, 1, 1) == "-") {
+          heredoc_dash = 1
+          rest = substr(rest, 2)
+        }
+        sub(/^[[:space:]]+/, "", rest)
+        if (rest == "") return ""
+        first = substr(rest, 1, 1)
+        if (first == "\047" || first == "\042") rest = substr(rest, 2)
+        sub(/[^A-Za-z0-9_].*$/, "", rest)
+        return rest
+      }
+      FILENAME == skip { next }
+      {
+        file = FILENAME
+        line = $0
+        if (heredoc[file] != "") {
+          candidate = line
+          if (heredoc_dash_by_file[file]) sub(/^\t+/, "", candidate)
+          if (candidate == heredoc[file]) {
+            delete heredoc[file]
+            delete heredoc_dash_by_file[file]
+            next
+          }
+          if (line ~ /\.token-saver/ &&
+              line !~ /\.claude\/\.handoff|\.claude\/\.token-saver/)
+            print FILENAME ":" FNR ":" line
+          next
+        }
+
+        if (line ~ /\.token-saver/ &&
+            line !~ /\.claude\/\.handoff|\.claude\/\.token-saver/ &&
+            line !~ /^[[:space:]]*#/)
+          print FILENAME ":" FNR ":" line
+
+        delimiter = heredoc_start(line)
+        if (delimiter != "") {
+          heredoc[file] = delimiter
+          heredoc_dash_by_file[file] = heredoc_dash
+        }
+      }
+    ' "${scan_files[@]}" || true)"
+  fi
 
   if [ -n "$legacy_hits" ] || [ -n "$new_hits" ]; then
     printf 'エラー: 実装コードにパスのリテラルが残っている\n' >&2
@@ -337,6 +394,7 @@ TIMEOUT_BIN="$(command -v timeout || true)"
 
 pass_count=0
 fail_count=0
+skip_count=0
 run_count=0
 failed_names=()
 
@@ -401,7 +459,55 @@ _is_typo_of_test() {
 # 数え違えると、本文が途中で切れて「検証を含まない」と誤検出する。
 _tests_without_assertion() {
   awk '
-    function verdict() { if (body !~ /assert_|_fail/) print name }
+    # 本文の判定用コードを作る。コメントはアサーション名を隠すために使えるが、
+    # 引用符内の # は文字列の一部なので削らない。シェル構文全体を解釈するもの
+    # ではなく、テスト本文の保守的な検出器として、行をまたぐ引用符だけを追う。
+    function strip_comment(line,   i,c,escaped,out) {
+      out = ""
+      escaped = 0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (escaped) {
+          out = out c
+          escaped = 0
+          continue
+        }
+        if (c == "\\" && !single_quote) {
+          out = out c
+          escaped = 1
+          continue
+        }
+        if (c == "\047" && !double_quote) {
+          single_quote = !single_quote
+          out = out c
+          continue
+        }
+        if (c == "\042" && !single_quote) {
+          double_quote = !double_quote
+          out = out c
+          continue
+        }
+        if (c == "#" && !single_quote && !double_quote &&
+            (i == 1 || substr(line, i - 1, 1) ~ /[[:space:]]/)) break
+        out = out c
+      }
+      return out
+    }
+    function append_code(line,   cleaned) {
+      if (line ~ /^[[:space:]]*#/) return
+      cleaned = strip_comment(line)
+      scan_body = scan_body "\n" cleaned
+    }
+    function verdict() {
+      # 固定値だけのアサーションは、呼び出し側の値が消えても緑になる。
+      # 少なくとも1つのアサーションがシェル展開を伴うことを要求し、
+      # 意図的な固定値検査だけ runner-allow で明示させる。
+      if (allowed || scan_body ~ /_fail/)
+        return
+      if (scan_body !~ /assert_[A-Za-z0-9_]*/ ||
+          scan_body !~ /assert_[A-Za-z0-9_]*[[:space:]]+[^;\n]*\$/)
+        print name
+    }
     # ヒアドキュメントの開始タグを拾う。<<< はヒアストリングなので対象外。
     function scan_heredoc(line,   p, tok) {
       p = index(line, "<<")
@@ -425,13 +531,24 @@ _tests_without_assertion() {
       sub(/[[:space:]]*\(\).*/, "", name)
       sub(/^function[[:space:]]+/, "", name)
       body = $0
+      scan_body = ""
+      allowed = ($0 ~ /runner-allow/)
+      single_quote = 0
+      double_quote = 0
       inbody = 1
+      append_code($0)
       if (index($0, "}") > 0) { verdict(); inbody = 0; next }
       scan_heredoc($0)
       next
     }
     inbody && /^\}/ { verdict(); inbody = 0; next }
-    inbody { body = body "\n" $0; scan_heredoc($0); next }
+    inbody {
+      body = body "\n" $0
+      if ($0 ~ /runner-allow/) allowed = 1
+      append_code($0)
+      scan_heredoc($0)
+      next
+    }
     END { if (inbody) verdict() }
   ' "$1"
 }
@@ -442,17 +559,70 @@ _tests_without_assertion() {
 # 意図してそう書く箇所（終了コード自体を検証するヘルパー）は、その行か直前の行に
 # runner-allow と書いて除外する。行が継続行で終わって末尾コメントを置けない場合が
 # あるため、直前の行でも認める。
+_assertion_helper_names() {
+  awk '
+    function verdict() {
+      if (name !~ /^test_/ && body ~ /assert_|_fail/) print name
+    }
+    /^(function[[:space:]]+)?[^[:space:]()=]+[[:space:]]*\(\)/ && !inbody {
+      name = $0
+      sub(/[[:space:]]*\(\).*/, "", name)
+      sub(/^function[[:space:]]+/, "", name)
+      body = $0
+      inbody = 1
+      if (index($0, "}") > 0) { verdict(); inbody = 0; next }
+      next
+    }
+    inbody && /^\}/ { verdict(); inbody = 0; next }
+    inbody { body = body "\n" $0; next }
+  ' "$1" | LC_ALL=C sort -u
+}
+
 _smothered_assertions() {
-  local file="$1" ln rest prev
-  grep -nE '\$\([[:space:]]*assert_|\([[:space:]]*(set[[:space:]]+-e;[[:space:]]*)?\.?[^)]*;[[:space:]]*assert_' "$file" \
-    | while IFS=: read -r ln rest; do
-        prev=$((ln - 1))
-        [ "$prev" -lt 1 ] && prev=1
-        if sed -n "${prev}p;${ln}p" "$file" | grep -q 'runner-allow'; then
-          continue
+  local file="$1" ln rest prev helper hit suffix
+  local -a helper_names=()
+  mapfile -t helper_names < <(_assertion_helper_names "$file")
+
+  _smothered_is_allowed() {
+    local line_no="$1" previous
+    previous=$((line_no - 1))
+    [ "$previous" -lt 1 ] && previous=1
+    sed -n "${previous}p;${line_no}p" "$file" | grep -q 'runner-allow'
+  }
+
+  # 直接呼び出しは既存の検出を維持する。
+  while IFS=: read -r ln rest; do
+    [ -n "$ln" ] || continue
+    if _smothered_is_allowed "$ln"; then
+      continue
+    fi
+    printf '%s:%s\n' "$ln" "$rest"
+  done < <(
+    grep -nE '\$\([[:space:]]*assert_|\([[:space:]]*(set[[:space:]]+-e;[[:space:]]*)?\.?[^)]*;[[:space:]]*assert_' "$file" || true
+  )
+
+  # 補助関数経由でも、危険な構文の同じ行に名前が現れたら報告する。
+  for helper in "${helper_names[@]}"; do
+    while IFS=: read -r ln rest; do
+      [ -n "$ln" ] || continue
+      hit=0
+      case "$rest" in
+        *'$('*"$helper"*')'*) hit=1 ;;
+        *'('*"$helper"*')'*) hit=1 ;;
+      esac
+      if [ "$hit" -eq 0 ]; then
+        suffix="${rest#*"$helper"}"
+        if printf '%s\n' "$suffix" | grep -qE '(^|[^|])\|([^|]|$)'; then
+          hit=1
         fi
-        printf '%s:%s\n' "$ln" "$rest"
-      done
+      fi
+      [ "$hit" -eq 1 ] || continue
+      if _smothered_is_allowed "$ln"; then
+        continue
+      fi
+      printf '%s:%s\n' "$ln" "$rest"
+    done < <(grep -nF -- "$helper" "$file" || true)
+  done
 }
 
 declare -A file_run_count=()
@@ -565,7 +735,8 @@ for test_file in "${test_files[@]}"; do
 
   for fn in "${fns[@]}"; do
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/cts-test.XXXXXX")"
-    out_file="$tmp/.stderr"
+    out_file="$tmp/.output"
+    err_file="$tmp/.stderr"
 
     # 1本あたりの上限時間を掛ける。テストは背景ジョブと wait を使うため、
     # wait が返らないとスイート全体が無言で止まり、CI ではジョブの制限時間まで
@@ -579,7 +750,7 @@ for test_file in "${test_files[@]}"; do
         # shellcheck disable=SC1090
         . "$1"
         "$2"
-      ' _ "$test_file" "$fn" 2>"$out_file"
+      ' _ "$test_file" "$fn" >"$out_file" 2>"$err_file"
       status=$?
     else
       (
@@ -591,23 +762,42 @@ for test_file in "${test_files[@]}"; do
         # shellcheck disable=SC1090
         . "$test_file"
         "$fn"
-      ) 2>"$out_file"
+      ) >"$out_file" 2>"$err_file"
       status=$?
     fi
     run_count=$((run_count + 1))
     file_run_count["$base"]=$((file_run_count["$base"] + 1))
 
-    if [ "$status" -eq 0 ]; then
+    skipped=0
+    if grep -qE '^[[:space:]]*skip:' "$out_file" 2>/dev/null; then
+      skipped=1
+      skip_count=$((skip_count + 1))
+      cat "$out_file"
+    elif [ -s "$out_file" ]; then
+      # 既存の標準出力を隠さない。skipでない通常の出力は従来どおり流す。
+      cat "$out_file"
+    fi
+
+    if [ "$status" -eq 0 ] && [ "$skipped" -eq 1 ]; then
+      if [ "${CTS_NO_SKIP:-}" = "1" ]; then
+        printf '  FAIL %s (スキップ禁止)\n' "$fn"
+        [ -s "$err_file" ] && cat "$err_file"
+        fail_count=$((fail_count + 1))
+        failed_names+=("$base::$fn(スキップ)")
+      else
+        printf '  skip %s\n' "$fn"
+      fi
+    elif [ "$status" -eq 0 ]; then
       printf '  ok   %s\n' "$fn"
       pass_count=$((pass_count + 1))
     elif [ "$status" -eq 124 ] && [ -n "$TIMEOUT_BIN" ]; then
       printf '  FAIL %s (制限時間 %s 秒を超えた)\n' "$fn" "$TEST_TIMEOUT"
-      [ -s "$out_file" ] && cat "$out_file"
+      [ -s "$err_file" ] && cat "$err_file"
       fail_count=$((fail_count + 1))
       failed_names+=("$base::$fn(時間切れ)")
     else
       printf '  FAIL %s\n' "$fn"
-      [ -s "$out_file" ] && cat "$out_file"
+      [ -s "$err_file" ] && cat "$err_file"
       fail_count=$((fail_count + 1))
       failed_names+=("$base::$fn")
     fi
@@ -648,12 +838,15 @@ fi
 # 台帳の書式は1行につき「整数」＝総件数、「ファイル名 整数」＝そのファイルの件数。
 # 総件数だけでは、実テストを空のテストや別ファイルで置き換えた詐称を見抜けないため、
 # ファイル別の件数も持つ。
+# 全件実行時には実在する test-*.sh も台帳へ載っている必要がある。台帳への追加を
+# 忘れても、新しいファイルが偶然実行されているだけで緑になる状態を許さない。
 #
 # 台帳が無いことを「無検査」で通してはならない。台帳ひとつの消失で、件数が減った
 # ことを知る唯一の手段が無言で失われる（実測: 台帳を消すと 39 件の消滅が無警告で
 # 緑になった）。無検査にしたいときは CTS_MIN_TESTS=0 を明示させる。
 ledger="$TEST_DIR/expected-min-count"
 min_tests=""
+max_skips=0
 declare -A file_min=()
 skip_count_check=0
 
@@ -671,7 +864,13 @@ else
     case "$field1" in
       '#'*) continue ;;
     esac
-    if [ -n "$field2" ]; then
+    if [ "$field1" = "skip-max" ]; then
+      if [ -z "$field2" ]; then
+        printf 'エラー: 台帳のskip-maxに上限が無い\n' >&2
+        exit 1
+      fi
+      max_skips="$field2"
+    elif [ -n "$field2" ]; then
       file_min["$field1"]="$field2"
     else
       min_tests="$field1"
@@ -685,6 +884,17 @@ fi
 
 shortfall=""
 if [ "$skip_count_check" -eq 0 ]; then
+  case "$max_skips" in
+    '' | *[!0-9]*)
+      printf 'エラー: 台帳のskip-maxが整数でない: [%s]\n' "$max_skips" >&2
+      exit 1
+      ;;
+  esac
+
+  if [ "$skip_count" -gt "$max_skips" ]; then
+    shortfall="許容スキップ数を超過: 実際 ${skip_count} 件 / 上限 ${max_skips} 件"
+  fi
+
   # ファイル別の下限は、パターン指定で一部だけ回すときにも検査できる。
   # 台帳に載っているのに今回まったく走らなかったファイルは、全件実行のときだけ
   # 「消えた」と判断する（パターン指定なら選ばれなかっただけである）。
@@ -708,6 +918,22 @@ if [ "$skip_count_check" -eq 0 ]; then
     fi
   done
 
+  # 台帳にない実在ファイルも検出する。パターン実行では選択していない別ファイルの
+  # 追加まで失敗にしないため、全件実行時だけ照合する。
+  if [ -z "$PATTERN" ]; then
+    for actual_file in "$TEST_DIR"/test-*.sh; do
+      [ -f "$actual_file" ] || continue
+      actual_name="$(basename "$actual_file")"
+      if [ -z "${file_min[$actual_name]+present}" ]; then
+        if [ -n "$shortfall" ]; then
+          shortfall="$shortfall; 台帳にないテストファイル: $actual_name"
+        else
+          shortfall="台帳にないテストファイル: $actual_name"
+        fi
+      fi
+    done
+  fi
+
   # 総件数は全件実行のときだけ意味を持つ（一部だけ回せば常に下回る）。
   if [ -z "$PATTERN" ] && [ -n "$min_tests" ]; then
     case "$min_tests" in
@@ -725,11 +951,11 @@ fi
 
 printf '\n'
 if [ "$fail_count" -eq 0 ] && [ -z "$shortfall" ]; then
-  printf '成功 %d 件 / 失敗 0 件\n' "$pass_count"
+  printf '成功 %d 件 / 失敗 0 件 / スキップ %d 件\n' "$pass_count" "$skip_count"
   exit 0
 fi
 
-printf '成功 %d 件 / 失敗 %d 件\n' "$pass_count" "$fail_count"
+printf '成功 %d 件 / 失敗 %d 件 / スキップ %d 件\n' "$pass_count" "$fail_count" "$skip_count"
 if [ "${#failed_names[@]}" -ne 0 ]; then
   printf '失敗したテスト:\n'
   for name in "${failed_names[@]}"; do

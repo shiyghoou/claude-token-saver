@@ -105,6 +105,11 @@ test_assert_count_は空のneedleを失敗させる() {
   assert_eq "1" "$(_status_of assert_count 1 "" "")" "空 needle と空 haystack の終了コード"
 }
 
+test_assert_contains_系は空のneedleを失敗させる() {
+  assert_eq "1" "$(_status_of assert_contains "abc" "")" "assert_contains の空 needle の終了コード"
+  assert_eq "1" "$(_status_of assert_not_contains "abc" "")" "assert_not_contains の空 needle の終了コード"
+}
+
 # ---- ランナー自身が壊れたテストを緑にしないこと --------------------------
 # 別ディレクトリへランナーを複製し、そこへ細工したテストファイルを置いて回す。
 # 実スイートを巻き込まないよう、使い捨てディレクトリには最小のファイルだけ置く。
@@ -117,7 +122,7 @@ _make_runner_dir() {
   cp "$REPO_ROOT/test/lib/assert.sh" "$RUNNER_DIR/lib/assert.sh"
   # 台帳が無いこと自体がエラーになるため、既定で緩い台帳を置く。
   # 台帳そのものを検証するテストは、これを上書きするか消して使う。
-  printf '1\n' >"$RUNNER_DIR/expected-min-count"
+  printf '1\ntest-subject.sh 1\nskip-max 0\n' >"$RUNNER_DIR/expected-min-count"
 
   # 複製した run.sh は TEST_DIR/.. を REPO_ROOT に解決する。TEST_DIR は
   # 複製先の run.sh 自身のディレクトリ（$RUNNER_DIR）なので、REPO_ROOT は
@@ -142,12 +147,17 @@ _make_runner_dir() {
 # 本文は字下げして埋め込む規約（ファイル冒頭の注意を参照）。書き出すときに
 # 字下げを剥がし、生成されるテストファイル側では関数定義を行頭へ戻す。
 #
-# @A@ は書き出し時に assert_ へ展開する。run.sh は「失敗が飲まれる位置での
-# アサーション呼び出し」を静的に探すため、その細工を素の文字列で埋め込むと
+# @A@ は書き出し時に assert_ へ展開する。@C@ は W3-1 の定数アサーション変異を
+# そのまま残すために使う。通常の健全な fixture にある `assert_eq a a` は、
+# W3-1 の検査対象にならないよう安全な展開付きの形へ正規化する。run.sh は
+# 「失敗が飲まれる位置でのアサーション呼び出し」を静的に探すため、その細工を
+# 素の文字列で埋め込むと
 # このファイル自身が引っ掛かる（検証したい細工と、検証する側のファイルが
 # 文字列で衝突する）。トークンを介して、生成されるファイルにだけ現れさせる。
 _put_test_file() {
-  printf '%s\n' "$2" | sed 's/^  //; s/@A@/assert_/g' >"$RUNNER_DIR/test-$1.sh"
+  printf '%s\n' "$2" \
+    | sed 's/^  //; s/@C@/__CTS_CONST_ASSERT__/g; s/@A@/assert_/g; s/assert_eq a a/assert_eq "${CTS_TEST_SENTINEL:-a}" a/g; s/__CTS_CONST_ASSERT__/assert_/g' \
+    >"$RUNNER_DIR/test-$1.sh"
 }
 
 # 親側の CTS_MIN_TESTS が漏れると下限の検査結果が変わるため、必ず外して呼ぶ。
@@ -259,7 +269,7 @@ test_実行件数が下限を下回ると失敗になる() {
 test_実行件数が下限以上なら成功する() {
   _make_runner_dir
   _put_test_file subject '  test_ok() { assert_eq a a; }'
-  printf '# コメント行は読み飛ばす\n1\n' >"$RUNNER_DIR/expected-min-count"
+  printf '# コメント行は読み飛ばす\n1\ntest-subject.sh 1\n' >"$RUNNER_DIR/expected-min-count"
   _run_runner
   assert_eq "0" "$RUNNER_STATUS" "ランナーの終了コード"
 }
@@ -325,6 +335,16 @@ test_台帳にあるテストファイルが消えていればエラーになる
   assert_contains "$RUNNER_OUT" "test-gone.sh" "ランナー出力"
 }
 
+test_台帳にない実在テストファイルがあればエラーになる() {
+  _make_runner_dir
+  _put_test_file subject '  test_ok() { assert_eq a a; }'
+  _put_test_file extra '  test_extra() { actual=ok; @A@eq ok "$actual"; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "台帳にない" "ランナー出力"
+  assert_contains "$RUNNER_OUT" "test-extra.sh" "ランナー出力（ファイル名）"
+}
+
 # 一部だけ回すときも、選んだファイルのファイル別下限は検査できる。
 test_ファイル別の下限はパターン指定時にも検査される() {
   _make_runner_dir
@@ -336,6 +356,47 @@ test_ファイル別の下限はパターン指定時にも検査される() {
   assert_not_contains "$RUNNER_OUT" "実行 1 件 / 下限 99 件" "ランナー出力（総件数は検査しない）"
 }
 
+test_スキップは成功件数と区別して集計する() {
+  _make_runner_dir
+  _put_test_file subject '  test_skipped() {
+    printf "%s\\n" "    skip: root では権限ビットが効かない"
+    actual=ok
+    @A@eq ok "$actual"
+  }
+  test_ok() { actual=ok; @A@eq ok "$actual"; }'
+  printf '2\ntest-subject.sh 2\nskip-max 1\n' >"$RUNNER_DIR/expected-min-count"
+  _run_runner
+  assert_eq "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "成功 1 件 / 失敗 0 件 / スキップ 1 件" "ランナー集計"
+}
+
+test_CTS_NO_SKIP_ならスキップを失敗として計上する() {
+  _make_runner_dir
+  _put_test_file subject '  test_skipped() {
+    printf "%s\\n" "    skip: root では権限ビットが効かない"
+    actual=ok
+    @A@eq ok "$actual"
+  }'
+  printf '1\ntest-subject.sh 1\nskip-max 1\n' >"$RUNNER_DIR/expected-min-count"
+  RUNNER_OUT="$(CTS_NO_SKIP=1 env -u CTS_MIN_TESTS bash "$RUNNER_DIR/run.sh" 2>&1)"
+  RUNNER_STATUS=$?
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "スキップ" "ランナー出力"
+}
+
+test_スキップが台帳の許容上限を超えれば失敗する() {
+  _make_runner_dir
+  _put_test_file subject '  test_skipped() {
+    printf "%s\\n" "    skip: root では権限ビットが効かない"
+    actual=ok
+    @A@eq ok "$actual"
+  }'
+  printf '1\ntest-subject.sh 1\nskip-max 0\n' >"$RUNNER_DIR/expected-min-count"
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "許容スキップ数" "ランナー出力"
+}
+
 # ---- 検証を含まないテスト ------------------------------------------------
 
 # 空の本文でも「ok」と出る。件数の下限をフィラーで満たす詐称を防ぐ。
@@ -344,6 +405,27 @@ test_検証を含まないテスト関数は失敗として計上される() {
   assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
   assert_contains "$RUNNER_OUT" "検証を含まない" "ランナー出力"
   assert_contains "$RUNNER_OUT" "test_nothing" "ランナー出力（関数名）"
+}
+
+test_コメント中のアサーション名だけでは検証ありと見なさない() {
+  _run_runner_with '  test_comment_only() {
+    # assert_eq a b
+    :
+  }'
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "検証を含まない" "ランナー出力"
+}
+
+test_定数同士だけのアサーションでは検証ありと見なさない() {
+  _run_runner_with '  test_tautology() { @C@eq a a; }'
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "検証を含まない" "ランナー出力"
+}
+
+test_展開を含むアサーションは検証ありと見なす() {
+  _run_runner_with '  test_real_check() { actual=ok; @A@eq ok "$actual"; }'
+  assert_eq "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "ok   test_real_check" "ランナー出力"
 }
 
 # _fail で直接落とすテストは正当である（アサーション経由でなくてもよい）。
@@ -364,6 +446,38 @@ test_サブシェル内のアサーションは失敗として計上される() 
   _run_runner_with '  test_smothered() { ( . "$TEST_DIR/lib/assert.sh"; @A@eq a b ); @A@eq a a; }'
   assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
   assert_contains "$RUNNER_OUT" "飲まれる" "ランナー出力"
+}
+
+test_補助関数経由のコマンド置換内アサーションは失敗として計上される() {
+  _run_runner_with '  check_failure() { @A@eq a b; }
+  test_smothered_helper() { value="$(check_failure)"; @A@eq "$value" "$value"; }'
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "飲まれる" "ランナー出力"
+}
+
+test_補助関数経由のサブシェル内アサーションは失敗として計上される() {
+  _run_runner_with '  check_failure() { @A@eq a b; }
+  test_smothered_helper() { ( check_failure ); status=$?; @A@eq "$status" "$status"; }'
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "飲まれる" "ランナー出力"
+}
+
+test_補助関数経由のパイプ左辺アサーションは失敗として計上される() {
+  _run_runner_with '  check_failure() { @A@eq a b; }
+  test_smothered_helper() { check_failure | cat; status=$?; @A@eq "$status" "$status"; }'
+  assert_ne "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "飲まれる" "ランナー出力"
+}
+
+test_runner_allow付きの補助関数は意図した終了コード捕捉として許可される() {
+  _run_runner_with '  check_failure() { @A@eq a b; }
+  test_allowed_helper() {
+    # runner-allow
+    value="$(check_failure)"
+    @A@eq "$value" "$value"
+  }'
+  assert_eq "0" "$RUNNER_STATUS" "ランナーの終了コード"
+  assert_contains "$RUNNER_OUT" "ok   test_allowed_helper" "ランナー出力"
 }
 
 # ---- アサーション層そのものが壊れた場合 ----------------------------------
@@ -597,6 +711,31 @@ test_ルート直下の新規sh_ファイルもパス検査の対象になる() 
   assert_ne "0" "$RUNNER_STATUS" "終了コード"
   assert_contains "$RUNNER_OUT" "実装コードにパスのリテラルが残っている" "ゲートのエラーメッセージ"
   assert_contains "$RUNNER_OUT" "migrate.sh" "違反したファイル名（グロブでなければ検出されない）"
+}
+
+test_github配下の実装ファイルもパス検査の対象になる() {
+  _make_runner_dir
+  mkdir -p "$TEST_TMP/.github/workflows"
+  printf 'path: .token-saver/handoff\n' >"$TEST_TMP/.github/workflows/check.yml"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "終了コード"
+  assert_contains "$RUNNER_OUT" "実装コードにパスのリテラルが残っている" "ゲートのエラーメッセージ"
+  assert_contains "$RUNNER_OUT" ".github/workflows/check.yml" "違反したファイル名"
+}
+
+test_heredoc本文の行頭コメントにあるパスリテラルも検査する() {
+  _make_runner_dir
+  {
+    printf '%s\n' 'cat >"$TEST_TMP/payload" '
+    printf '<%s\n' '<EOF'
+    printf '%s\n' '# .token-saver/handoff' 'EOF'
+  } >"$TEST_TMP/install.sh"
+  _put_test_file subject '  test_ok() { @A@eq a a; }'
+  _run_runner
+  assert_ne "0" "$RUNNER_STATUS" "終了コード"
+  assert_contains "$RUNNER_OUT" "実装コードにパスのリテラルが残っている" "ゲートのエラーメッセージ"
+  assert_contains "$RUNNER_OUT" "install.sh" "heredoc本文の違反ファイル名"
 }
 
 # ---- リポジトリ本体の汚染の検査 --------------------------------------------

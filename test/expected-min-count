@@ -26,6 +26,7 @@
 #   - test-uninstall.sh: test_引き継ぎの実ファイルは消さない / test_実ファイルのある_handoff_は残す
 #     （pending 配下に実ファイルがあれば uninstall 後も残る、という同一の性質）
 323
+skip-max 5
 test-handoff-check.sh 84
 test-handoff-consume.sh 18
 test-install.sh 84
