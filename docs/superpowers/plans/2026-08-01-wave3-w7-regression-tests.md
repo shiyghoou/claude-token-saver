@@ -45,7 +45,7 @@
 
 - [ ] **Step 2: 現行実装でテスト記述を確認する**
 
-Run: `bash test/run.sh test/test-handoff-consume.sh`
+Run: `bash test/run.sh handoff-consume`
 
 Expected: 既存実装では追加テストを含めてPASS。これは実装変更ではなく回帰テスト追加であるため、現行の修正版がGREENであることを確認する。
 
@@ -55,7 +55,7 @@ Expected: 既存実装では追加テストを含めてPASS。これは実装変
 
 - [ ] **Step 4: GREEN結果を再確認する**
 
-Run: `bash test/run.sh test/test-handoff-consume.sh`
+Run: `bash test/run.sh handoff-consume`
 
 Expected: 追加テストを含む対象ファイルがPASSし、scratch mutationの一時ファイルを残さない。
 
@@ -90,7 +90,7 @@ test_生きたシンボリックリンクを一括消費する() {
 
 - [ ] **Step 2: 現行実装でGREENを確認する**
 
-Run: `bash test/run.sh test/test-handoff-consume.sh`
+Run: `bash test/run.sh handoff-consume`
 
 Expected: symlinkの種別・内容・リンク先の保持を含めてPASS。
 
@@ -100,7 +100,7 @@ Expected: symlinkの種別・内容・リンク先の保持を含めてPASS。
 
 - [ ] **Step 4: GREEN結果を再確認する**
 
-Run: `bash test/run.sh test/test-handoff-consume.sh`
+Run: `bash test/run.sh handoff-consume`
 
 Expected:対象テストPASS。作業ツリーにscratch mutationを持ち込まない。
 
@@ -131,7 +131,7 @@ test_旧パスのdotfile引き継ぎを新パスへ移す() {
 
 - [ ] **Step 2: 現行実装でGREENを確認する**
 
-Run: `bash test/run.sh test/test-install.sh`
+Run: `bash test/run.sh install`
 
 Expected: dotfileを含むinstallテストがPASSし、旧側のdotfileが残らない。
 
@@ -141,7 +141,7 @@ Expected: dotfileを含むinstallテストがPASSし、旧側のdotfileが残ら
 
 - [ ] **Step 4: GREEN結果を再確認する**
 
-Run: `bash test/run.sh test/test-install.sh`
+Run: `bash test/run.sh install`
 
 Expected:対象テストPASS。
 
@@ -166,7 +166,7 @@ Expected:対象テストPASS。
 
 - [ ] **Step 2: 現行実装でGREENを確認する**
 
-Run: `bash test/run.sh test/test-uninstall.sh`
+Run: `bash test/run.sh uninstall`
 
 Expected: install直後のsettings存在と、uninstall後に残る場合のJSON妥当性がPASS。
 
@@ -176,7 +176,7 @@ Expected: install直後のsettings存在と、uninstall後に残る場合のJSON
 
 - [ ] **Step 4: GREEN結果を再確認する**
 
-Run: `bash test/run.sh test/test-uninstall.sh`
+Run: `bash test/run.sh uninstall`
 
 Expected:対象テストPASS。
 
@@ -192,7 +192,7 @@ Expected:対象テストPASS。
 
 - [ ] **Step 1: 既存テストを単独実行する**
 
-Run: `bash test/run.sh test/test-uninstall.sh`
+Run: `bash test/run.sh uninstall`
 
 Expected: `test_同じ接頭辞のユーザーのコメント行を誤認しない`がPASSし、利用者のコメント・他のignore行が残る。
 
@@ -202,7 +202,7 @@ Expected: `test_同じ接頭辞のユーザーのコメント行を誤認しな�
 
 - [ ] **Step 3: GREEN結果を再確認する**
 
-Run: `bash test/run.sh test/test-uninstall.sh`
+Run: `bash test/run.sh uninstall`
 
 Expected:現行実装の完全一致判定でPASS。`lib/gitignore-block.py`はブランチ上で変更しない。
 
@@ -217,9 +217,9 @@ Expected:現行実装の完全一致判定でPASS。`lib/gitignore-block.py`は�
 - [ ] **Step 1: 追加テストを対象別に実行する**
 
 ```bash
-bash test/run.sh test/test-handoff-consume.sh
-bash test/run.sh test/test-install.sh
-bash test/run.sh test/test-uninstall.sh
+bash test/run.sh handoff-consume
+bash test/run.sh install
+bash test/run.sh uninstall
 ```
 
 各対象で失敗0件を確認する。
