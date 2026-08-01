@@ -409,6 +409,8 @@ row = {"type": "assistant", "timestamp": stamp,
             "input": {"subagent_type": "token=SECRET_AGENT_SENTINEL"}},
            {"type": "tool_use", "name": "Agent",
             "input": {"subagent_type": "AKIAIOSFODNN7EXAMPLE"}},
+           {"type": "tool_use", "name": "Agent",
+            "input": {"subagent_type": "ASIAIOSFODNN7EXAMPLE"}},
            {"type": "tool_use", "name": "mcp__server|PIPE_MCP_SENTINEL__call", "input": {}},
            {"type": "tool_use", "name": "mcp__<MCP_HTML_SENTINEL>__call", "input": {}},
            {"type": "tool_use", "name": "mcp__AIzaSyA_example_key_1234567890__call", "input": {}},
@@ -435,6 +437,9 @@ results = [
      "toolUseResult": {"agentType": "safe-credential-agent",
                        "resolvedModel": "AIzaSyA_example_key_1234567890", "totalTokens": 1}},
     {"type": "user", "timestamp": stamp,
+     "toolUseResult": {"agentType": "safe-asia-agent",
+                       "resolvedModel": "ASIAIOSFODNN7EXAMPLE", "totalTokens": 1}},
+    {"type": "user", "timestamp": stamp,
      "toolUseResult": {"agentType": "glpat-exampletoken1234567890",
                        "resolvedModel": "safe-model", "totalTokens": 1}},
 ]
@@ -454,7 +459,8 @@ PYEOF
   for leaked in PIPE_MODEL_SENTINEL PATH_AGENT_SENTINEL SECRET_AGENT_SENTINEL \
     PIPE_MCP_SENTINEL SECRET_PATH_SENTINEL CONTROL_AGENT_SENTINEL PATH_MODEL_SENTINEL \
     CREDENTIAL_MODEL_SENTINEL AKIAIOSFODNN7EXAMPLE \
-    AIzaSyA_example_key_1234567890 glpat-exampletoken1234567890; do
+    ASIAIOSFODNN7EXAMPLE AIzaSyA_example_key_1234567890 \
+    glpat-exampletoken1234567890; do
     assert_not_contains "$report" "$leaked" "危険な表示値 $leaked"
   done
   assert_contains "$report" "plot-adversarial-reviewer" "安全なsubagent名"
