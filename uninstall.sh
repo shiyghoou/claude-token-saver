@@ -42,6 +42,10 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 target_arg="${pos[0]:-$PWD}"
+if [ "${#pos[@]}" -gt 1 ]; then
+  printf 'エラー: 導入先ディレクトリは1つだけ指定できる\n' >&2
+  exit 1
+fi
 
 TARGET="$(cd -- "$target_arg" 2>/dev/null && pwd -P)" || {
   printf 'エラー: 導入先ディレクトリが見つからない: %s\n' "$target_arg" >&2
@@ -72,8 +76,29 @@ warn() {
   printf '  警告: %s\n' "$*"
 }
 
+cts_reject_managed_symlinks() {
+  local path
+  for path in \
+    "$TARGET/.claude" \
+    "$TARGET/.claude/skills" \
+    "$TARGET/$(cts_legacy_handoff_rel)" \
+    "$TARGET/$(cts_legacy_handoff_rel)/pending" \
+    "$TARGET/$(cts_legacy_handoff_rel)/consumed" \
+    "$TARGET/$(cts_legacy_state_rel)" \
+    "$TARGET/$(cts_handoff_rel)" \
+    "$TARGET/$(cts_handoff_rel)/pending" \
+    "$TARGET/$(cts_handoff_rel)/consumed" \
+    "$TARGET/$(cts_base_rel)"; do
+    if [ -L "$path" ]; then
+      die "管理対象ディレクトリのシンボリックリンクを辿らない: $path"
+    fi
+  done
+}
+
 command -v python3 >/dev/null 2>&1 ||
   die "python3 が必要である（settings.local.json を壊さずに編集するため）。"
+
+cts_reject_managed_symlinks
 
 info "claude-token-saver を取り外す: $TARGET"
 
@@ -231,7 +256,7 @@ elif [ -f "$GITIGNORE" ]; then
   python3 "$CTS_HOME/lib/gitignore-block.py" remove "$GITIGNORE"
   case "$?" in
     0) ;;
-    2) warnings+=(".gitignore の claude-token-saver ブロックが壊れているため削除していない") ;;
+    2) warnings+=(".gitignore のブロックが不正または改行形式が混在しているため削除していない") ;;
     *) die ".gitignore を更新できない" ;;
   esac
 fi

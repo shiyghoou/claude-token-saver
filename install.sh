@@ -75,8 +75,33 @@ warn() {
   printf '  警告: %s\n' "$*"
 }
 
+cts_reject_managed_symlinks() {
+  local path
+  for path in \
+    "$TARGET/.claude" \
+    "$TARGET/.claude/skills" \
+    "$TARGET/$(cts_legacy_handoff_rel)" \
+    "$TARGET/$(cts_legacy_handoff_rel)/pending" \
+    "$TARGET/$(cts_legacy_handoff_rel)/consumed" \
+    "$TARGET/$(cts_legacy_state_rel)" \
+    "$TARGET/$(cts_handoff_rel)" \
+    "$TARGET/$(cts_handoff_rel)/pending" \
+    "$TARGET/$(cts_handoff_rel)/consumed" \
+    "$TARGET/$(cts_base_rel)"; do
+    if [ -L "$path" ]; then
+      die "管理対象ディレクトリのシンボリックリンクを辿らない: $path"
+    fi
+  done
+}
+
 command -v python3 >/dev/null 2>&1 ||
   die "python3 が必要である（settings.local.json を壊さずに編集するため）。フック自体は python3 に依存しない。"
+
+cts_reject_managed_symlinks
+python3 "$CTS_HOME/lib/ledger.py" check-writable "$SETTINGS" ||
+  die "settings.local.json に安全に書き込めない"
+python3 "$CTS_HOME/lib/ledger.py" check-writable "$GITIGNORE" ||
+  die ".gitignore に安全に書き込めない"
 
 info "claude-token-saver を導入する: $TARGET"
 
@@ -360,7 +385,7 @@ case "$gitignore_status" in
   # applied は失敗時の唯一の説明手段である。実際に書いたときだけ積む。
   0) applied+=(".gitignore を更新") ;;
   3) ;;
-  2) warnings+=(".gitignore の claude-token-saver ブロックが壊れているため更新していない") ;;
+  2) warnings+=(".gitignore のブロックが不正または改行形式が混在しているため更新していない") ;;
   *) die ".gitignore を更新できない" ;;
 esac
 

@@ -109,6 +109,25 @@ def split_text(text):
     return lines, newline, final_newline
 
 
+def has_mixed_newlines(text):
+    """CRLF/LF/CR が混在する本文は、既存バイト列を安全に再構成できない。"""
+    kinds = set()
+    i = 0
+    while i < len(text):
+        if text.startswith("\r\n", i):
+            kinds.add("crlf")
+            i += 2
+        elif text[i] == "\r":
+            kinds.add("cr")
+            i += 1
+        elif text[i] == "\n":
+            kinds.add("lf")
+            i += 1
+        else:
+            i += 1
+    return len(kinds) > 1
+
+
 def render(lines, newline="\n", final_newline=True):
     if not lines:
         return ""
@@ -118,6 +137,9 @@ def render(lines, newline="\n", final_newline=True):
 
 def cmd_apply(path):
     original = read_text(path)
+    if original is not None and has_mixed_newlines(original):
+        sys.stderr.write("  警告: %s の改行形式が混在しているため変更しない。\n" % path)
+        return EXIT_WARN
     lines, newline, final_newline = split_text(original or "")
     body, _, _ = split_text(sys.stdin.read())
     block = [START] + body + [END]
@@ -167,6 +189,9 @@ def cmd_remove(path):
     original = read_text(path)
     if original is None:
         return EXIT_OK
+    if has_mixed_newlines(original):
+        sys.stderr.write("  警告: %s の改行形式が混在しているため変更しない。\n" % path)
+        return EXIT_WARN
     lines, newline, final_newline = split_text(original)
 
     spans = find_blocks(lines)

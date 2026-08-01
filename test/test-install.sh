@@ -1030,5 +1030,28 @@ test_読み取り専用の設定をatomic書き込みで置き換えない() {
   chmod 644 "$SETTINGS" 2>/dev/null || true
   assert_ne "0" "$INSTALL_STATUS" "読み取り専用 settings の終了コード"
   cmp -s "$TEST_TMP/settings.before" "$SETTINGS" || _fail "読み取り専用 settings を変更した"
+  assert_file_missing "$SETTINGS.cts-backup" "失敗時に残る settings の控え"
+  assert_file_missing "$TARGET/.token-saver/installed.json" "失敗時に残る台帳"
   assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "Traceback" "読み取り専用 settings の出力"
+}
+
+test_管理対象親ディレクトリのシンボリックリンクを辿らない() {
+  _setup_target
+  mkdir -p "$TEST_TMP/outside"
+  ln -s "$TEST_TMP/outside" "$TARGET/.token-saver"
+  _run_install
+  assert_ne "0" "$INSTALL_STATUS" "管理対象親ディレクトリの終了コード"
+  assert_file_missing "$TEST_TMP/outside/handoff" "外部の引き継ぎディレクトリ"
+  assert_file_missing "$TEST_TMP/outside/installed.json" "外部の台帳"
+  assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "Traceback" "管理対象親ディレクトリの出力"
+}
+
+test_混在改行の_gitignoreは往復で変更しない() {
+  _setup_target
+  printf 'a\r\nb\nc' >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_install
+  bash "$REPO_ROOT/uninstall.sh" "$TARGET" >/dev/null 2>&1
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "混在改行の .gitignore を往復で変更した"
 }

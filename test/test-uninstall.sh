@@ -962,3 +962,11 @@ test_guessでもスクリプト名だけを含む利用者コマンドを消さ�
   _run_uninstall_guess
   assert_contains "$(_hook_commands SessionStart)" "echo handoff-check.sh" "利用者コマンド"
 }
+
+test_導入先の余分な位置引数を拒否する() {
+  _setup_target
+  local out rc=0
+  out="$(bash "$UNINSTALL" "$TARGET" "$TEST_TMP/other-target" 2>&1)" || rc=$?
+  assert_ne "0" "$rc" "余分な位置引数の終了コード"
+  assert_contains "$out" "1つ" "余分な位置引数の出力"
+}
