@@ -132,6 +132,10 @@ with open(os.path.join(disabled, ".mcp.json"), "w") as fh:
 # --paths と project-key 照合用の実体。長い空白入りパスを別キーへ複製する。
 alt_project = os.path.join(config, "projects", key(repo))
 os.makedirs(alt_project, exist_ok=True)
+with open(os.path.join(config, "settings.json"), "w") as fh:
+    json.dump(settings, fh)
+with open(os.path.join(config, "claude.json"), "w") as fh:
+    json.dump(claude_json, fh)
 with open(os.path.join(alt_project, "session.jsonl"), "w", encoding="utf-8") as out:
     with open(os.path.join(project, "session.jsonl"), encoding="utf-8") as src:
         out.write(src.read())
@@ -139,11 +143,15 @@ PYEOF
   : > "$FIXTURE_REPO/inside-visible.md"
 }
 
-_run_report() {
-  _fixture
+_execute_report() {
   ( cd "$FIXTURE_REPO" && HOME="$FIXTURE_HOME" CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR_OVERRIDE:-}" \
       python3 "$REPO_ROOT/scripts/measure-token-usage.py" --out "$FIXTURE_OUT" \
       --all-projects "$@" )
+}
+
+_run_report() {
+  _fixture
+  _execute_report "$@"
 }
 
 _report() {
@@ -219,10 +227,13 @@ test_repo外のReadパスを隠す() {
 }
 
 test_CLAUDE_CONFIG_DIRと長い空白入りプロジェクトパスを扱う() {
-  CLAUDE_CONFIG_DIR_OVERRIDE="$TEST_TMP/alternate config"
-  _run_report --days 0 >/dev/null 2>&1
+  _fixture
+  # HOME 側を読んで通る実装を防ぐ。alternate config 側だけを残しても、
+  # 既知の全期間合計を読めなければこのテストは通らない。
+  rm -rf "$FIXTURE_HOME/.claude/projects"
+  CLAUDE_CONFIG_DIR_OVERRIDE="$FIXTURE_CONFIG" _execute_report --days 0 >/dev/null 2>&1
   report="$(_report)"
-  assert_contains "$report" "計測条件" "CLAUDE_CONFIG_DIR"
+  assert_contains "$report" "81,098" "CLAUDE_CONFIG_DIRの実データ"
   assert_not_contains "$report" "フォールバック" "空白入りプロジェクトキー"
 }
 
@@ -236,11 +247,11 @@ test_壊れたJSONLとcontent型違いでもトレースバックを出さない
 
 test_入力と設定とリポジトリを変更しない() {
   _fixture
-  before="$(find "$FIXTURE_HOME" "$FIXTURE_REPO" -type f -exec sha256sum {} \; | LC_ALL=C sort)"
-  ( cd "$FIXTURE_REPO" && HOME="$FIXTURE_HOME" python3 "$REPO_ROOT/scripts/measure-token-usage.py" \
-      --out "$FIXTURE_OUT" --all-projects --days 0 ) >/dev/null 2>"$TEST_TMP/engine.err"
-  after="$(find "$FIXTURE_HOME" "$FIXTURE_REPO" -type f -exec sha256sum {} \; | LC_ALL=C sort)"
+  before="$(find "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" -type f -exec sha256sum {} \; | LC_ALL=C sort)"
+  CLAUDE_CONFIG_DIR_OVERRIDE="$FIXTURE_CONFIG" _execute_report --all-projects --days 0 \
+    >/dev/null 2>"$TEST_TMP/engine.err"
+  after="$(find "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" -type f -exec sha256sum {} \; | LC_ALL=C sort)"
   assert_eq "$before" "$after" "入力・設定・リポジトリの指紋"
-  pyc="$(find "$FIXTURE_HOME" "$FIXTURE_REPO" -name '*.pyc' -o -name '__pycache__' 2>/dev/null)"
+  pyc="$(find "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" \( -name '*.pyc' -o -name '__pycache__' \) 2>/dev/null)"
   assert_empty "$pyc" "pyc残留"
 }
