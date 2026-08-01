@@ -168,6 +168,58 @@ test_一括消費で移動に失敗したら終了コードで知らせる() {
   assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
+test_一括消費は失敗後も後続のファイルを試す() {
+  _setup_project
+  _write_pending "a.md" "先頭で失敗する本文"
+  _write_pending "b.md" "後続で成功する本文"
+  local shadow real_mv
+  shadow="$TEST_TMP/mv-shadow"
+  real_mv="$(command -v mv)"
+  mkdir -p "$shadow"
+  printf '#!/bin/sh\ncase "$*" in\n  *pending/a.md*) exit 1 ;;\nesac\nexec %s "$@"\n' \
+    "$real_mv" >"$shadow/mv"
+  chmod +x "$shadow/mv"
+
+  PATH="$shadow:$PATH" bash "$CONSUME" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
+  CONSUME_STATUS=$?
+  CONSUME_ERR="$(cat "$TEST_TMP/.err")"
+  assert_ne "0" "$CONSUME_STATUS" "終了コード"
+  assert_contains "$CONSUME_ERR" "a.md" "標準エラー"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/b.md"
+}
+
+test_同名宛先への並行移動でも既存と両方を保持する() {
+  _setup_project
+  local consumed="$PROJ/.token-saver/handoff/consumed"
+  local first="$TEST_TMP/source-first/a.md" second="$TEST_TMP/source-second/a.md"
+  mkdir -p "$TEST_TMP/source-first" "$TEST_TMP/source-second" "$consumed"
+  printf '既存の本文\n' >"$consumed/a.md"
+  printf '並行処理1の本文\n' >"$first"
+  printf '並行処理2の本文\n' >"$second"
+
+  (
+    . "$REPO_ROOT/scripts/lib/common.sh"
+    cts_consume_file "$first" "$consumed"
+  ) >"$TEST_TMP/.move-1-out" 2>"$TEST_TMP/.move-1-err" &
+  local first_pid=$!
+  (
+    . "$REPO_ROOT/scripts/lib/common.sh"
+    cts_consume_file "$second" "$consumed"
+  ) >"$TEST_TMP/.move-2-out" 2>"$TEST_TMP/.move-2-err" &
+  local second_pid=$!
+  wait "$first_pid"
+  wait "$second_pid"
+
+  assert_contains "$(cat "$consumed/a.md")" "既存の本文" "既存のconsumed"
+  assert_file_exists "$consumed/a.md.dup1"
+  assert_file_exists "$consumed/a.md.dup2"
+  assert_contains "$(cat "$consumed/a.md.dup1")$(cat "$consumed/a.md.dup2")" \
+    "並行処理1の本文" "退避された本文"
+  assert_contains "$(cat "$consumed/a.md.dup1")$(cat "$consumed/a.md.dup2")" \
+    "並行処理2の本文" "退避された本文"
+}
+
 test_サブディレクトリは移動対象にしない() {
   _setup_project
   mkdir -p "$PROJ/.token-saver/handoff/pending/draft"
