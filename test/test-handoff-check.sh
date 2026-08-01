@@ -818,6 +818,23 @@ test_生きたリンクではリンク切れと言わない() {
   assert_not_contains "$HOOK_OUT" "リンク切れ" "フック出力"
 }
 
+test_移動後に無効になる相対リンクでも実体のpathを示す() {
+  _setup_project
+  local target="$PROJ/.token-saver/handoff/pending/2026-07-31-1900-target.md"
+  printf '上限超過後も残るリンク先の本文\n' >"$target"
+  ln -s "./2026-07-31-1900-target.md" \
+    "$PROJ/.token-saver/handoff/pending/2026-07-31-1840-link.md"
+  _write_pending "2026-07-31-1841-a.md" "埋め草1"
+  _write_pending "2026-07-31-1842-b.md" "埋め草2"
+  _write_pending "2026-07-31-1843-c.md" "埋め草3"
+  _write_pending "2026-07-31-1844-d.md" "埋め草4"
+  _write_pending "2026-07-31-1845-e.md" "埋め草5"
+  _run_hook "$(_startup_payload)"
+  assert_contains "$HOOK_OUT" "上限超過後も残るリンク先の本文" "フック出力"
+  assert_contains "$HOOK_OUT" "$target" "移動後も有効なpath"
+  assert_file_exists "$target"
+}
+
 # pending には誰でもファイルを置ける。解決先を確かめずにたどると、
 # ~/.aws/credentials を指すリンク1本でモデルのコンテキストへ秘密が入る。
 # mv が動かすのはリンク自体なので元ファイルは残り、痕跡なく繰り返せる。

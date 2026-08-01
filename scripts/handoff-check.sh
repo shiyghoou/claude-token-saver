@@ -53,6 +53,9 @@ consumed_dir="$handoff_dir/consumed"
 
 # リンクの解決先を照合するための実パス。シンボリックリンクを含まない形にする。
 handoff_real="$(cd -P -- "$handoff_dir" 2>/dev/null && pwd -P)" || handoff_real=""
+pending_real="$(cd -P -- "$pending_dir" 2>/dev/null && pwd -P)" || exit 0
+[ -n "$handoff_real" ] && cts_path_is_within "$pending_real" "$handoff_real" || exit 0
+[ -L "$pending_dir" ] && exit 0
 
 # 1プロセスだけが使う退避場所。stdoutへ出す内容をspoolへ作ってから送信するため、
 # 読み手が途中で閉じた場合にpendingへ戻せる。
@@ -66,57 +69,86 @@ if ! mkdir "$inflight_dir" 2>/dev/null; then
   mkdir "$inflight_dir" 2>/dev/null || exit 0
 fi
 spool="$inflight_dir/.output"
+snapshot_dir="$inflight_dir/.snapshots"
+if ! : >"$spool" 2>/dev/null || ! mkdir "$snapshot_dir" 2>/dev/null; then
+  rm -f "$spool" 2>/dev/null || true
+  rmdir "$snapshot_dir" "$inflight_dir" 2>/dev/null || true
+  exit 0
+fi
 
-# 名前に改行を含むファイルで件数や本文が壊れないよう NUL 区切りで受け渡す。
+# macOS標準のfindには-maxdepth、sortには-zが無い。pending直下だけをglobで集め、
+# Bash配列のまま比較して並べる。配列は改行を含むファイル名も1要素として保持する。
+export LC_ALL=C
+entries=()
+for f in "$pending_dir"/* "$pending_dir"/.[!.]* "$pending_dir"/..?*; do
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    entries+=("$f")
+  fi
+done
+
+i=1
+while [ "$i" -lt "${#entries[@]}" ]; do
+  key="${entries[$i]}"
+  j=$((i - 1))
+  while [ "$j" -ge 0 ] && [[ "${entries[$j]}" > "$key" ]]; do
+    entries[$((j + 1))]="${entries[$j]}"
+    j=$((j - 1))
+  done
+  entries[$((j + 1))]="$key"
+  i=$((i + 1))
+done
+
 # 通常ファイルからハードリンクを除外する。リンク数2以上のファイルは、
 # 置き場外の秘密を別名で注入する経路になるため本文候補にしない。
-found_files=()
-while IFS= read -r -d '' f; do
-  found_files+=("$f")
-done < <(find -L "$pending_dir" -maxdepth 1 -type f ! -links +1 -print0 2>/dev/null | LC_ALL=C sort -z)
+_is_hard_link() {
+  [ -n "$(find -L "$1" -type f -links +1 -print 2>/dev/null)" ]
+}
 
 hard_links=()
-while IFS= read -r -d '' f; do
-  hard_links+=("$f")
-done < <(find -L "$pending_dir" -maxdepth 1 -type f -links +1 -print0 2>/dev/null | LC_ALL=C sort -z)
-
-# find -L のもとでは -type l が「たどれなかったリンク」＝リンク切れに一致する。
 broken_links=()
-while IFS= read -r -d '' f; do
-  broken_links+=("$f")
-done < <(find -L "$pending_dir" -maxdepth 1 -type l -print0 2>/dev/null | LC_ALL=C sort -z)
-
-# 通常ファイルでもリンクでもないものを拾う。実ディレクトリは既存仕様どおり
-# 下書き置き場として無視し、ディレクトリを指すリンクやFIFOだけを異常にする。
 other_entries=()
-while IFS= read -r -d '' f; do
-  if [ -d "$f" ] && [ ! -L "$f" ]; then
-    continue
-  fi
-  other_entries+=("$f")
-done < <(find -L "$pending_dir" -maxdepth 1 ! -path "$pending_dir" ! -type f ! -type l -print0 2>/dev/null | LC_ALL=C sort -z)
-
-# 生きたシンボリックリンクでも、解決先が置き場の外なら本文候補にしない。
 pending_files=()
 escaped_links=()
-for f in ${found_files[@]+"${found_files[@]}"}; do
+
+for f in ${entries[@]+"${entries[@]}"}; do
   if [ -L "$f" ]; then
-    target="$(cts_resolve_path "$f")" || target=""
+    target="$(cts_resolve_path "$f" 2>/dev/null)" || target=""
+    if [ -z "$target" ] || { [ ! -e "$target" ] && [ ! -L "$target" ]; }; then
+      broken_links+=("$f")
+      continue
+    fi
     if ! cts_path_is_within "$target" "$handoff_real"; then
       escaped_links+=("$f")
       continue
     fi
   fi
-  pending_files+=("$f")
+
+  if [ -f "$f" ]; then
+    # 単一パスに対するfindなら-maxdepth/sort-z不要で、改行を含む名前も壊さない。
+    if _is_hard_link "$f"; then
+      hard_links+=("$f")
+    else
+      pending_files+=("$f")
+    fi
+  elif [ -d "$f" ] && [ ! -L "$f" ]; then
+    # 実ディレクトリは従来どおり下書き置き場として無視する。
+    continue
+  else
+    # ディレクトリsymlink、FIFO、その他の特殊エントリは本文を読まず退避する。
+    other_entries+=("$f")
+  fi
 done
 
 claim_stage=()
 claim_dest=()
 claim_lock=()
 claim_read=()
+claim_source=()
 injected_stage=()
 injected_dest=()
 injected_read=()
+injected_budget=()
+injected_display=()
 failed_src=()
 bad_report_src=()
 bad_report_kind=()
@@ -127,6 +159,10 @@ carried=0
 total=0
 CTS_STAGE_PATH=""
 CTS_STAGE_FINAL=""
+CTS_STAGE_DISPLAY=""
+CTS_IN_PROGRESS_SRC=""
+CTS_IN_PROGRESS_STAGE=""
+CTS_IN_PROGRESS_SNAPSHOT=""
 
 _record_failed() {
   local src="$1"
@@ -150,32 +186,58 @@ _record_bad() {
 
 # src をinflightへ移し、consumedの宛先を予約する。予約済みの3配列へ積むため、
 # 呼び出し側はstdoutへ何も出さずにclaimの成否だけを受け取れる。
+_clear_in_progress() {
+  CTS_IN_PROGRESS_SRC=""
+  CTS_IN_PROGRESS_STAGE=""
+  CTS_IN_PROGRESS_SNAPSHOT=""
+}
+
 _stage_file() {
-  local src="$1" read_body="${2:-1}" staged final lock read_source snapshot
+  local src="$1" read_body="${2:-1}" staged final lock target snapshot src_real
+  local read_source=""
   CTS_STAGE_PATH=""
   CTS_STAGE_FINAL=""
   CTS_STAGE_READ=""
+  CTS_STAGE_DISPLAY=""
+  CTS_STAGE_KIND=""
+  if [ -L "$src" ]; then
+    # リンク自身を解決すると実体のパスになる。後段の表示パス置換では
+    # 「このリンクのclaim先」と「リンクが指す実体」を区別する必要がある。
+    src_real="$src"
+  else
+    src_real="$(cts_resolve_path "$src" 2>/dev/null)" || src_real="$src"
+  fi
 
   # 相対シンボリックリンクは pending から inflight へ移すと解決先が変わる。
-  # 本文候補だけは移動前に置き場内の実体を一時ファイルへ上限分だけ複製し、
-  # リンク自体は通常どおりclaimしてcommitする。異常項目は本文を読まないので
-  # 複製しない。上限を超える実体全体をコピーしてディスクを枯らさないようにする。
+  # 移動前には解決先のパスだけを記録し、実体の読み取りはclaim後に行う。
+  # これにより、claim前のFIFO差し替えでheadが待ち続けることを避ける。
   snapshot=""
+  CTS_IN_PROGRESS_SRC="$src"
+  CTS_IN_PROGRESS_STAGE=""
+  CTS_IN_PROGRESS_SNAPSHOT=""
   if [ "$read_body" -eq 1 ] && [ -L "$src" ]; then
-    read_source="$(cts_resolve_path "$src")" || return 1
-    cts_path_is_within "$read_source" "$handoff_real" || return 1
-    snapshot="$inflight_dir/.read.$$.$(( ${#claim_stage[@]} + 1 ))"
-    if ! head -c "$((CTS_MAX_BYTES_PER_FILE + 1))" "$read_source" >"$snapshot" 2>/dev/null; then
-      rm -f "$snapshot" 2>/dev/null || true
-      return 1
+    read_source="$(cts_resolve_path "$src" 2>/dev/null)" || {
+      CTS_STAGE_KIND="リンク切れ"
+      read_source=""
+    }
+    if [ -n "$read_source" ]; then
+      if [ ! -e "$read_source" ] && [ ! -L "$read_source" ]; then
+        CTS_STAGE_KIND="リンク切れ"
+      elif ! cts_path_is_within "$read_source" "$handoff_real"; then
+        CTS_STAGE_KIND="引き継ぎ置き場の外を指すリンク"
+      fi
     fi
   fi
 
   if ! cts_move_file "$src" "$inflight_dir" 2>/dev/null; then
-    [ -n "$snapshot" ] && rm -f "$snapshot" 2>/dev/null || true
+    _clear_in_progress
     return 1
   fi
   staged="$CTS_MOVED_DEST"
+  CTS_IN_PROGRESS_STAGE="$staged"
+  CTS_MOVED_DEST=""
+  CTS_RESERVED_DEST=""
+  CTS_RESERVED_LOCK=""
 
   if ! cts_reserve_destination "$staged" "$consumed_dir" 2>/dev/null; then
     # 宛先予約だけ失敗した場合は、可能な限り元のpendingへ戻す。
@@ -184,24 +246,60 @@ _stage_file() {
       claim_dest+=("")
       claim_lock+=("")
       claim_read+=("$snapshot")
+      claim_source+=("$src_real")
     else
       [ -n "$snapshot" ] && rm -f "$snapshot" 2>/dev/null || true
     fi
+    _clear_in_progress
     return 1
   fi
   final="$CTS_RESERVED_DEST"
   lock="$CTS_RESERVED_LOCK"
+
+  if [ "$read_body" -eq 1 ] && [ -z "$CTS_STAGE_KIND" ]; then
+    if [ -n "$read_source" ]; then
+      target="$(cts_resolve_path "$read_source" 2>/dev/null)" || target=""
+      if [ -z "$target" ] || { [ ! -e "$target" ] && [ ! -L "$target" ]; }; then
+        CTS_STAGE_KIND="リンク切れ"
+      elif ! cts_path_is_within "$target" "$handoff_real"; then
+        CTS_STAGE_KIND="引き継ぎ置き場の外を指すリンク"
+      elif [ ! -f "$target" ]; then
+        CTS_STAGE_KIND="通常ファイルでもリンクでもないエントリ"
+      elif _is_hard_link "$target"; then
+        CTS_STAGE_KIND="ハードリンク"
+      else
+        snapshot="$snapshot_dir/.read.$$.$(( ${#claim_stage[@]} + 1 ))"
+        CTS_IN_PROGRESS_SNAPSHOT="$snapshot"
+        CTS_STAGE_DISPLAY="$target"
+        if ! head -c "$((CTS_MAX_BYTES_PER_FILE + 1))" "$target" >"$snapshot" 2>/dev/null; then
+          rm -f "$snapshot" 2>/dev/null || true
+          snapshot=""
+          CTS_STAGE_KIND="本文を読めない引き継ぎ"
+        fi
+      fi
+    elif [ -L "$staged" ]; then
+      CTS_STAGE_KIND="通常ファイルでもリンクでもないエントリ"
+    elif [ ! -f "$staged" ]; then
+      CTS_STAGE_KIND="通常ファイルでもリンクでもないエントリ"
+    elif _is_hard_link "$staged"; then
+      CTS_STAGE_KIND="ハードリンク"
+    fi
+  fi
+
   claim_stage+=("$staged")
   claim_dest+=("$final")
   claim_lock+=("$lock")
   claim_read+=("$snapshot")
+  claim_source+=("$src_real")
   CTS_STAGE_PATH="$staged"
   CTS_STAGE_FINAL="$final"
+  [ -n "$CTS_STAGE_DISPLAY" ] || CTS_STAGE_DISPLAY="$final"
   if [ -n "$snapshot" ]; then
     CTS_STAGE_READ="$snapshot"
-  else
+  elif [ -z "$CTS_STAGE_KIND" ]; then
     CTS_STAGE_READ="$staged"
   fi
+  _clear_in_progress
   return 0
 }
 
@@ -213,6 +311,47 @@ _stage_bad() {
     # 競合相手が先に退けた異常項目について、存在しないパスを案内しない。
     _record_bad "$src" "$kind" "$src"
   fi
+}
+
+_restore_in_progress() {
+  local stage="${CTS_IN_PROGRESS_STAGE:-}" snapshot="${CTS_IN_PROGRESS_SNAPSHOT:-}"
+  local lock="${CTS_RESERVED_LOCK:-}"
+  [ -n "$lock" ] && cts_release_destination "$lock"
+  if [ -z "$stage" ]; then
+    stage="${CTS_MOVED_DEST:-${CTS_RESERVED_DEST:-}}"
+  fi
+  if [ -n "$stage" ] && { [ -e "$stage" ] || [ -L "$stage" ]; }; then
+    cts_move_file "$stage" "$pending_dir" >/dev/null 2>&1 || true
+  fi
+  [ -n "$snapshot" ] && rm -f "$snapshot" 2>/dev/null || true
+  CTS_IN_PROGRESS_SRC=""
+  CTS_IN_PROGRESS_STAGE=""
+  CTS_IN_PROGRESS_SNAPSHOT=""
+  CTS_MOVED_DEST=""
+  CTS_RESERVED_DEST=""
+  CTS_RESERVED_LOCK=""
+}
+
+_restore_inflight_entries() {
+  local entry snapshot
+  for entry in "$inflight_dir"/* "$inflight_dir"/.[!.]* "$inflight_dir"/..?*; do
+    if [ -e "$entry" ] || [ -L "$entry" ]; then
+      if [ "$entry" = "$spool" ]; then
+        rm -f "$entry" 2>/dev/null || true
+      elif [ "$entry" = "$snapshot_dir" ]; then
+        for snapshot in "$snapshot_dir"/* "$snapshot_dir"/.[!.]* "$snapshot_dir"/..?*; do
+          [ -e "$snapshot" ] || [ -L "$snapshot" ] || continue
+          rm -f "$snapshot" 2>/dev/null || true
+        done
+        rmdir "$snapshot_dir" 2>/dev/null || true
+      elif [ -d "$entry" ] && [ ! -L "$entry" ]; then
+        rmdir "$entry" 2>/dev/null || true
+      else
+        cts_move_file "$entry" "$pending_dir" >/dev/null 2>&1 || true
+      fi
+    fi
+  done
+  rmdir "$snapshot_dir" "$inflight_dir" 2>/dev/null || true
 }
 
 # 未commitのinflightをpendingへ戻す。commit済みの配列要素は空にしてあるため、
@@ -232,14 +371,35 @@ _restore_claims() {
     claim_dest[$i]=""
     claim_lock[$i]=""
     claim_read[$i]=""
+    claim_source[$i]=""
     i=$((i + 1))
   done
 }
 
+_drop_last_claim() {
+  local idx stage lock read
+  idx=$(( ${#claim_stage[@]} - 1 ))
+  [ "$idx" -ge 0 ] || return 1
+  stage="${claim_stage[$idx]}"
+  lock="${claim_lock[$idx]}"
+  read="${claim_read[$idx]}"
+  [ -n "$lock" ] && cts_release_destination "$lock"
+  [ -n "$read" ] && rm -f "$read" 2>/dev/null || true
+  if [ -n "$stage" ] && { [ -e "$stage" ] || [ -L "$stage" ]; } &&
+     cts_move_file "$stage" "$pending_dir" >/dev/null 2>&1; then
+    unset "claim_stage[$idx]" "claim_dest[$idx]" "claim_lock[$idx]" "claim_read[$idx]" "claim_source[$idx]"
+    return 0
+  fi
+  claim_dest[$idx]=""
+  claim_lock[$idx]=""
+  claim_read[$idx]=""
+  return 1
+}
+
 _abort() {
+  _restore_in_progress
   _restore_claims
-  [ -n "${spool:-}" ] && rm -f "$spool" 2>/dev/null || true
-  [ -n "${inflight_dir:-}" ] && rmdir "$inflight_dir" 2>/dev/null || true
+  _restore_inflight_entries
   exit 0
 }
 trap '_abort' HUP INT TERM PIPE
@@ -254,19 +414,29 @@ for f in ${pending_files[@]+"${pending_files[@]}"}; do
     break
   fi
 
-  size="$({ wc -c <"$f"; } 2>/dev/null || printf '0')"
-  size="${size//[^0-9]/}"
-  [ -n "$size" ] || size=0
-  [ "$size" -le "$CTS_MAX_BYTES_PER_FILE" ] || size="$CTS_MAX_BYTES_PER_FILE"
-  if [ $((total + size)) -gt "$CTS_MAX_BYTES_TOTAL" ]; then
-    carried=$(( ${#pending_files[@]} - i + 1 ))
-    break
-  fi
-
   if _stage_file "$f"; then
+    if [ -n "$CTS_STAGE_KIND" ]; then
+      _record_bad "$f" "$CTS_STAGE_KIND" "$CTS_STAGE_FINAL"
+      continue
+    fi
+
+    size="$({ wc -c <"$CTS_STAGE_READ"; } 2>/dev/null || printf '0')"
+    size="${size//[^0-9]/}"
+    [ -n "$size" ] || size=0
+    [ "$size" -le "$CTS_MAX_BYTES_PER_FILE" ] || size="$CTS_MAX_BYTES_PER_FILE"
+    if [ $((total + size)) -gt "$CTS_MAX_BYTES_TOTAL" ]; then
+      if ! _drop_last_claim; then
+        _record_failed "$f"
+      fi
+      carried=$(( ${#pending_files[@]} - i + 1 ))
+      break
+    fi
+
     injected_stage+=("$CTS_STAGE_PATH")
     injected_dest+=("$CTS_STAGE_FINAL")
     injected_read+=("$CTS_STAGE_READ")
+    injected_budget+=("$size")
+    injected_display+=("$CTS_STAGE_DISPLAY")
     total=$((total + size))
   elif [ -e "$f" ] || [ -L "$f" ]; then
     # 競合相手が先に移動した場合は、存在しないパスを示す警告を出さない。
@@ -297,20 +467,44 @@ if [ "${#claim_stage[@]}" -eq 0 ] &&
    [ "${#bad_report_src[@]}" -eq 0 ] &&
    [ "$bad_omitted" -eq 0 ] &&
    [ "$carried" -eq 0 ]; then
-  rmdir "$inflight_dir" 2>/dev/null || true
+  rm -f "$spool" 2>/dev/null || true
+  rmdir "$snapshot_dir" "$inflight_dir" 2>/dev/null || true
   exit 0
 fi
 
 fence_id="$(cts_fence_id)"
 
+# リンクの本文を実体から読んだ場合、リンク自身は consumed へ移るため、
+# 開始タグの path= は実体のパスを示す。実体も同じ実行でclaimされたときは、
+# その最終移動先へ置き換えて、上限超過などでpendingに残る場合は元のパスを保つ。
+i=0
+while [ "$i" -lt "${#injected_display[@]}" ]; do
+  display="${injected_display[$i]}"
+  j=0
+  while [ "$j" -lt "${#claim_source[@]}" ]; do
+    if [ -n "$display" ] && [ "$display" = "${claim_source[$j]}" ] &&
+       [ -n "${claim_dest[$j]}" ]; then
+      display="${claim_dest[$j]}"
+      break
+    fi
+    j=$((j + 1))
+  done
+  injected_display[$i]="$display"
+  i=$((i + 1))
+done
+
 # 区切りタグを1つ書く。属性はファイル名とパスに由来する＝攻撃者が決められる。
 # 制御文字や引用符を落とさないと、ファイル名だけで開始タグを割り、
 # 囲いの外へ任意の行を出せる。
 _open_tag() {
+  local name safe_name safe_path
+  name="$(basename -- "$1" 2>/dev/null)" || name=""
+  safe_name="$(cts_sanitize_text "$name" 2>/dev/null)" || safe_name=""
+  safe_path="$(cts_sanitize_text "$2" 2>/dev/null)" || safe_path=""
   printf '<handoff:%s file="%s" path="%s">\n' \
     "$fence_id" \
-    "$(cts_sanitize_text "$(basename -- "$1")")" \
-    "$(cts_sanitize_text "$2")"
+    "$safe_name" \
+    "$safe_path"
 }
 _close_tag() { printf '</handoff:%s>\n' "$fence_id"; }
 
@@ -337,7 +531,7 @@ printf 'フック自身の行にファイル名やパスが現れることはな
 
 # ファイル名の昇順＝時刻の昇順という前提が破れたことに気づけるようにする。
 for f in ${injected_stage[@]+"${injected_stage[@]}"}; do
-  case "$(basename -- "$f")" in
+  case "$(basename -- "$f" 2>/dev/null)" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*) ;;
     *)
       printf '（ファイル名が YYYY-MM-DD-HHMM で始まらない引き継ぎがある。出力順が時刻順と一致しない可能性がある。）\n'
@@ -351,25 +545,27 @@ while [ "$i" -lt "${#injected_stage[@]}" ]; do
   stage="${injected_stage[$i]}"
   dest="${injected_dest[$i]}"
   read_source="${injected_read[$i]}"
+  budget="${injected_budget[$i]}"
+  display="${injected_display[$i]}"
   i=$((i + 1))
 
   printf '\n'
-  _open_tag "$stage" "$dest"
+  _open_tag "$stage" "$display"
 
   size="$({ wc -c <"$read_source"; } 2>/dev/null || printf '0')"
   size="${size//[^0-9]/}"
   [ -n "$size" ] || size=0
   truncated=0
-  [ "$size" -le "$CTS_MAX_BYTES_PER_FILE" ] || truncated=1
+  [ "$size" -le "$budget" ] || truncated=1
 
   # 読めない場合の代入失敗を握る。tr で NUL を落とすのは、コマンド置換へ
   # NUL が入ると bash 自身が標準エラーへ警告を書くためである。
   read_ok=0
   if [ "$truncated" -eq 1 ]; then
-    body="$({ head -c "$CTS_MAX_BYTES_PER_FILE" -- "$read_source" | LC_ALL=C sed '$d' | LC_ALL=C tr -d '\000'; } 2>/dev/null)" ||
+    body="$({ head -c "$budget" -- "$read_source" | LC_ALL=C sed '$d' | LC_ALL=C tr -d '\000'; } 2>/dev/null)" ||
       read_ok=$?
   else
-    body="$({ LC_ALL=C tr -d '\000' <"$read_source"; } 2>/dev/null)" || read_ok=$?
+    body="$({ head -c "$budget" -- "$read_source" | LC_ALL=C tr -d '\000'; } 2>/dev/null)" || read_ok=$?
   fi
   if [ "$read_ok" -eq 0 ] && [ -n "$body" ]; then
     printf '%s\n' "$body"
@@ -380,7 +576,7 @@ while [ "$i" -lt "${#injected_stage[@]}" ]; do
   # コマンド置換が末尾改行を落とすため空になるが、これは読めている。
   has_content=0
   if [ -z "$body" ] && [ "$truncated" -eq 0 ]; then
-    [ -n "$({ LC_ALL=C tr -d '\n\000' <"$read_source"; } 2>/dev/null)" ] && has_content=1
+    [ -n "$({ head -c "$budget" -- "$read_source" | LC_ALL=C tr -d '\n\000'; } 2>/dev/null)" ] && has_content=1
   fi
 
   # 注記にはファイル名もパスも書かない。必要な情報はタグの path= 属性にある。
@@ -391,10 +587,10 @@ while [ "$i" -lt "${#injected_stage[@]}" ]; do
   if [ "$truncated" -eq 1 ]; then
     if [ -z "$body" ]; then
       printf '（本文が1行で %d バイトを超えるため渡していない。直上の開始タグの path= を Read せよ。）\n' \
-        "$CTS_MAX_BYTES_PER_FILE"
+        "$budget"
     else
       printf '（%d バイトで切り詰めた。全文は直上の開始タグの path= を Read せよ。）\n' \
-        "$CTS_MAX_BYTES_PER_FILE"
+        "$budget"
     fi
   fi
 done
@@ -461,12 +657,13 @@ while [ "$i" -lt "${#claim_stage[@]}" ]; do
     claim_dest[$i]=""
     claim_lock[$i]=""
     claim_read[$i]=""
+    claim_source[$i]=""
   fi
   i=$((i + 1))
 done
 
 rm -f "$spool" 2>/dev/null || true
-rmdir "$inflight_dir" 2>/dev/null || true
+rmdir "$snapshot_dir" "$inflight_dir" 2>/dev/null || true
 trap - HUP INT TERM PIPE
 
 )
