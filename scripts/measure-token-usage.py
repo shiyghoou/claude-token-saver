@@ -534,6 +534,10 @@ def table(headers, rows):
     return out
 
 
+def top_rows(rows, limit):
+    return rows[:limit]
+
+
 def build_report(args, scan, project_dirs, since):
     lines = []
     add = lines.append
@@ -589,10 +593,10 @@ def build_report(args, scan, project_dirs, since):
 
     add("## モデルとサブエージェント")
     add("")
-    model_rows = [
+    model_rows = top_rows([
         [name, *usage.row()]
         for name, usage in sorted(scan.by_model.items(), key=lambda item: -item[1].total)
-    ]
+    ], args.top)
     lines.extend(table(["model", "input", "cache_creation", "cache_read", "output", "usage合計"], model_rows))
     agent_rows = []
     for subagent in sorted(
@@ -612,13 +616,18 @@ def build_report(args, scan, project_dirs, since):
                 models,
             ]
         )
-    lines.extend(table(["subagent_type", "起動", "結果取得", "totalTokens", "resolvedModel"], agent_rows))
+    lines.extend(
+        table(
+            ["subagent_type", "起動", "結果取得", "totalTokens", "resolvedModel"],
+            top_rows(agent_rows, args.top),
+        )
+    )
 
     add("## MCP")
     add("")
     servers = mcp_summary()
     if servers:
-        lines.extend(table(["スコープ", "サーバ名"], servers))
+        lines.extend(table(["スコープ", "サーバ名"], top_rows(servers, args.top)))
     else:
         add("（設定から検出できた MCP サーバはなし）")
         add("")
@@ -637,10 +646,18 @@ def build_report(args, scan, project_dirs, since):
     ]
     add(f"- MCP 利用合計: {fmt(sum(used.values()))} 回")
     if used:
-        lines.extend(table(["ツール接頭辞", "回数"], [[prefix, fmt(count)] for prefix, count in used.most_common()]))
+        lines.extend(
+            table(
+                ["ツール接頭辞", "回数"],
+                top_rows(
+                    [[prefix, fmt(count)] for prefix, count in used.most_common()],
+                    args.top,
+                ),
+            )
+        )
     if unknown:
         add("- 設定から検出できていない接頭辞:")
-        for prefix, count in unknown:
+        for prefix, count in top_rows(unknown, args.top):
             add(f"  - {prefix}: {fmt(count)} 回")
     add("")
 
@@ -650,7 +667,12 @@ def build_report(args, scan, project_dirs, since):
         masked = Counter()
         for path, count in scan.read_paths.items():
             masked[mask_outside(path, project_dirs)] += count
-        lines.extend(table(["ファイル", "Read 回数"], [[path, fmt(count)] for path, count in masked.most_common()]))
+        lines.extend(
+            table(
+                ["ファイル", "Read 回数"],
+                [[path, fmt(count)] for path, count in masked.most_common(args.top)],
+            )
+        )
 
     add("## 共有時の境界")
     add("")
@@ -674,12 +696,12 @@ def select_project_dirs(args):
     if args.all_projects:
         return [os.path.join(PROJECTS_DIR, name) for name in all_names], False
 
-    abs_cwd = os.path.abspath(os.getcwd())
+    project_root = os.path.abspath(PROJECT_ROOT)
     candidates = {
-        abs_cwd.replace("/", "-").replace("_", "-"),
-        abs_cwd.replace("/", "-"),
-        project_key(abs_cwd),
-        project_key(os.path.realpath(abs_cwd)),
+        project_root.replace("/", "-").replace("_", "-"),
+        project_root.replace("/", "-"),
+        project_key(project_root),
+        project_key(os.path.realpath(project_root)),
     }
     targets = [
         os.path.join(PROJECTS_DIR, name) for name in all_names if name in candidates
@@ -722,6 +744,9 @@ def main():
 
     if args.days < 0:
         print("--days には 0 以上を指定してください（0 は全期間）", file=sys.stderr)
+        return 2
+    if args.top <= 0:
+        print("--top には 1 以上を指定してください", file=sys.stderr)
         return 2
     if not os.path.isdir(PROJECTS_DIR):
         print(f"トランスクリプトが見つかりません: {PROJECTS_DIR}", file=sys.stderr)

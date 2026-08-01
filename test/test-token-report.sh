@@ -79,6 +79,20 @@ rows.append({"type": "user", "timestamp": stamp(8), "sessionId": "session",
                                "content": "秘密の tool result content"},
              "message": {"role": "user", "content": "秘密の本文 sentinel"}})
 
+# --top の一覧制限を検証するための 0 token 補助データ。
+rows.append({"type": "assistant", "timestamp": stamp(6), "sessionId": "session",
+             "message": {"id": "message-extra", "model": "claude-haiku-5",
+                         "usage": usage(0, 0, 0, 0), "content": [
+                 {"type": "tool_use", "name": "Read", "input":
+                  {"file_path": repo + "/second-visible.md"}},
+                 {"type": "tool_use", "name": "Agent", "input":
+                  {"subagent_type": "lint-reviewer"}}]}})
+rows.append({"type": "user", "timestamp": stamp(5), "sessionId": "session",
+             "toolUseResult": {"agentType": "lint-reviewer",
+                               "resolvedModel": "claude-sonnet-5",
+                               "totalTokens": 0, "usage": usage(0, 0, 0, 0)},
+             "message": {"role": "user", "content": "suppressed helper body"}})
+
 # 期間外の行。
 rows.append({"type": "assistant", "timestamp": stamp(60 * 24 * 30), "sessionId": "old",
              "message": {"id": "message-old", "model": "old-model",
@@ -141,12 +155,18 @@ with open(os.path.join(alt_project, "session.jsonl"), "w", encoding="utf-8") as 
         out.write(src.read())
 PYEOF
   : > "$FIXTURE_REPO/inside-visible.md"
+  : > "$FIXTURE_REPO/second-visible.md"
+}
+
+_execute_report_from() {
+  run_dir="$1"
+  shift
+  ( cd "$run_dir" && HOME="$FIXTURE_HOME" CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR_OVERRIDE:-}" \
+      python3 -B "$REPO_ROOT/scripts/measure-token-usage.py" --out "$FIXTURE_OUT" "$@" )
 }
 
 _execute_report() {
-  ( cd "$FIXTURE_REPO" && HOME="$FIXTURE_HOME" CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR_OVERRIDE:-}" \
-      python3 "$REPO_ROOT/scripts/measure-token-usage.py" --out "$FIXTURE_OUT" \
-      --all-projects "$@" )
+  _execute_report_from "$FIXTURE_REPO" --all-projects "$@"
 }
 
 _run_report() {
@@ -156,6 +176,41 @@ _run_report() {
 
 _report() {
   [ -f "$FIXTURE_OUT" ] && sed -n '1,240p' "$FIXTURE_OUT" || true
+}
+
+_add_unrelated_project() {
+  python3 - "$FIXTURE_HOME" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+home = sys.argv[1]
+
+def key(path):
+    return "".join(c if c.isalnum() and c.isascii() else "-" for c in path)
+
+project = os.path.join(home, ".claude", "projects", key("/tmp/unrelated-project"))
+os.makedirs(project, exist_ok=True)
+row = {
+    "type": "assistant",
+    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "sessionId": "other",
+    "message": {
+        "id": "other-message",
+        "model": "other-project-model",
+        "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 200,
+            "output_tokens": 2,
+        },
+        "content": [],
+    },
+}
+with open(os.path.join(project, "other.jsonl"), "w", encoding="utf-8") as fh:
+    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+PYEOF
 }
 
 test_同一message_idの重複を一度だけ集計する() {
@@ -226,6 +281,28 @@ test_repo外のReadパスを隠す() {
   assert_not_contains "$report" "SECRET_RELATIVE_PATH" "相対パス"
 }
 
+test_top_は一覧ごとの最大行数を制限する() {
+  _run_report --days 1 --top 1 --paths >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "claude-sonnet-5" "model先頭"
+  assert_not_contains "$report" "claude-opus-5[1m]" "model制限"
+  assert_contains "$report" "plot-adversarial-reviewer" "subagent先頭"
+  assert_not_contains "$report" "lint-reviewer" "subagent制限"
+  assert_contains "$report" "example-server" "MCP先頭"
+  assert_not_contains "$report" "plugin-server" "MCP制限"
+  assert_contains "$report" "(repo外)" "Read先頭"
+  assert_not_contains "$report" "inside-visible.md" "Read制限"
+}
+
+test_top_0は拒否する() {
+  _fixture
+  _execute_report --days 1 --top 0 >/dev/null 2>"$TEST_TMP/top.err"
+  status=$?
+  err="$(cat "$TEST_TMP/top.err")"
+  assert_eq "2" "$status" "top下限"
+  assert_contains "$err" "--top には 1 以上を指定してください" "topエラー文言"
+}
+
 test_CLAUDE_CONFIG_DIRと長い空白入りプロジェクトパスを扱う() {
   _fixture
   # HOME 側を読んで通る実装を防ぐ。alternate config 側だけを残しても、
@@ -235,6 +312,18 @@ test_CLAUDE_CONFIG_DIRと長い空白入りプロジェクトパスを扱う() {
   report="$(_report)"
   assert_contains "$report" "81,098" "CLAUDE_CONFIG_DIRの実データ"
   assert_not_contains "$report" "フォールバック" "空白入りプロジェクトキー"
+}
+
+test_サブディレクトリ実行でも最寄りのrepo_rootでproject_keyを選ぶ() {
+  _fixture
+  _add_unrelated_project
+  mkdir -p "$FIXTURE_REPO/nested/child"
+  _execute_report_from "$FIXTURE_REPO/nested/child" --days 0 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "81,098" "対象repoのみの合計"
+  assert_not_contains "$report" "81,322" "fallbackで混ざる他project合計"
+  assert_not_contains "$report" "other-project-model" "無関係projectのmodel"
+  assert_not_contains "$report" "フォールバック" "subdir実行時の誤fallback"
 }
 
 test_壊れたJSONLとcontent型違いでもトレースバックを出さない() {
