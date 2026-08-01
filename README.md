@@ -120,6 +120,15 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 既定では検証済みの Markdown レポートを `.token-saver/token-reports/` へ日時付きで保存する。
 別の保存先が要るときだけ `--out <path>` を付ける。集計エンジンは `scripts/measure-token-usage.py` で、
 トランスクリプト・設定・repository を読み取り専用で扱う。
+このコマンドは設定ファイルやフックを自動変更しない。
+
+主なオプション:
+
+- `--days N` : 直近 N 日を対象にする。`0` は全期間
+- `--out <path>` : 保存先を明示する
+- `--top N` : 一覧の最大行数を絞る
+- `--all-projects` : 全プロジェクトを対象にする
+- `--paths` : Read パスの要約も出す
 
 見られる主なもの:
 
@@ -137,6 +146,10 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 
 - 同じ `message.id` の usage は一度だけ数える。`message.id` が無い行は `requestId` と usage 内容で代替キーを作る
 - 現在のリポジトリに対応する project key が見つからないときは、警告付きで全プロジェクトへフォールバックする
+- `cache_read_input_tokens` は課金上の重みが不明なので、内訳のまま扱い、加重しない
+- 画像の消費は寸法からの概算である
+- MCP サーバごとのトークン消費は実測できない。分かるのは設定済みか、呼ばれたか、何回かまでである
+- Stop フックによる切り時提案と calibrate は未実装で、このコマンドが設定を書き換える段階ではない
 - 詳しい使い方は [`skills/token-report/SKILL.md`](skills/token-report/SKILL.md)
 
 ### 台帳に記録が無いときは何もしない（fail-closed）

@@ -2,11 +2,11 @@
 
 Claude Code のトランスクリプトから、トークン消費の傾向を安全に確認するためのスキル。
 **まず `./scripts/token-report.sh` を使う。** 設定ファイルやフックを手で書き換えて
-計測を有効化するものではない。
+計測を有効化するものではなく、自動変更しない。
 
 ## 何をするか
 
-- `scripts/measure-token-usage.py` を **read-only** で実行し、集計だけを Markdown にまとめる
+- `scripts/measure-token-usage.py` を **read-only（読み取り専用）** で実行し、集計だけを Markdown にまとめる
 - prompt、content、本文、環境変数、認証情報、repo 外の実パスをレポートへ写さない
 - main session と subagent の usage を分けて示す
 - 同じ `message.id` の usage は一度だけ数え、`message.id` が無い行は `requestId` と usage 内容で重複排除する

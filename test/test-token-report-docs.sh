@@ -23,6 +23,47 @@ _skill() {
   sed -n '1,260p' "$(_skill_path)"
 }
 
+_doc_paths() {
+  printf '%s\n' \
+    "$REPO_ROOT/README.md" \
+    "$REPO_ROOT/skills/token-report/SKILL.md" \
+    "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md"
+}
+
+_assert_shared_contract() {
+  doc_path="$1"
+  case "$doc_path" in
+    "$REPO_ROOT/README.md")
+      body="$(_readme)"
+      ;;
+    "$REPO_ROOT/skills/token-report/SKILL.md")
+      body="$(_skill)"
+      ;;
+    "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md")
+      body="$(_design_token_report_section)"
+      ;;
+    *)
+      _fail "未知の文書: $doc_path"
+      ;;
+  esac
+  label="$(basename "$doc_path")"
+
+  assert_contains "$body" "./scripts/token-report.sh" "$label launcher"
+  assert_contains "$body" ".token-saver/token-reports/" "$label 保存先"
+  assert_contains "$body" "--days" "$label days"
+  assert_contains "$body" "--out" "$label out"
+  assert_contains "$body" "--top" "$label top"
+  assert_contains "$body" "--all-projects" "$label all-projects"
+  assert_contains "$body" "--paths" "$label paths"
+  assert_contains "$body" "cache_read_input_tokens" "$label cache_read"
+  assert_contains "$body" "画像" "$label image"
+  assert_contains "$body" "MCP" "$label MCP"
+  assert_contains "$body" "読み取り専用" "$label read-only"
+  assert_contains "$body" "自動変更しない" "$label no auto settings change"
+  assert_contains "$body" "Stop フック" "$label stop hook scope"
+  assert_contains "$body" "calibrate" "$label calibrate scope"
+}
+
 test_token_report_SKILLがlauncherと保存先を案内する() {
   assert_file_exists "$(_skill_path)"
   skill="$(_skill)"
@@ -50,14 +91,12 @@ test_READMEがtoken_reportを実装済みと案内する() {
   assert_not_contains "$readme" "| 計測（token-report） | 未実装" "README token-report 未実装"
 }
 
-test_設計書の段階2がtoken_reportのCLIと限界を案内する() {
-  section="$(_design_token_report_section)"
-  assert_contains "$section" "scripts/measure-token-usage.py" "設計書 engine"
-  assert_contains "$section" "scripts/token-report.sh" "設計書 launcher"
-  assert_contains "$section" ".token-saver/token-reports/" "設計書 保存先"
-  assert_contains "$section" "cache_read_input_tokens" "設計書 cache_read"
-  assert_contains "$section" "画像" "設計書 画像"
-  assert_contains "$section" "MCP" "設計書 MCP"
+test_token_reportの共有契約がREADME_SKILL_設計書で一致する() {
+  while IFS= read -r doc_path; do
+    _assert_shared_contract "$doc_path"
+  done <<EOF
+$(_doc_paths)
+EOF
 }
 
 test_PAWARS固有のIssueと提出先を新規文書に残さない() {
