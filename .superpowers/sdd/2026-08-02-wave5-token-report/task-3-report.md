@@ -98,3 +98,106 @@ bash test/run.sh
 予定コミットメッセージ:
 
 `feat: token-reportの出力ランチャを追加する`
+
+---
+
+## Review fix addendum (2026-08-01)
+
+### 対象
+
+- review target before fix: `a8b9dad`
+- scope: `scripts/token-report.sh`, `test/test-token-report-launcher.sh`, `test/expected-min-count`
+
+### 受けた指摘
+
+1. default 出力時に `python3` 不在や engine 非ゼロでも先に `.token-saver/token-reports` を作ってしまい、failure path が read-only でなかった。
+2. launcher test が failure path の副作用を検証していなかった。
+
+Minor の success message 二重出力は deferred のまま据え置いた。
+
+### Root cause
+
+- launcher は default 出力時に、engine 実行前に `mkdir -p "$REPO_ROOT/$(cts_base_rel)/token-reports"` を行っていた。
+- そのため `python3` 不在、engine 非ゼロ、その他 early failure でも fixture repo に `.token-saver/token-reports` が残った。
+- テストは rc / stderr だけを見ており、この mutation を検出していなかった。
+
+### RED
+
+追加した failure-path test を先に実行した。
+
+```bash
+bash test/run.sh token-report-launcher
+```
+
+出力要約:
+
+- 成功 8 件 / 失敗 2 件 / スキップ 0 件
+- 失敗:
+  - `test_python3が無ければ既定出力ディレクトリを残さない`
+  - `test_計測器が非ゼロなら既定出力ディレクトリを残さない`
+- 観測:
+  - どちらも `fixture repo/.token-saver/token-reports` が存在してしまい、review 指摘どおり failure path が read-only ではなかった。
+
+### 修正内容
+
+- `scripts/token-report.sh`
+  - default 出力時は repo 配下へ直接書かず、まず `mktemp` で `/tmp` 側の一時ファイルへ `--out` を差し替えて engine を実行するよう変更した。
+  - 一時ファイルに対して、存在・非空・marker より新しいこと・先頭 40 行に `## 計測条件` があることを検証してから、初めて repo 配下の `token-reports/` を作成するよう順序を変更した。
+  - 検証後にだけ collision-safe な最終パスを選び、`mv` で validated artifact を配置するようにした。
+  - cleanup trap を関数化し、marker と未移動の temporary report を確実に片付けるようにした。
+- `test/test-token-report-launcher.sh`
+  - `python3` 不在時に default report directory が残らないことを検証する test を追加した。
+  - engine 非ゼロ時に default report directory が残らないことを検証する test を追加した。
+  - default path の engine 内部 `--out` は、最終配置前の `/tmp/cts-token-report-output.*` になることへ期待値を更新した。
+- `test/expected-min-count`
+  - runner 実測に合わせて総件数を `344`、launcher 件数を `10` に更新した。
+
+### 修正後の検証
+
+```bash
+bash test/run.sh token-report-launcher
+```
+
+出力要約:
+
+- 成功 10 件 / 失敗 0 件 / スキップ 0 件
+
+```bash
+bash test/run.sh token-report
+```
+
+出力要約:
+
+- 成功 24 件 / 失敗 0 件 / スキップ 0 件
+
+```bash
+bash -n scripts/token-report.sh
+bash -n test/test-token-report-launcher.sh
+git diff --check
+```
+
+出力要約:
+
+- いずれも exit `0`
+
+```bash
+bash test/run.sh
+```
+
+出力要約:
+
+- 実行件数の下限: 総 344 件 / ファイル別 8 件分
+- 成功 363 件 / 失敗 0 件 / スキップ 0 件
+
+### fix 後のセルフチェック
+
+- failure paths:
+  - default 出力時は `python3` 不在 / engine 非ゼロ / validation failure のいずれでも repo 配下の report directory を作らない。
+- explicit `--out` semantics:
+  - 明示出力先の親は引き続き自動作成しない。
+- Bash 3.2 compatibility:
+  - 連想配列、`mapfile`、process substitution、ガード無し配列展開を使っていない。
+- collision and symlink safety:
+  - 最終配置時だけ `-L` を含む衝突回避を行い、dangling symlink を上書きしない。
+- marker freshness:
+  - freshness / section validation は temporary artifact に対して先に行い、validated artifact だけを最終配置する。

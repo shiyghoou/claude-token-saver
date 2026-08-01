@@ -161,7 +161,9 @@ test_daysとall_projectsとpathsをengineへ渡す() {
   assert_contains "$args" "--top
 7" "top 引数"
   assert_contains "$args" "--out
-$FIXTURE_REPO/.token-saver/token-reports/20260801-123456.md" "既定 out 引数"
+/tmp/cts-token-report-output." "既定 out 引数"
+  assert_not_contains "$args" "$FIXTURE_REPO/.token-saver/token-reports/20260801-123456.md" \
+    "既定 out は最終配置前の一時ファイル"
 }
 
 test_計測器が非ゼロならlauncherも非ゼロにする() {
@@ -170,6 +172,15 @@ test_計測器が非ゼロならlauncherも非ゼロにする() {
     _run_launcher >/dev/null 2>"$TEST_TMP/launcher.err"
   status=$?
   assert_eq "17" "$status" "計測器エラー伝播"
+}
+
+test_計測器が非ゼロなら既定出力ディレクトリを残さない() {
+  _fixture
+  CTS_ENGINE_MODE=touchless CTS_ENGINE_EXIT=17 \
+    _run_launcher >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  assert_eq "17" "$status" "計測器エラー伝播"
+  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports"
 }
 
 test_成功rcでも空レポートなら失敗にする() {
@@ -201,4 +212,12 @@ test_python3が無ければ理由を表示して失敗する() {
   assert_ne "0" "$status" "python3 不在"
   assert_contains "$err" "python3" "python3 文言"
   assert_contains "$err" "見つかりません" "python3 不在理由"
+}
+
+test_python3が無ければ既定出力ディレクトリを残さない() {
+  _fixture
+  _run_launcher_without_python >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  assert_ne "0" "$status" "python3 不在"
+  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports"
 }
