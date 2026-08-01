@@ -1041,6 +1041,8 @@ test_読み取り専用の設定をatomic書き込みで置き換えない() {
   mkdir -p "$TARGET/.claude"
   printf '{"permissions":{}}\n' >"$SETTINGS"
   cp "$SETTINGS" "$TEST_TMP/settings.before"
+  # rootで実行すると所有者権限により444でも書き込み・置換が成功し得る。
+  # このテストの読み取り専用検証は、通常ユーザーの権限で実行した結果を前提とする。
   chmod 444 "$SETTINGS"
   _run_install
   chmod 644 "$SETTINGS" 2>/dev/null || true
