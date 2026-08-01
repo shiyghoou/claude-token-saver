@@ -172,19 +172,46 @@ SKILL.md 側は同じ内容を重複させず、フック出力を正とする�
 
 ### 5.2 計測（token-report）
 
-`measure-token-usage.py` を移植する。データ源は `~/.claude/projects/<project>/*.jsonl`（`CLAUDE_CONFIG_DIR` で差し替え可能）。
+計測エンジンは `scripts/measure-token-usage.py`、利用者向けの入口は `scripts/token-report.sh` とする。
+データ源は `~/.claude/projects/<project>/*.jsonl`（`CLAUDE_CONFIG_DIR` で差し替え可能）で、
+トランスクリプト・設定・repository は読み取り専用で扱う。
 
-一般化する点:
+CLI の既定経路:
 
-- レポート出力先を導入先で選べるようにする（移植元では出力先が固定だった）。
-- 出力先は `install.sh` が **`.gitignore` へ追記する**。レポートは利用実績を含むため、既定では版管理しない。
-  蓄積・共有したい場合の除外方法を README に記載する（移植元は移行時にこれを使って現行運用を維持できる）。
+- `./scripts/token-report.sh`
+- `./scripts/token-report.sh --days 30`
+- `./scripts/token-report.sh --days 0 --all-projects`
 
-既知の限界は README に明記し、数値を一般法則として書かない。
+launcher は engine の `--days` / `--all-projects` / `--paths` / `--top` / `--out` をそのまま扱う。
+`--out` を省略した既定出力先は `.token-saver/token-reports/` で、まず一時ファイルへ書き、
+先頭に `## 計測条件` を持つ非空レポートだけを日時付き Markdown として保存する。
+
+レポートに含めるもの:
+
+- input / cache_creation / cache_read / output の集計
+- モデル名、`subagent_type`、`toolUseResult.totalTokens`
+- MCP サーバ名と利用回数
+- `--paths` 指定時の repo 内相対パス
+
+レポートに含めないもの:
+
+- prompt、content、本文
+- 環境変数、認証情報
+- repo 外の実パス（`(repo外)` へ置換）
+
+集計上の性質:
+
+- 同じ `message.id` の usage は一度だけ数える
+- `message.id` を持たない行は `requestId` と usage 内容で代替キーを作って重複排除する
+- `<session>/subagents/` の詳細ログは別枠で扱い、親の合計へ二重計上しない
+- 現在のリポジトリに対応する project key が見つからないときは、警告付きで全プロジェクトへフォールバックする
+
+既知の限界は README と SKILL に明記し、数値を一般法則として書かない。
 
 - サブエージェントの固定コストは直接測定していない。メインセッション開始時の中央値を代理指標として用いている。
 - `cache_read_input_tokens` は課金上の重みが不明なため、内訳のまま出力し加重しない。
 - 画像は寸法からの概算である。
+- MCP サーバごとのトークン消費は実測できない。分かるのは設定済みか、呼ばれたか、何回かまでである。
 - 各種比率（1セッション占有率など）は特定期間・特定リポジトリの実測であり一般化されていない。
 
 ### 5.3 セッション切り提案（suggest-session-cut）

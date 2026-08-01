@@ -14,7 +14,7 @@ Claude Code のトークン消費を減らすヘルパー。任意のリポジ�
 | 機能 | 状態 |
 | --- | --- |
 | 引き継ぎ（session-handoff） | **実装済み** |
-| 計測（token-report） | 未実装（段階2） |
+| 計測（token-report） | **実装済み** |
 | セッション切り提案（suggest-session-cut） | 未実装（段階3） |
 | キャリブレーションと診断（calibrate） | 未実装（段階4） |
 | 委譲判断ガイド（delegation-policy） | 未実装（段階5） |
@@ -106,6 +106,38 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 ```bash
 /path/to/claude-token-saver/uninstall.sh [--guess] [<導入先ディレクトリ>]
 ```
+
+## 計測（token-report）
+
+導入後は launcher から回す。
+
+```bash
+./scripts/token-report.sh
+./scripts/token-report.sh --days 30
+./scripts/token-report.sh --days 0 --all-projects
+```
+
+既定では検証済みの Markdown レポートを `.token-saver/token-reports/` へ日時付きで保存する。
+別の保存先が要るときだけ `--out <path>` を付ける。集計エンジンは `scripts/measure-token-usage.py` で、
+トランスクリプト・設定・repository を読み取り専用で扱う。
+
+見られる主なもの:
+
+- 対象期間ごとの input / cache_creation / cache_read / output の合計
+- モデル別 usage、subagent_type ごとの起動数と `toolUseResult.totalTokens`
+- MCP の設定済みサーバ名と実利用回数
+- `--paths` 指定時の Read パス要約（repo 外は `(repo外)` に伏せる）
+
+共有時の境界:
+
+- 含める: 集計値、モデル名、subagent_type、MCP サーバ名、repo 内の相対パス
+- 含めない: prompt、content、本文、環境変数、認証情報、repo 外の実パス
+
+補足:
+
+- 同じ `message.id` の usage は一度だけ数える。`message.id` が無い行は `requestId` と usage 内容で代替キーを作る
+- 現在のリポジトリに対応する project key が見つからないときは、警告付きで全プロジェクトへフォールバックする
+- 詳しい使い方は [`skills/token-report/SKILL.md`](skills/token-report/SKILL.md)
 
 ### 台帳に記録が無いときは何もしない（fail-closed）
 
