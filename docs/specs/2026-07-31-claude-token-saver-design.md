@@ -172,19 +172,26 @@ SKILL.md 側は同じ内容を重複させず、フック出力を正とする�
 
 ### 5.2 計測（token-report）
 
-計測エンジンは `scripts/measure-token-usage.py`、利用者向けの入口は `scripts/token-report.sh` とする。
+計測エンジンは source clone の `scripts/measure-token-usage.py`、source launcher は
+`scripts/token-report.sh`、利用者向けの導入先入口は `.token-saver/token-report.sh` とする。
 データ源は `~/.claude/projects/<project>/*.jsonl`（`CLAUDE_CONFIG_DIR` で差し替え可能）で、
 トランスクリプト・設定・repository は読み取り専用で扱う。
 
 CLI の既定経路:
 
-- `./scripts/token-report.sh`
-- `./scripts/token-report.sh --days 30`
-- `./scripts/token-report.sh --days 0 --all-projects`
+- `./.token-saver/token-report.sh`
+- `./.token-saver/token-report.sh --days 30`
+- `./.token-saver/token-report.sh --days 0 --all-projects`
+
+install は source launcher の絶対パスを記録した managed entrypoint を導入先へ置く。entrypoint は
+導入先 root を明示して source launcher を呼び、source launcher は自身と同じ clone の engine を使う。
+これにより source root と計測・保存対象の target root を分離する。source clone を移動した場合は
+install を再実行して entrypoint を更新する。
 
 launcher は engine の `--days` / `--all-projects` / `--paths` / `--top` / `--out` をそのまま扱う。
 `--out` を省略した既定出力先は `.token-saver/token-reports/` で、まず一時ファイルへ書き、
-先頭に `## 計測条件` を持つ非空レポートだけを日時付き Markdown として保存する。
+先頭に `## 計測条件` を持つ非空レポートだけを日時付き Markdown として原子的に保存する。
+同じ秒の並行実行でも既存ファイルを上書きしない。
 この段階の token-report は読み取り専用で、設定ファイルやフックを自動変更しない。
 
 レポートに含めるもの:
@@ -211,7 +218,7 @@ launcher は engine の `--days` / `--all-projects` / `--paths` / `--top` / `--o
 
 - サブエージェントの固定コストは直接測定していない。メインセッション開始時の中央値を代理指標として用いている。
 - `cache_read_input_tokens` は課金上の重みが不明なため、内訳のまま出力し加重しない。
-- 画像は寸法からの概算である。
+- 画像の消費は現在の計測エンジンでは未計測である。
 - MCP サーバごとのトークン消費は実測できない。分かるのは設定済みか、呼ばれたか、何回かまでである。
 - 各種比率（1セッション占有率など）は特定期間・特定リポジトリの実測であり一般化されていない。
 - Stop フックによる切り時提案と calibrate はこの節の範囲外で、後続の §5.3 と §5.5 で扱う。
@@ -279,7 +286,7 @@ Stop フックとして、累積 `cache_read` が閾値に達したらセッシ�
    1件もないサーバ。無効化候補として最も根拠が強い項目である。
 4. **サブエージェントの利用実態** — 起動数、消費、メインとの比率。
 5. **`/compact` の頻度と効果** — 圧縮直後の水準と、元の水準へ戻るまでのターン数。
-6. **画像添付の消費** — 寸法からの概算である旨を付す。
+6. **画像添付の消費** — 画像の消費は現在の計測エンジンでは未計測である旨を付す。
 
 #### 診断項目 — 概算にとどまること
 

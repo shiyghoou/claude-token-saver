@@ -54,6 +54,7 @@ def main():
                     handle.write("# Claude Code トークン計測レポート\n\n")
                     handle.write("## 計測条件\n\n")
                     handle.write("- fixture: launcher\n")
+                    handle.write("- canary: " + os.environ.get("CTS_ENGINE_CANARY", "default") + "\n")
                 else:
                     handle.write("")
         except OSError as exc:
@@ -72,12 +73,29 @@ PYEOF
   cat >"$FIXTURE_BIN/date" <<'SHEOF'
 #!/bin/bash
 if [ "${1:-}" = "+%Y%m%d-%H%M%S" ]; then
+  if [ "${CTS_DATE_FAIL:-}" = "1" ]; then
+    exit 23
+  fi
   printf '%s\n' "${CTS_FAKE_DATE:-20260801-123456}"
   exit 0
 fi
 exec /bin/date "$@"
 SHEOF
   chmod +x "$FIXTURE_BIN/date"
+}
+
+_install_failing_wrapper() {
+  tool="$1"
+  env_name="$2"
+  target="$(command -v "$tool")"
+  cat >"$FIXTURE_BIN/$tool" <<EOF
+#!/bin/bash
+if [ "\${$env_name:-}" = "1" ]; then
+  exit 29
+fi
+exec "$target" "\$@"
+EOF
+  chmod +x "$FIXTURE_BIN/$tool"
 }
 
 _run_launcher() {
@@ -220,4 +238,53 @@ test_python3が無ければ既定出力ディレクトリを残さない() {
   status=$?
   assert_ne "0" "$status" "python3 不在"
   assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports"
+}
+
+test_同時起動でも同名レポートを上書きしない() {
+  _fixture
+  CTS_ENGINE_CANARY=first _run_launcher >"$TEST_TMP/first.out" 2>"$TEST_TMP/first.err" &
+  first_pid=$!
+  CTS_ENGINE_CANARY=second _run_launcher >"$TEST_TMP/second.out" 2>"$TEST_TMP/second.err" &
+  second_pid=$!
+  first_status=0
+  second_status=0
+  wait "$first_pid" || first_status=$?
+  wait "$second_pid" || second_status=$?
+  report_dir="$FIXTURE_REPO/.token-saver/token-reports"
+  report_count="$(find "$report_dir" -maxdepth 1 -type f -name '20260801-123456*.md' | wc -l | tr -d ' ')"
+  combined="$(find "$report_dir" -maxdepth 1 -type f -name '20260801-123456*.md' -exec cat {} \;)"
+  assert_eq "0" "$first_status" "同時起動1の終了コード"
+  assert_eq "0" "$second_status" "同時起動2の終了コード"
+  assert_eq "2" "$report_count" "同時起動のレポート件数"
+  assert_contains "$combined" "canary: first" "同時起動1の内容"
+  assert_contains "$combined" "canary: second" "同時起動2の内容"
+}
+
+test_date失敗時に作成した空ディレクトリを残さない() {
+  _fixture
+  CTS_DATE_FAIL=1 _run_launcher >/dev/null 2>"$TEST_TMP/date.err"
+  status=$?
+  assert_ne "0" "$status" "date失敗の終了コード"
+  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "date失敗時の出力ディレクトリ"
+  assert_file_missing "$FIXTURE_REPO/.token-saver" "date失敗時に作成した管理ディレクトリ"
+}
+
+test_move失敗時に作成した空ディレクトリを残さない() {
+  _fixture
+  _install_failing_wrapper mv CTS_MV_FAIL
+  CTS_MV_FAIL=1 _run_launcher >/dev/null 2>"$TEST_TMP/mv.err"
+  status=$?
+  assert_ne "0" "$status" "move失敗の終了コード"
+  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "move失敗時の出力ディレクトリ"
+  assert_file_missing "$FIXTURE_REPO/.token-saver" "move失敗時に作成した管理ディレクトリ"
+}
+
+test_atomic配置失敗時に作成した空ディレクトリを残さない() {
+  _fixture
+  _install_failing_wrapper ln CTS_LN_FAIL
+  CTS_LN_FAIL=1 _run_launcher >/dev/null 2>"$TEST_TMP/ln.err"
+  status=$?
+  assert_ne "0" "$status" "atomic配置失敗の終了コード"
+  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "配置失敗時の出力ディレクトリ"
+  assert_file_missing "$FIXTURE_REPO/.token-saver" "配置失敗時に作成した管理ディレクトリ"
 }

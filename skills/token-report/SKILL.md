@@ -1,7 +1,12 @@
+---
+name: token-report
+description: Use when measuring Claude Code token usage safely in a repository after installing claude-token-saver.
+---
+
 # token-report
 
 Claude Code のトランスクリプトから、トークン消費の傾向を安全に確認するためのスキル。
-**まず `./scripts/token-report.sh` を使う。** 設定ファイルやフックを手で書き換えて
+**まず導入先で `./.token-saver/token-report.sh` を使う。** 設定ファイルやフックを手で書き換えて
 計測を有効化するものではなく、自動変更しない。
 
 ## 何をするか
@@ -14,9 +19,9 @@ Claude Code のトランスクリプトから、トークン消費の傾向を�
 ## まず使うコマンド
 
 ```bash
-./scripts/token-report.sh
-./scripts/token-report.sh --days 30
-./scripts/token-report.sh --days 0 --all-projects
+./.token-saver/token-report.sh
+./.token-saver/token-report.sh --days 30
+./.token-saver/token-report.sh --days 0 --all-projects
 ```
 
 既定では、検証済みのレポートを `.token-saver/token-reports/` へ日時付きで保存する。
@@ -29,8 +34,14 @@ Claude Code のトランスクリプトから、トークン消費の傾向を�
 - `--paths` : Read したパスの要約も出す。repo 外や相対指定は `(repo外)` に伏せる
 - `--top N` : 一覧の最大行数を絞る
 
-launcher は `scripts/measure-token-usage.py` を呼び出し、既定では一時ファイルへ出したあと
-`.token-saver/token-reports/` へ移動する。失敗時や空レポート時は成功扱いにしない。
+導入先の entrypoint は、install 元クローンの `scripts/token-report.sh` を呼び出す。
+source clone 側の launcher は同じクローンの `scripts/measure-token-usage.py` を engine として使い、
+計測対象 root と既定の保存先は entrypoint がある導入先に固定する。したがって、別の cwd から
+entrypoint を呼んでも source clone へレポートを書かない。source clone を移動した場合は、導入先で
+`install.sh` を再実行して entrypoint の記録を更新する。
+
+既定では一時ファイルへ出したあと `.token-saver/token-reports/` へ原子的に配置する。
+同じ秒の同時実行でも既存レポートを上書きせず、失敗時や空レポート時は成功扱いにしない。
 
 ## 読み方
 
@@ -48,7 +59,7 @@ launcher は `scripts/measure-token-usage.py` を呼び出し、既定では一�
 ## 限界
 
 - `cache_read_input_tokens` は課金上の重みが不明なので、内訳のまま表示し、加重しない
-- 画像の消費は寸法からの概算であり、請求値そのものではない
+- 画像の消費は現在の計測エンジンでは未計測である
 - MCP サーバごとのトークン消費は実測できない。分かるのは設定済みか、呼ばれたか、何回かまで
 - サブエージェント起動の固定コストは直接測定していない
 - 既定値は条件付きの目安であり、モデル・MCP 構成・常駐指示・並列数を変えたら再計測が要る

@@ -16,6 +16,7 @@ test_新パスの相対パスを返す() {
   assert_eq ".token-saver" "$(cts_base_rel)" "cts_base_rel"
   assert_eq ".token-saver/handoff" "$(cts_handoff_rel)" "cts_handoff_rel"
   assert_eq ".token-saver/installed.json" "$(cts_ledger_rel)" "cts_ledger_rel"
+  assert_eq ".token-saver/token-report.sh" "$(cts_token_report_rel)" "cts_token_report_rel"
 }
 
 test_旧パスの相対パスを返す() {

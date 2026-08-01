@@ -7,6 +7,8 @@
 #                                                 # <US> は 0x1f。理由は FS の定義を見よ。
 #   ledger.py set-flag   <ledger> <name> <0|1>
 #   ledger.py get-flag   <ledger> <name>          # 0 か 1 を出す
+#   ledger.py set-value  <ledger> token_report_source <value>
+#   ledger.py get-value  <ledger> token_report_source
 #   ledger.py check-writable <path>               # atomic write 前の安全確認
 #   ledger.py has-record <ledger> <skills|hooks|any>   # 記録が在れば 0、無ければ 1
 #
@@ -22,6 +24,7 @@
 #   skills            設置したスキル（名前・リンク先・リンクかコピーか）
 #   hooks             settings.local.json へ登録したコマンド文字列そのもの
 #   gitignore_created install.sh が .gitignore を新規作成したか
+#   token_report_source target-local entrypoint が呼ぶ source clone 側 launcher
 #
 # 台帳自身の置き場所は install.sh が決める（scripts/lib/paths.sh を正とする）。
 # .gitignore の対象であり、版管理へは入らない。
@@ -135,6 +138,7 @@ def has_record(path, kind):
         isinstance(data.get("skills"), list)
         or isinstance(data.get("hooks"), list)
         or "gitignore_created" in data
+        or isinstance(data.get("token_report_source"), str)
     )
 
 
@@ -244,6 +248,24 @@ def cmd_get_flag(path, name):
     return 0
 
 
+def cmd_set_value(path, name, value):
+    if name != "token_report_source":
+        return 64
+    data = load(path)
+    data[name] = value
+    save(path, data)
+    return 0
+
+
+def cmd_get_value(path, name):
+    if name != "token_report_source":
+        return 64
+    value = load(path).get(name)
+    if isinstance(value, str):
+        print(line_safe(value))
+    return 0
+
+
 def main(argv):
     if len(argv) < 3:
         sys.stderr.write("usage: ledger.py <command> <ledger> [args...]\n")
@@ -260,6 +282,10 @@ def main(argv):
             return cmd_set_flag(path, *rest)
         if cmd == "get-flag" and len(rest) == 1:
             return cmd_get_flag(path, rest[0])
+        if cmd == "set-value" and len(rest) == 2:
+            return cmd_set_value(path, *rest)
+        if cmd == "get-value" and len(rest) == 1:
+            return cmd_get_value(path, rest[0])
         if cmd == "check-writable" and not rest:
             check_writable(path)
             return 0

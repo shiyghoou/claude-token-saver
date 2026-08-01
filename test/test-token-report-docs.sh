@@ -23,6 +23,11 @@ _skill() {
   sed -n '1,260p' "$(_skill_path)"
 }
 
+_wave5_design() {
+  sed -n '1,220p' \
+    "$REPO_ROOT/docs/superpowers/specs/2026-08-02-wave5-token-report-design.md"
+}
+
 _doc_paths() {
   printf '%s\n' \
     "$REPO_ROOT/README.md" \
@@ -48,7 +53,7 @@ _assert_shared_contract() {
   esac
   label="$(basename "$doc_path")"
 
-  assert_contains "$body" "./scripts/token-report.sh" "$label launcher"
+  assert_contains "$body" "./.token-saver/token-report.sh" "$label launcher"
   assert_contains "$body" ".token-saver/token-reports/" "$label 保存先"
   assert_contains "$body" "--days" "$label days"
   assert_contains "$body" "--out" "$label out"
@@ -67,11 +72,42 @@ _assert_shared_contract() {
 test_token_report_SKILLがlauncherと保存先を案内する() {
   assert_file_exists "$(_skill_path)"
   skill="$(_skill)"
-  assert_contains "$skill" "./scripts/token-report.sh" "skill launcher"
-  assert_contains "$skill" "./scripts/token-report.sh --days 30" "skill days example"
-  assert_contains "$skill" "./scripts/token-report.sh --days 0 --all-projects" "skill all-projects example"
+  assert_contains "$skill" "./.token-saver/token-report.sh" "skill launcher"
+  assert_contains "$skill" "./.token-saver/token-report.sh --days 30" "skill days example"
+  assert_contains "$skill" "./.token-saver/token-report.sh --days 0 --all-projects" "skill all-projects example"
   assert_contains "$skill" ".token-saver/token-reports/" "skill 保存先"
   assert_contains "$skill" "scripts/measure-token-usage.py" "skill engine"
+}
+
+test_token_report_SKILLが有効なfrontmatterを持つ() {
+  python3 - "$(_skill_path)" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    lines = handle.read().splitlines()
+if not lines or lines[0] != "---":
+    raise SystemExit("frontmatter の開始区切りが無い")
+try:
+    end = lines.index("---", 1)
+except ValueError:
+    raise SystemExit("frontmatter の終了区切りが無い")
+values = {}
+for line in lines[1:end]:
+    if ":" not in line:
+        raise SystemExit("frontmatter が key: value 形式でない")
+    key, value = line.split(":", 1)
+    key = key.strip()
+    value = value.strip()
+    if not key or not value or key in values:
+        raise SystemExit("frontmatter の key/value が不正である")
+    values[key] = value
+if set(values) != {"name", "description"}:
+    raise SystemExit("frontmatter は name/description だけを持つ必要がある")
+if values["name"] != "token-report":
+    raise SystemExit("frontmatter name が token-report でない")
+PYEOF
+  assert_eq "0" "$?" "SKILL frontmatter"
 }
 
 test_token_report_SKILLが設定自動変更を指示しない() {
@@ -86,9 +122,23 @@ test_token_report_SKILLが設定自動変更を指示しない() {
 test_READMEがtoken_reportを実装済みと案内する() {
   readme="$(_readme)"
   assert_contains "$readme" "| 計測（token-report） | **実装済み** |" "README 状態表"
-  assert_contains "$readme" "./scripts/token-report.sh" "README launcher"
+  assert_contains "$readme" "./.token-saver/token-report.sh" "README launcher"
   assert_contains "$readme" ".token-saver/token-reports/" "README 保存先"
   assert_not_contains "$readme" "| 計測（token-report） | 未実装" "README token-report 未実装"
+}
+
+test_画像消費を現在未計測と全利用文書が明記する() {
+  expected="画像の消費は現在の計測エンジンでは未計測である"
+  readme="$(sed -n '1,360p' "$REPO_ROOT/README.md")"
+  skill="$(_skill)"
+  design="$(_design_token_report_section)"
+  wave5="$(_wave5_design)"
+  assert_contains "$readme" "$expected" "README image semantics"
+  assert_contains "$skill" "$expected" "SKILL image semantics"
+  assert_contains "$design" "$expected" "基本設計 image semantics"
+  assert_contains "$wave5" "$expected" "Wave5設計 image semantics"
+  assert_not_contains "$readme$skill$design$wave5" "画像の消費は寸法からの概算" \
+    "未実装の画像概算を実装済みと誤認させない"
 }
 
 test_token_reportの共有契約がREADME_SKILL_設計書で一致する() {

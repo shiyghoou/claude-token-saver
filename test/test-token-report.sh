@@ -64,10 +64,12 @@ rows.append({"type": "assistant", "timestamp": stamp(9), "sessionId": "session",
                  {"type": "tool_use", "name": "mcp__broken", "input": {}}]}})
 
 # id の無い usage 行。requestId と内容が同じ3行は代替キーで一度だけ数える。
+# 0 token では重複排除を外しても合計が変わらず、件数文言だけのテストに退行するため、
+# 合計へ影響する値を使う。
 for _ in range(3):
     rows.append({"type": "assistant", "timestamp": stamp(7), "sessionId": "session",
                  "requestId": "request-duplicate",
-                 "message": {"model": "claude-sonnet-5", "usage": usage(0, 0, 0, 0),
+                 "message": {"model": "claude-sonnet-5", "usage": usage(2, 20, 200, 3),
                              "content": []}})
 
 # toolUseResult の分類値、usage、prompt、content は出力してはいけない。
@@ -142,6 +144,8 @@ with open(os.path.join(plugins, "cache", "local", "outside.json"), "w") as fh:
     json.dump({"mcpServers": {"outside-server": {"command": "node"}}}, fh)
 with open(os.path.join(disabled, ".mcp.json"), "w") as fh:
     json.dump({"mcpServers": {"disabled-server": {"command": "node"}}}, fh)
+with open(os.path.join(repo, "relative-install", ".mcp.json"), "w") as fh:
+    json.dump({"mcpServers": {"relative-server": {"command": "node"}}}, fh)
 
 # --paths と project-key 照合用の実体。長い空白入りパスを別キーへ複製する。
 alt_project = os.path.join(config, "projects", key(repo))
@@ -216,21 +220,22 @@ PYEOF
 test_同一message_idの重複を一度だけ集計する() {
   _run_report --days 1 >/dev/null 2>&1
   report="$(_report)"
-  assert_contains "$report" "3,391" "重複排除後の合計"
+  assert_contains "$report" "3,616" "重複排除後の合計"
   assert_contains "$report" "重複排除した行: 1" "重複行数"
 }
 
 test_id無し行の重複を代替キーで抑える() {
   _run_report --days 1 >/dev/null 2>&1
   report="$(_report)"
-  assert_contains "$report" 'message.id' "代替キーの報告"
-  assert_contains "$report" "requestId" "id無し行の識別"
+  assert_contains "$report" "main 合計: **3,616**" "代替キー込みの正確な合計"
+  assert_contains "$report" 'message.id` を持たない usage 行: 3' "id無し行数"
+  assert_contains "$report" "代替キーで重複排除した行: 2" "代替キーの重複数"
 }
 
 test_subagentsの詳細usageを親の合計へ混ぜない() {
   _run_report --days 1 >/dev/null 2>&1
   report="$(_report)"
-  assert_not_contains "$report" "13,390" "親への二重計上"
+  assert_not_contains "$report" "13,615" "親への二重計上"
   assert_contains "$report" "subagents/" "subagents別枠"
 }
 
@@ -248,7 +253,7 @@ test_期間外の行を除外し_days_0で全期間を読む() {
   assert_not_contains "$recent" "77,707" "期間外の合計"
   _run_report --days 0 >/dev/null 2>&1
   all_time="$(_report)"
-  assert_contains "$all_time" "81,098" "全期間の合計"
+  assert_contains "$all_time" "81,323" "全期間の合計"
 }
 
 test_本文_prompt_tool結果_env_認証情報を出力しない() {
@@ -269,6 +274,8 @@ test_MCP設定と実利用の差分を報告する() {
   assert_contains "$report" "unknown_server" "未検出MCP"
   assert_not_contains "$report" "disabled-server" "無効プラグイン"
   assert_not_contains "$report" "outside-server" "プラグイン外参照"
+  assert_not_contains "$report" "relative-server" "相対installPath"
+  assert_not_contains "$report" "mcp__broken" "壊れたMCPツール名"
 }
 
 test_repo外のReadパスを隠す() {
@@ -310,7 +317,7 @@ test_CLAUDE_CONFIG_DIRと長い空白入りプロジェクトパスを扱う() {
   rm -rf "$FIXTURE_HOME/.claude/projects"
   CLAUDE_CONFIG_DIR_OVERRIDE="$FIXTURE_CONFIG" _execute_report --days 0 >/dev/null 2>&1
   report="$(_report)"
-  assert_contains "$report" "81,098" "CLAUDE_CONFIG_DIRの実データ"
+  assert_contains "$report" "81,323" "CLAUDE_CONFIG_DIRの実データ"
   assert_not_contains "$report" "フォールバック" "空白入りプロジェクトキー"
 }
 
@@ -320,8 +327,8 @@ test_サブディレクトリ実行でも最寄りのrepo_rootでproject_keyを�
   mkdir -p "$FIXTURE_REPO/nested/child"
   _execute_report_from "$FIXTURE_REPO/nested/child" --days 0 >/dev/null 2>&1
   report="$(_report)"
-  assert_contains "$report" "81,098" "対象repoのみの合計"
-  assert_not_contains "$report" "81,322" "fallbackで混ざる他project合計"
+  assert_contains "$report" "81,323" "対象repoのみの合計"
+  assert_not_contains "$report" "81,547" "fallbackで混ざる他project合計"
   assert_not_contains "$report" "other-project-model" "無関係projectのmodel"
   assert_not_contains "$report" "フォールバック" "subdir実行時の誤fallback"
 }
@@ -332,6 +339,149 @@ test_壊れたJSONLとcontent型違いでもトレースバックを出さない
   assert_eq "0" "$status" "壊れた入力でも終了コード"
   err="$(cat "$TEST_TMP/engine.err")"
   assert_not_contains "$err" "Traceback" "トレースバック"
+}
+
+test_非scalarのmessage_idと不正数値を安全に無視する() {
+  _fixture
+  project_dir="$(find "$FIXTURE_HOME/.claude/projects" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+  python3 - "$project_dir/session.jsonl" <<'PYEOF'
+import json
+import sys
+from datetime import datetime, timezone
+
+path = sys.argv[1]
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+rows = [
+    {"type": "assistant", "timestamp": stamp, "requestId": {"bad": "dict"},
+     "message": {"id": {"bad": "dict"}, "model": "safe-dict-id-model",
+                 "usage": {"input_tokens": 1, "cache_creation_input_tokens": 10,
+                           "cache_read_input_tokens": 100, "output_tokens": 1}, "content": []}},
+    {"type": "assistant", "timestamp": stamp, "requestId": ["bad", "list"],
+     "message": {"id": ["bad", "list"], "model": "safe-list-id-model",
+                 "usage": {"input_tokens": 2, "cache_creation_input_tokens": 20,
+                           "cache_read_input_tokens": 200, "output_tokens": 2}, "content": []}},
+    {"type": "assistant", "timestamp": stamp,
+     "message": {"id": "malformed-numbers", "model": "malformed-number-model",
+                 "usage": {"input_tokens": -1, "cache_creation_input_tokens": True,
+                           "cache_read_input_tokens": 3.5, "output_tokens": "9"}, "content": []}},
+]
+for bad in (-1, True, 1.5, "10"):
+    rows.append({"type": "user", "timestamp": stamp,
+                 "toolUseResult": {"agentType": "invalid-total-agent",
+                                   "resolvedModel": "invalid-total-model",
+                                   "totalTokens": bad,
+                                   "usage": {"input_tokens": 999, "output_tokens": 999}}})
+with open(path, "a", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
+PYEOF
+  _execute_report --days 0 >/dev/null 2>"$TEST_TMP/malformed.err"
+  status=$?
+  report="$(_report)"
+  err="$(cat "$TEST_TMP/malformed.err")"
+  assert_eq "0" "$status" "非scalar IDの終了コード"
+  assert_contains "$report" "main 合計: **81,659**" "有効なtokenだけの合計"
+  assert_contains "$report" "safe-dict-id-model" "dict ID行の有効usage"
+  assert_contains "$report" "safe-list-id-model" "list ID行の有効usage"
+  assert_not_contains "$report" "invalid-total-agent" "不正totalTokens"
+  assert_not_contains "$err" "Traceback" "非scalar IDのトレースバック"
+}
+
+test_表示メタデータとMarkdown表を安全化する() {
+  _fixture
+  project_dir="$(find "$FIXTURE_HOME/.claude/projects" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+  python3 - "$project_dir/session.jsonl" "$FIXTURE_REPO" <<'PYEOF'
+import json
+import sys
+from datetime import datetime, timezone
+
+path, repo = sys.argv[1:]
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+zero = {"input_tokens": 0, "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0, "output_tokens": 0}
+row = {"type": "assistant", "timestamp": stamp,
+       "message": {"id": "adversarial-metadata", "model": "model|PIPE_MODEL_SENTINEL",
+                   "usage": zero, "content": [
+           {"type": "tool_use", "name": "Agent",
+            "input": {"subagent_type": "../../PATH_AGENT_SENTINEL"}},
+           {"type": "tool_use", "name": "Agent", "input": {"subagent_type": ".."}},
+           {"type": "tool_use", "name": "Agent",
+            "input": {"subagent_type": "token=SECRET_AGENT_SENTINEL"}},
+           {"type": "tool_use", "name": "mcp__server|PIPE_MCP_SENTINEL__call", "input": {}},
+           {"type": "tool_use", "name": "mcp__<MCP_HTML_SENTINEL>__call", "input": {}},
+           {"type": "tool_use", "name": "Read",
+            "input": {"file_path": repo + "/safe|PIPE_PATH_SENTINEL.md"}},
+           {"type": "tool_use", "name": "Read",
+            "input": {"file_path": repo + "/safe[LINK_CELL_SENTINEL](target).md"}},
+           {"type": "tool_use", "name": "Read",
+            "input": {"file_path": repo + "/token=SECRET_PATH_SENTINEL.md"}},
+       ]}}
+results = [
+    {"type": "user", "timestamp": stamp,
+     "toolUseResult": {"agentType": "bad\nCONTROL_AGENT_SENTINEL",
+                       "resolvedModel": "/abs/PATH_MODEL_SENTINEL", "totalTokens": 1}},
+    {"type": "user", "timestamp": stamp,
+     "toolUseResult": {"agentType": "safe-reviewer",
+                       "resolvedModel": "sk-live-CREDENTIAL_MODEL_SENTINEL", "totalTokens": 1}},
+]
+with open(path, "a", encoding="utf-8") as handle:
+    for item in [row] + results:
+        handle.write(json.dumps(item) + "\n")
+PYEOF
+  _execute_report --days 0 --paths >/dev/null 2>"$TEST_TMP/safe.err"
+  report="$(_report)"
+  assert_contains "$report" 'safe\|PIPE_PATH_SENTINEL.md' "pipeを含むrepo内相対パス"
+  assert_contains "$report" 'safe\[LINK_CELL_SENTINEL\]\(target\).md' \
+    "Markdown link形を含むrepo内相対パス"
+  assert_contains "$report" '&lt;MCP_HTML_SENTINEL&gt;' "HTML形を含むMCP名"
+  assert_not_contains "$report" '[LINK_CELL_SENTINEL](target)' "Markdown link注入"
+  assert_not_contains "$report" '<MCP_HTML_SENTINEL>' "HTML tag注入"
+  assert_not_contains "$report" '| .. |' "path-like metadata"
+  for leaked in PIPE_MODEL_SENTINEL PATH_AGENT_SENTINEL SECRET_AGENT_SENTINEL \
+    PIPE_MCP_SENTINEL SECRET_PATH_SENTINEL CONTROL_AGENT_SENTINEL PATH_MODEL_SENTINEL \
+    CREDENTIAL_MODEL_SENTINEL; do
+    assert_not_contains "$report" "$leaked" "危険な表示値 $leaked"
+  done
+  assert_contains "$report" "plot-adversarial-reviewer" "安全なsubagent名"
+  assert_contains "$report" "example-server" "安全なMCP名"
+}
+
+test_project_directory_keyをレポートへ出さない() {
+  _fixture
+  raw_key="$(basename "$(find "$FIXTURE_HOME/.claude/projects" -mindepth 1 -maxdepth 1 -type d -print -quit)")"
+  [ -n "$raw_key" ] || _fail "project directory key fixture が空である"
+  _execute_report --days 0 >/dev/null 2>&1
+  report="$(_report)"
+  assert_not_contains "$report" "$raw_key" "raw project directory key"
+  assert_contains "$report" "走査したプロジェクト: 1 件" "project件数"
+}
+
+test_gitfileを持つlinked_worktreeのnested_cwdをrootにする() {
+  _fixture
+  rm -rf "$FIXTURE_REPO/.git"
+  printf 'gitdir: %s\n' "$TEST_TMP/opaque-gitdir" >"$FIXTURE_REPO/.git"
+  mkdir -p "$FIXTURE_REPO/nested/worktree-child"
+  _execute_report_from "$FIXTURE_REPO/nested/worktree-child" --days 0 \
+    >/dev/null 2>"$TEST_TMP/worktree.err"
+  report="$(_report)"
+  assert_contains "$report" "81,323" "linked worktreeの対象repo合計"
+  assert_not_contains "$report" "フォールバック" "gitfileの誤fallback"
+}
+
+test_default_fallbackをstderrとreportへpath安全に警告する() {
+  _fixture
+  original="$(find "$FIXTURE_HOME/.claude/projects" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+  raw_key="RAW-SECRET-PROJECT-KEY"
+  mv "$original" "$FIXTURE_HOME/.claude/projects/$raw_key"
+  _execute_report_from "$FIXTURE_REPO" --days 0 >/dev/null 2>"$TEST_TMP/fallback.err"
+  status=$?
+  report="$(_report)"
+  err="$(cat "$TEST_TMP/fallback.err")"
+  warning="警告: 現在のリポジトリに対応する記録を特定できないため、利用可能な全プロジェクトを集計した。"
+  assert_eq "0" "$status" "fallback終了コード"
+  assert_contains "$report" "$warning" "reportのfallback警告"
+  assert_contains "$err" "$warning" "stderrのfallback警告"
+  assert_not_contains "$report$err" "$raw_key" "fallback警告のraw key"
 }
 
 test_入力と設定とリポジトリを変更しない() {

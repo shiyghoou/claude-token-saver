@@ -975,3 +975,28 @@ test_導入先の余分な位置引数を拒否する() {
   assert_ne "0" "$rc" "余分な位置引数の終了コード"
   assert_contains "$out" "1つ" "余分な位置引数の出力"
 }
+
+test_token_reportの導入先entrypointを安全かつ冪等に外す() {
+  _setup_target
+  _run_install
+  entrypoint="$TARGET/.token-saver/token-report.sh"
+  assert_file_exists "$entrypoint" "導入先entrypoint"
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "1回目のuninstall終了コード"
+  assert_file_missing "$entrypoint" "取り外したentrypoint"
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "2回目のuninstall終了コード"
+  assert_file_missing "$entrypoint" "2回目も不在のentrypoint"
+}
+
+test_差し替えられたtoken_report_entrypointは消さない() {
+  _setup_target
+  _run_install
+  entrypoint="$TARGET/.token-saver/token-report.sh"
+  printf '#!/usr/bin/env bash\nprintf "利用者のentrypoint\\n"\n' >"$entrypoint"
+  _run_uninstall
+  assert_file_exists "$entrypoint" "差し替えられたentrypoint"
+  assert_contains "$(cat "$entrypoint")" "利用者のentrypoint" "差し替え内容"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "差し替え" "安全側の警告"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "取り残し台帳"
+}

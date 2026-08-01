@@ -60,15 +60,21 @@ python3 scripts/measure-token-usage.py --out report.md --paths
 データ源は `CLAUDE_CONFIG_DIR`（空なら `HOME/.claude`）配下の
 `projects/<project-key>/*.jsonl` とする。cwd に対応するディレクトリは、Claude Code
 のプロジェクトキー候補を複数生成して照合する。対応先が見つからず全件へフォール
-バックする場合は、標準エラーとレポート本文の双方で警告し、走査対象を列挙する。
+バックする場合は、標準エラーとレポート本文の双方で path-safe な汎用警告を出し、
+走査対象はディレクトリ名ではなく件数だけを示す。
 `--all-projects` は全件走査を明示する経路とする。
 
 ### ランチャ
 
-`scripts/token-report.sh` は計測器の薄いラッパーとする。呼び出し元の cwd に依存せず、
-スクリプト自身を基準にリポジトリルートを解決する。出力先を省略した場合は
+install は導入先の `.token-saver/token-report.sh` に managed entrypoint を設置する。
+entrypoint は導入先 root を明示し、source clone の `scripts/token-report.sh` を呼ぶ。
+source launcher は自身のディレクトリから `measure-token-usage.py` を解決し、計測・保存対象には
+entrypoint が明示した target root を使う。source clone を移動した場合は install の再実行を要する。
+
+出力先を省略した場合は
 `.token-saver/token-reports/YYYYMMDD-HHMMSS.md` を選び、同名があれば連番を付ける。
-既存ファイルを上書きしない。明示された `--out` の親ディレクトリは勝手に作らない。
+原子的な配置で既存ファイルを上書きせず、同じ秒の並行実行も別名で保存する。
+明示された `--out` の親ディレクトリは勝手に作らない。
 
 ランチャは計測器へ期間・表の上限・全プロジェクト・パス表示の指定を渡すが、集計
 ロジックを重複実装しない。レポートが非空で今回の実行により更新されたことを確認し、
@@ -111,8 +117,8 @@ python3 scripts/measure-token-usage.py --out report.md --paths
 内訳、キャッシュ再送、出力、素の合計、セッション・モデル・スキル・ツール別の
 集計、サブエージェントの利用状況、MCP サーバの検出と実利用の差分を出す。
 cache_read の課金上の重みは確定値として扱わず、重み付け値を出す場合も比較用の
-参考値と明記する。画像の消費や常駐コンテキストの比率は概算または候補値として
-明示し、一般法則と断定しない。
+参考値と明記する。画像の消費は現在の計測エンジンでは未計測である。
+常駐コンテキストの比率は概算または候補値と明示し、一般法則と断定しない。
 
 ## 秘密情報の境界
 

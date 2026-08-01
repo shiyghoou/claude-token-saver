@@ -63,6 +63,7 @@ SETTINGS="$TARGET/.claude/settings.local.json"
 BACKUP="$SETTINGS.cts-backup"
 GITIGNORE="$TARGET/.gitignore"
 LEDGER="$TARGET/$(cts_ledger_rel)"
+TOKEN_REPORT_ENTRYPOINT="$TARGET/$(cts_token_report_rel)"
 # 案内するパスは、実際に読んだ台帳のものでなければならない。旧パスへ
 # フォールバックしたときに新パスを案内すると、利用者が消す先を間違える。
 LEDGER_REL="$(cts_ledger_rel)"
@@ -124,11 +125,45 @@ have_ledger=0
 have_skill_record=0
 python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" any && have_ledger=1
 python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" skills && have_skill_record=1
+token_report_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" token_report_source)"
 
 # 外せなかった・触らなかった設置物が .claude/skills に残っているか。
 # 残っているなら .gitignore の除外を外してはならない（絶対パスのリンクが
 # 未追跡ファイルとして git に現れる）。
 skills_left=0
+token_report_left=0
+
+# --- 1b. target-local token-report entrypoint --------------------------------
+
+# shellcheck source=scripts/lib/token-report-entrypoint.sh
+. "$CTS_HOME/scripts/lib/token-report-entrypoint.sh" ||
+  die "scripts/lib/token-report-entrypoint.sh を読めない（クローンが不完全である）"
+
+if [ -n "$token_report_source" ]; then
+  if [ -L "$TOKEN_REPORT_ENTRYPOINT" ] ||
+     { [ -e "$TOKEN_REPORT_ENTRYPOINT" ] && [ ! -f "$TOKEN_REPORT_ENTRYPOINT" ]; }; then
+    warn "token-report entrypoint は導入後に差し替えられているので残す"
+    token_report_left=1
+  elif [ -f "$TOKEN_REPORT_ENTRYPOINT" ]; then
+    expected_entrypoint="$(mktemp "${TMPDIR:-/tmp}/cts-token-report-entrypoint.XXXXXX")" ||
+      die "entrypoint の所有権を検証する一時ファイルを作成できない"
+    cts_write_token_report_entrypoint "$expected_entrypoint" "$token_report_source" || {
+      rm -f "$expected_entrypoint"
+      die "entrypoint の所有権を検証できない"
+    }
+    if cmp -s "$expected_entrypoint" "$TOKEN_REPORT_ENTRYPOINT"; then
+      rm -f "$TOKEN_REPORT_ENTRYPOINT"
+      info "  token-report の入口を外した"
+    else
+      warn "token-report entrypoint は導入後に差し替えられているので残す"
+      token_report_left=1
+    fi
+    rm -f "$expected_entrypoint"
+  fi
+elif [ -e "$TOKEN_REPORT_ENTRYPOINT" ] || [ -L "$TOKEN_REPORT_ENTRYPOINT" ]; then
+  warn "台帳に token-report entrypoint の記録が無いため触らない"
+  token_report_left=1
+fi
 
 # --- 1. フックの登録解除 -----------------------------------------------------
 
@@ -250,8 +285,8 @@ fi
 # 未追跡ファイルとして git に現れ、利用者の作業を汚す。
 # ブロックは START/END マーカーで自分のものと確定できるため、台帳の有無には
 # 依存しない（推測ではない）。
-if [ "$skills_left" = 1 ]; then
-  warn ".claude/skills に設置物が残っているため .gitignore の除外を外していない"
+if [ "$skills_left" = 1 ] || [ "$token_report_left" = 1 ]; then
+  warn "管理対象の設置物が残っているため .gitignore の除外を外していない"
 elif [ -f "$GITIGNORE" ]; then
   python3 "$CTS_HOME/lib/gitignore-block.py" remove "$GITIGNORE"
   case "$?" in

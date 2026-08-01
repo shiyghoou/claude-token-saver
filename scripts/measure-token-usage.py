@@ -7,10 +7,12 @@ environment variables, or other secret-bearing content into the output.
 """
 
 import argparse
+import html
 import json
 import os
 import re
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -20,6 +22,17 @@ CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude"
 PROJECTS_DIR = os.path.join(CLAUDE_DIR, "projects")
 
 MODEL_SAFE_RE = re.compile(r"^[A-Za-z0-9._\[\]()<>-]+$")
+MARKDOWN_LINK_RE = re.compile(r"(!?)\[([^\]\r\n]*)\]\(([^)\r\n]*)\)")
+CREDENTIAL_RE = re.compile(
+    r"(?:^(?:sk|ghp|github_pat|xox[baprs])[-_]"
+    r"|^bearer[ ]+"
+    r"|(?:api[_-]?key|token|secret|password|credential|authorization)[ ]*[:=])",
+    re.IGNORECASE,
+)
+FALLBACK_WARNING = (
+    "警告: 現在のリポジトリに対応する記録を特定できないため、"
+    "利用可能な全プロジェクトを集計した。"
+)
 
 
 def fmt(value):
@@ -88,7 +101,7 @@ def project_key(path):
 def find_project_root(start="."):
     current = os.path.abspath(start)
     while True:
-        if os.path.isdir(os.path.join(current, ".git")) or os.path.isdir(
+        if os.path.exists(os.path.join(current, ".git")) or os.path.isdir(
             os.path.join(current, ".claude")
         ):
             return current
@@ -105,18 +118,49 @@ def project_path(*parts):
     return os.path.join(PROJECT_ROOT, *parts)
 
 
+def is_token_count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def safe_int(value):
-    if isinstance(value, bool):
+    if not is_token_count(value):
         return 0
-    if isinstance(value, int):
-        return value
-    return 0
+    return value
+
+
+def has_unsafe_text(text):
+    return any(
+        ord(ch) == 127 or unicodedata.category(ch) in ("Cc", "Cf", "Cs")
+        for ch in text
+    )
+
+
+def credential_shaped(text):
+    return CREDENTIAL_RE.search(text) is not None
+
+
+def path_shaped_metadata(text):
+    return (
+        text in (".", "..", "~")
+        or text.startswith(("./", "../", "~/"))
+        or os.path.isabs(text)
+        or re.match(r"^[A-Za-z]:[\\/]", text) is not None
+        or "://" in text
+    )
 
 
 def sanitize_name(name):
     if not isinstance(name, str) or not name:
         return None
-    if any(ch in name for ch in "\"'{}[]\\`") or any(ord(ch) < 32 for ch in name):
+    name = name.strip()
+    if not name or len(name) > 200:
+        return None
+    if (
+        any(ch in name for ch in "\"'{}[]\\`|/")
+        or has_unsafe_text(name)
+        or credential_shaped(name)
+        or path_shaped_metadata(name)
+    ):
         return None
     return name
 
@@ -125,7 +169,33 @@ def sanitize_model(name):
     if not isinstance(name, str) or not name:
         return None
     name = name.strip()
+    if credential_shaped(name) or has_unsafe_text(name) or path_shaped_metadata(name):
+        return None
     return name if MODEL_SAFE_RE.match(name) else None
+
+
+def dedup_scalar(value):
+    if isinstance(value, str) and value:
+        return ("str", value)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return ("int", value)
+    return None
+
+
+def fallback_message_key(entry, usage):
+    request_id = dedup_scalar(entry.get("requestId"))
+    timestamp = entry.get("timestamp")
+    if not isinstance(timestamp, str):
+        timestamp = None
+    return (
+        "fallback",
+        request_id,
+        timestamp,
+        safe_int(usage.get("input_tokens")),
+        safe_int(usage.get("cache_creation_input_tokens")),
+        safe_int(usage.get("cache_read_input_tokens")),
+        safe_int(usage.get("output_tokens")),
+    )
 
 
 def content_blocks(message):
@@ -248,19 +318,14 @@ def scan_transcripts(paths, since):
                 if entry.get("type") == "assistant" and isinstance(message, dict):
                     usage = message.get("usage")
                     if isinstance(usage, dict):
-                        key = message.get("id")
-                        if not key:
+                        message_id = dedup_scalar(message.get("id"))
+                        if message_id is None:
                             scan.no_message_id += 1
-                            key = (
-                                entry.get("requestId"),
-                                entry.get("timestamp"),
-                                usage.get("input_tokens"),
-                                usage.get("cache_creation_input_tokens"),
-                                usage.get("cache_read_input_tokens"),
-                                usage.get("output_tokens"),
-                            )
+                            key = fallback_message_key(entry, usage)
+                        else:
+                            key = ("id", message_id)
                         if key in seen_messages:
-                            if message.get("id"):
+                            if message_id is not None:
                                 scan.skipped_dupes += 1
                             else:
                                 scan.skipped_fallback_dupes += 1
@@ -298,8 +363,7 @@ def scan_transcripts(paths, since):
                 result = entry.get("toolUseResult")
                 if (
                     isinstance(result, dict)
-                    and isinstance(result.get("totalTokens"), int)
-                    and not isinstance(result.get("totalTokens"), bool)
+                    and is_token_count(result.get("totalTokens"))
                     and result.get("agentType")
                 ):
                     tokens = result["totalTokens"]
@@ -517,8 +581,32 @@ def mask_outside(path, roots):
     for root in roots:
         base = os.path.normpath(os.path.abspath(root))
         if target == base or target.startswith(base + os.sep):
-            return os.path.relpath(target, base)
+            relative = os.path.relpath(target, base)
+            if has_unsafe_text(relative) or credential_shaped(relative):
+                return "(非表示)"
+            return relative
     return "(repo外)"
+
+
+def markdown_cell(value):
+    text = str(value)
+    if has_unsafe_text(text) or credential_shaped(text):
+        return "(非表示)"
+    text = html.escape(text, quote=False)
+    text = text.replace("\\", "\\\\").replace("`", "\\`").replace("|", "\\|")
+
+    def escape_link(match):
+        image = "\\!" if match.group(1) else ""
+        return (
+            image
+            + "\\["
+            + match.group(2)
+            + "\\]\\("
+            + match.group(3)
+            + "\\)"
+        )
+
+    return MARKDOWN_LINK_RE.sub(escape_link, text)
 
 
 def table(headers, rows):
@@ -529,7 +617,7 @@ def table(headers, rows):
         "|" + "|".join(["---"] * len(headers)) + "|",
     ]
     for row in rows:
-        out.append("| " + " | ".join(str(cell) for cell in row) + " |")
+        out.append("| " + " | ".join(markdown_cell(cell) for cell in row) + " |")
     out.append("")
     return out
 
@@ -567,9 +655,9 @@ def build_report(args, scan, project_dirs, since):
             f"（うち usage あり: {fmt(scan.no_timestamp_with_usage)}）"
         )
     if scan.scanned_dirs:
-        add("- 走査したプロジェクトディレクトリ: " + ", ".join(scan.scanned_dirs))
+        add(f"- 走査したプロジェクト: {len(scan.scanned_dirs)} 件")
     if scan.fell_back:
-        add("- 警告: 対応する project key が見つからず全プロジェクトへフォールバックした。")
+        add(f"- {FALLBACK_WARNING}")
     add("")
 
     add("## 実測合計")
@@ -604,7 +692,7 @@ def build_report(args, scan, project_dirs, since):
         key=lambda item: -scan.agent_tokens.get(item, 0),
     ):
         models = ", ".join(
-            f"{model}({count})"
+            f"{model} × {count}"
             for model, count in scan.agent_models.get(subagent, Counter()).most_common(3)
         ) or "-"
         agent_rows.append(
@@ -658,7 +746,7 @@ def build_report(args, scan, project_dirs, since):
     if unknown:
         add("- 設定から検出できていない接頭辞:")
         for prefix, count in top_rows(unknown, args.top):
-            add(f"  - {prefix}: {fmt(count)} 回")
+            add(f"  - {markdown_cell(prefix)}: {fmt(count)} 回")
     add("")
 
     if args.paths:
@@ -761,6 +849,8 @@ def main():
     scan.sub_mcp_calls = scan_mcp_tool_names(sub_paths, since)
     scan.scanned_dirs = [os.path.basename(path) for path in project_dirs]
     scan.fell_back = fell_back
+    if fell_back:
+        print(FALLBACK_WARNING, file=sys.stderr)
     report = build_report(args, scan, [PROJECT_ROOT], since)
 
     if args.out:

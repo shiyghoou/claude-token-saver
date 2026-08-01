@@ -58,7 +58,7 @@ jobs:
   #
   # test/run.sh 自体が mapfile を使うため、スイートを 3.2 では回せない。
   # スイート側は静的検査（ガード無しの配列展開の検出）で守り、ここでは実際の
-  # bash 3.2 でフックを end-to-end に走らせて、その静的検査が現実と対応している
+  # bash 3.2 でフックと token-report launcher を end-to-end に走らせ、静的検査が現実と対応している
   # ことを確かめる。docker が無ければ落とす（黙って飛ばすと、この防御が
   # 「あるつもり」のまま消える）。
   bash32:
@@ -70,5 +70,5 @@ jobs:
       - name: docker があることを確かめる
         run: docker --version
 
-      - name: bash 3.2 でフックを end-to-end 実行する
+      - name: bash 3.2 でフックとtoken-reportをend-to-end実行する
         run: bash test/bash32-e2e.sh

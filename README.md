@@ -40,7 +40,8 @@ cd <導入したいリポジトリ>
    `.cts-backup` がまだ無ければ書き換え前の内容を退避する（新規作成時は対象なし）
 4. `.gitignore` の `# claude-token-saver` ブロックを（再）生成する。中身は `.token-saver/`、
    および**実際に設置したスキル**のリンクパス
-5. 設置したものを `.token-saver/installed.json`（台帳）へ記録する
+5. 導入先から計測を実行する `.token-saver/token-report.sh` を設置する
+6. 設置したものを `.token-saver/installed.json`（台帳）へ記録する
 
 ### 配置
 
@@ -50,6 +51,8 @@ cd <導入したいリポジトリ>
     handoff/
       pending/           ← 未消費の引き継ぎ
       consumed/          ← 消費済みの引き継ぎ（記録として残る）
+    token-report.sh      ← 導入先を計測 root に固定する entrypoint
+    token-reports/       ← 計測レポート（初回の計測成功時に作る）
     installed.json       ← 何を設置したかの台帳
   .claude/
     settings.local.json  ← フックの登録先。Claude Code がパスを決めるため動かせない
@@ -112,15 +115,20 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 導入後は launcher から回す。
 
 ```bash
-./scripts/token-report.sh
-./scripts/token-report.sh --days 30
-./scripts/token-report.sh --days 0 --all-projects
+./.token-saver/token-report.sh
+./.token-saver/token-report.sh --days 30
+./.token-saver/token-report.sh --days 0 --all-projects
 ```
 
 既定では検証済みの Markdown レポートを `.token-saver/token-reports/` へ日時付きで保存する。
 別の保存先が要るときだけ `--out <path>` を付ける。集計エンジンは `scripts/measure-token-usage.py` で、
 トランスクリプト・設定・repository を読み取り専用で扱う。
 このコマンドは設定ファイルやフックを自動変更しない。
+
+導入先の entrypoint は、install 元クローンにある `scripts/token-report.sh` を呼ぶ。source clone
+側は launcher と engine の実体だけを提供し、計測対象 root と既定の保存先は entrypoint のある
+導入先に固定される。source clone を移動した場合は、導入先で `install.sh` を再実行して entrypoint
+を更新する。
 
 主なオプション:
 
@@ -147,7 +155,7 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 - 同じ `message.id` の usage は一度だけ数える。`message.id` が無い行は `requestId` と usage 内容で代替キーを作る
 - 現在のリポジトリに対応する project key が見つからないときは、警告付きで全プロジェクトへフォールバックする
 - `cache_read_input_tokens` は課金上の重みが不明なので、内訳のまま扱い、加重しない
-- 画像の消費は寸法からの概算である
+- 画像の消費は現在の計測エンジンでは未計測である
 - MCP サーバごとのトークン消費は実測できない。分かるのは設定済みか、呼ばれたか、何回かまでである
 - Stop フックによる切り時提案と calibrate は未実装で、このコマンドが設定を書き換える段階ではない
 - 詳しい使い方は [`skills/token-report/SKILL.md`](skills/token-report/SKILL.md)
@@ -195,8 +203,8 @@ fail-closed により利用者のフックが残ったまま外せなくなる�
 ### 依存
 
 - `bash`
-- `python3` — `install.sh` / `uninstall.sh` のみ。`settings.local.json` を壊さずに編集するために使う。
-  **フック本体は python3 に依存しない。**
+- `python3` — `install.sh` / `uninstall.sh` と token-report の計測エンジンで使う。
+  **SessionStart フック本体は python3 に依存しない。**
 
 ## 引き継ぎ（session-handoff）
 
@@ -310,7 +318,7 @@ SKILL.md 側は同じ内容を重複させず、フック出力を正とする�
 
 - **サブエージェント起動時の固定コストは直接測定していない。** メインセッション開始時の中央値を代理指標として用いている。
 - `cache_read_input_tokens` は課金上の重みが不明である。内訳のまま扱い、加重しない。
-- 画像の消費は寸法からの概算である。
+- 画像の消費は現在の計測エンジンでは未計測である。
 - **MCP サーバごとのトークン消費は実測できない。** ツール定義は常駐プロンプト側に載るため、
   トランスクリプトからサーバ単位に切り分けられない。「呼び出し実績ゼロ」という実測可能な根拠を主軸に据える。
 - **常駐する指示ファイルやスキル一覧を削る施策は効果が小さい。** 実測ではこれらの合計が
