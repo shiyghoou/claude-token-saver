@@ -4,7 +4,7 @@
 
 **Goal:** Issue #11の波4として、現行実装の保証範囲に合わせて説明を修正し、CIでスキップ防止・Shell構文検査・ShellCheckを常時実行する。
 
-**Architecture:** ランタイムコードは変更せず、説明とGitHub Actionsの検査ゲートだけを更新する。CIが検査するファイル集合は `git ls-files -z -- '*.sh'` に統一し、構文検査とShellCheckで同じ対象を個別に検査する。既存のbash 3.2 E2Eジョブは独立した互換性検証として維持する。
+**Architecture:** ランタイムコードは変更せず、説明とGitHub Actionsの検査ゲートだけを更新する。構文検査は `git ls-files -z -- '*.sh'` でGit管理下の全シェルスクリプトを対象にし、ShellCheckは `install.sh`、`uninstall.sh`、`scripts/` 配下の実装スクリプトだけを `--severity=error` で対象にする。既存のbash 3.2 E2Eジョブは独立した互換性検証として維持する。
 
 **Tech Stack:** Bash、GitHub Actions、Ubuntu runner、ShellCheck、既存の `bash test/run.sh` テストランナー。
 
@@ -12,7 +12,8 @@
 
 - Issue #11作成後の `issue-11-wave4-docs-ci` ブランチだけで作業し、mainへ直接編集しない。
 - 製品ランタイムの挙動、テストランナーの検出ロジック、新機能は変更しない。
-- CIではGit管理下の全 `*.sh` を `bash -n` とShellCheckの対象にする。
+- CIではGit管理下の全 `*.sh` をファイル単位の `bash -n` 対象にする。
+- CIでは `install.sh`、`uninstall.sh`、`scripts/` 配下の実装 `*.sh` をShellCheck `--severity=error` の対象にする。
 - CIのテスト実行には `CTS_NO_SKIP=1` を設定する。
 - handoff注入上限は1ファイル8KB、合計32KB、最大5ファイルであり、現行説明と一致するため変更しない。
 - 各実装単位をコミットし、PR作成後のマージはユーザーへ依頼する。
@@ -71,7 +72,7 @@ Expected: 現行の全シェルスクリプトで終了コード0になる。失
 
 - [ ] **Step 4: CIにShellCheckの導入と実行を追加する**
 
-次の2ステップを構文検査の後、テスト実行の前に追加する。
+次の2ステップを構文検査の後、テスト実行の前に追加する。ShellCheckはテストケースではなく、製品の導入・削除・handoff実装を対象にする。
 
 ```yaml
       - name: ShellCheckを導入する
@@ -82,10 +83,11 @@ Expected: 現行の全シェルスクリプトで終了コード0になる。失
 
       - name: ShellCheckを実行する
         run: |
-          git ls-files -z -- '*.sh' | xargs -0 shellcheck --shell=bash
+          git ls-files -z -- 'install.sh' 'uninstall.sh' 'scripts/' |
+            xargs -0 shellcheck --shell=bash --severity=error
 ```
 
-ShellCheckの警告を根拠なく除外せず、既存コードの実際の指摘が出た場合はその指摘を確認して最小限の修正または正当な行内注記を行う。
+ShellCheckの対象をテストファイルへ広げず、既存のwarning/infoを無根拠に抑制しない。`--severity=error` は実装スクリプトのerrorだけをCIの失敗条件にするための明示的な方針である。
 
 - [ ] **Step 5: テストステップへ `CTS_NO_SKIP=1` を設定する**
 
@@ -229,10 +231,11 @@ Run:
 
 ```bash
 shellcheck --version
-git ls-files -z -- '*.sh' | xargs -0 shellcheck --shell=bash
+git ls-files -z -- 'install.sh' 'uninstall.sh' 'scripts/' |
+  xargs -0 shellcheck --shell=bash --severity=error
 ```
 
-Expected: ShellCheckが利用できる環境では非ゼロ終了がなく、警告を隠すための無根拠な除外がない。ローカル環境にShellCheckが無い場合は、CIへプッシュして同じコマンドの結果を取得するまで成功を主張しない。
+Expected: ShellCheckが利用できる環境では実装スクリプトのerrorがなく、警告を隠すための無根拠な除外がない。ローカル環境にShellCheckが無い場合は、CIへプッシュして同じコマンドの結果を取得するまで成功を主張しない。
 
 - [ ] **Step 4: 差分と作業ツリーを確認する**
 
@@ -265,7 +268,7 @@ Issue #11のWave4差分を敵対的にレビューしてください。
 1. README・コメントが現行実装より強い保証を主張していないか。
 2. CTS_NO_SKIP=1 が通常CIのテスト実行へ実際に適用されるか。
 3. bash -n がGit管理下の全シェルスクリプトをファイル単位で検査するか。
-4. ShellCheckの対象漏れ、失敗を成功扱いにする経路、無根拠な除外がないか。
+4. ShellCheckがinstall.sh、uninstall.sh、scripts/配下の実装スクリプトを対象にし、errorの失敗を成功扱いにする経路や無根拠な除外がないか。
 5. ランタイム挙動やテストロジックを意図せず変更していないか。
 重大度をCritical/Major/Minorで示し、指摘なしの場合も理由付きで明記してください。
 ```
