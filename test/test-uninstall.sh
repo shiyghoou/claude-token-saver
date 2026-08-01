@@ -881,6 +881,8 @@ test_旧台帳は読まれたのち消費される() {
   mkdir -p "$TARGET/.claude/.token-saver"
   mv "$TARGET/.token-saver/installed.json" \
      "$TARGET/.claude/.token-saver/installed.json"
+  # rootで実行すると所有者権限により444でも書き込みが成功し得る。
+  # このテストの読み取り専用検証は、通常ユーザーの権限で実行した結果を前提とする。
   chmod 444 "$TARGET/.claude/.token-saver/installed.json"
   _run_uninstall
   chmod 755 "$TARGET/.claude/.token-saver" 2>/dev/null || true

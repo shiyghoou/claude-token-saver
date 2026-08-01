@@ -13,7 +13,7 @@
 #
 # ここで bash 3.2 の実機確認が通るのは scripts/handoff-check.sh だけである。
 # install.sh / uninstall.sh はここでは一切走らせていない。両者は python3 を
-# 呼ぶが、`bash:3.2` イメージ（Debian ベースの最小構成）には python3 が入って
+# 呼ぶが、`bash:3.2` イメージ（Alpine/musl ベースの最小構成）には python3 が入って
 # おらず、確認しようとしても「python3 が必要である」で即 die する。
 # フックだけが対象なのは手抜きではなく、フックだけが python3 に依存しない
 # 設計だからである（install.sh 冒頭のコメント参照）。install.sh /
