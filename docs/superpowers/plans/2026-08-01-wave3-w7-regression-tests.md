@@ -183,24 +183,28 @@ Expected:対象テストPASS。
 ### Task 5: D1b既存テストの変異検証
 
 **Files:**
-- Verify only: `test/test-uninstall.sh:test_同じ接頭辞のユーザーのコメント行を誤認しない`
+- Modify: `test/test-uninstall.sh:test_同じ接頭辞のユーザーのコメント行を誤認しない`
 - Verify only: `lib/gitignore-block.py:find_blocks`
 
 **Interfaces:**
 - Consumes: `GITIGNORE_START`、既存のinstall→uninstall往復fixture、`.gitignore`内容assert。
 - Produces: D1bを重複テストなしで守れている証跡。
 
-- [ ] **Step 1: 既存テストを単独実行する**
+- [ ] **Step 1: 既存テストへ管理ブロックの削除assertを追加する**
+
+同じinstall→uninstall往復fixtureへ、`GITIGNORE_START`と`GITIGNORE_END`がuninstall後に残っていないことをassertする。利用者のコメント・他のignore行の保持assertはそのまま残し、D1bの重複テストは作らない。
+
+- [ ] **Step 2: 現行実装でGREENを確認する**
 
 Run: `bash test/run.sh uninstall`
 
-Expected: `test_同じ接頭辞のユーザーのコメント行を誤認しない`がPASSし、利用者のコメント・他のignore行が残る。
+Expected: `test_同じ接頭辞のユーザーのコメント行を誤認しない`がPASSし、利用者のコメント・他のignore行を残したまま管理ブロックだけが消える。
 
-- [ ] **Step 2: scratch mutationでREDを確認する**
+- [ ] **Step 3: scratch mutationでREDを確認する**
 
-完全コピー内の`lib/gitignore-block.py:find_blocks`で、`s == START`を` s.startswith(START)`相当へ変える。既存テストが利用者コメント行の消失または往復後の内容不一致でFAILすることを確認する。
+完全コピー内の`lib/gitignore-block.py:find_blocks`で、`s == START`を` s.startswith("# claude-token-saver")`相当へ変える。既存テストが管理ブロックの残存でFAILすることを確認する。
 
-- [ ] **Step 3: GREEN結果を再確認する**
+- [ ] **Step 4: GREEN結果を再確認する**
 
 Run: `bash test/run.sh uninstall`
 

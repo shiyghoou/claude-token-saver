@@ -13,7 +13,7 @@
 3. installの旧パス移行が、ドットで始まるpendingファイルを取りこぼさないことを固定する。
 4. uninstallのテスト自身が、installで生成される`settings.local.json`を前提としていることを明示し、installが生成を止めた回帰を無検証で通さない。
 
-`.gitignore`マーカーの前方一致誤認（D1b）は、現行の`test/test-uninstall.sh:test_同じ接頭辞のユーザーのコメント行を誤認しない`が、利用者行を保持したinstall→uninstall往復として既に実証している。重複テストは追加せず、既存テストをW3-7の完了条件に含める。
+`.gitignore`マーカーの前方一致誤認（D1b）は、現行の`test/test-uninstall.sh:test_同じ接頭辞のユーザーのコメント行を誤認しない`を強化する。利用者行と他のignore行を保持するだけでなく、install→uninstall後に管理ブロックのSTART/ENDが消えていることも同じ往復でassertする。重複テストは追加しない。
 
 非目的は次のとおりである。
 
@@ -44,15 +44,19 @@
 
 `test/test-uninstall.sh:test_残った_settings_は妥当な_JSON_である`で、`_run_install`直後に`settings.local.json`の存在をassertする。その後のuninstall後検査は、既存の「空なら削除される」仕様を維持するため条件付きのままにする。
 
+### D1b: 既存の前方一致回帰テストを強化する
+
+既存の`test_同じ接頭辞のユーザーのコメント行を誤認しない`へ、管理ブロックのSTART/ENDがuninstall後に残っていないことをassertする。利用者コメントを起点に管理ブロックまでを誤って1区間とする変異では、このassertがFAILするため、同じfixtureで完全一致判定と削除結果を同時に検証できる。
+
 ## テストと検証
 
 実装前に追加テストを現行コードへ適用して対象テストを実行し、テスト記述が誤っていないことを確認する。実装コードは変更しないため、未固定経路の「現行コードで緑になる」状態を確認したうえで、scratch copy内の対象実装を意図的に弱め、各追加テストが赤くなることを確認する。
 
 実装後は次を確認する。
 
-- `bash test/run.sh test/test-handoff-consume.sh`
-- `bash test/run.sh test/test-install.sh`
-- `bash test/run.sh test/test-uninstall.sh`
+- `bash test/run.sh handoff-consume`
+- `bash test/run.sh install`
+- `bash test/run.sh uninstall`
 - `bash test/run.sh`
 - `bash -n test/test-handoff-consume.sh test/test-install.sh test/test-uninstall.sh`
 - `git diff --check`
