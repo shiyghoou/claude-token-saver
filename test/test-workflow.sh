@@ -50,20 +50,45 @@ test_ShellCheck対象がBashスクリプトだけを含む() {
     "scripts/libのShellCheck対象を維持する"
 }
 
-test_Python互換性CIが固定イメージで読み取り専用スモークを実行する() {
-  local workflow
-  if ! workflow="$(cat "$REPO_ROOT/.github/workflows/test.yml")"; then
-    _fail "test.ymlの読み込みに失敗した"
+_python_compatibility_job() {
+  awk '
+    /^  python-compatibility:$/ { inside = 1 }
+    inside && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  python-compatibility:" { exit }
+    inside { print }
+  ' "$REPO_ROOT/.github/workflows/test.yml"
+}
+
+test_Python互換性CIがjob内で固定イメージの読み取り専用スモークを実行する() {
+  local job
+  if ! job="$(_python_compatibility_job)"; then
+    _fail "python-compatibility jobの抽出に失敗した"
   fi
 
-  assert_contains "$workflow" "python-compatibility:" \
+  assert_contains "$job" "python-compatibility:" \
     "Python互換性の独立job"
-  assert_contains "$workflow" "python:3.6.15-slim-buster" \
+  assert_contains "$job" "python:3.6.15-slim-buster" \
     "Python 3.6の固定公式イメージ"
-  assert_contains "$workflow" "python:3.8.20-slim-bookworm" \
+  assert_contains "$job" "python:3.8.20-slim-bookworm" \
     "Python 3.8の固定公式イメージ"
-  assert_contains "$workflow" "readonly" \
+  assert_contains "$job" "target=/work,readonly" \
     "リポジトリの読み取り専用マウント"
-  assert_contains "$workflow" "python -B test/python-compatibility.py" \
+  assert_contains "$job" "--workdir /work" \
+    "コンテナの作業ディレクトリ"
+  assert_contains "$job" "docker run --rm" \
+    "使い捨てコンテナの実行"
+  assert_contains "$job" "python -B test/python-compatibility.py" \
     "Python互換性スモークの実行"
+  assert_not_contains "$job" "|| true" \
+    "docker失敗をtrueで握り潰さない"
+  assert_not_contains "$job" "|| :" \
+    "docker失敗をno-opで握り潰さない"
+  assert_not_contains "$job" "|| exit 0" \
+    "docker失敗を成功終了へ変えない"
+  assert_not_contains "$job" "; true" \
+    "docker失敗の直後に成功終了へ変えない"
+  assert_not_contains "$job" "set +e" \
+    "docker失敗をerrexit無効化で握り潰さない"
+  if printf '%s\n' "$job" | grep -Eq "^[[:space:]]*continue-on-error:[[:space:]]*[\"']?true[\"']?([[:space:]]*(#.*)?)?$"; then
+    _fail "python-compatibility jobでcontinue-on-error: trueを許可しない"
+  fi
 }
