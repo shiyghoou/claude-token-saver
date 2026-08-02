@@ -10,6 +10,10 @@ test_ShellCheck対象がBashスクリプトだけを含む() {
   assert_not_contains "$workflow" \
     "git ls-files -z -- 'install.sh' 'uninstall.sh' 'scripts/' |" \
     "ShellCheck対象にscripts全体を渡さない"
+  assert_not_contains "$workflow" "'scripts/'" \
+    "ShellCheck対象にscriptsディレクトリ全体を渡さない"
+  assert_count 1 "$workflow" "shellcheck --shell=bash --severity=error" \
+    "対象ファイルを検査するShellCheck呼び出し数"
 
   selected="$(git -C "$REPO_ROOT" ls-files -z -- \
     'install.sh' 'uninstall.sh' 'scripts/*.sh' 'scripts/**/*.sh' | tr '\0' '\n')"
