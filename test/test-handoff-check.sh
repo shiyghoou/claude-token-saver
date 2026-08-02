@@ -307,7 +307,7 @@ test_区切り属性は引用符タグ記号空白アンパサンドとバック
   _setup_project
   local name expected tag
   name='a"b<c>d & \ 日本語.md'
-  expected='a%22b%3Cb%3Ed%20%26%20%5C%E6%97%A5%E6%9C%AC%E8%AA%9E.md'
+  expected='a%22b%3Cc%3Ed%20%26%20%5C%20%E6%97%A5%E6%9C%AC%E8%AA%9E.md'
   _write_pending "$name" "本文"
   _run_hook "$(_startup_payload)"
   tag="$(printf '%s\n' "$HOOK_OUT" | grep '^<handoff:' | head -n 1)"
