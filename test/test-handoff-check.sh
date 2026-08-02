@@ -339,9 +339,10 @@ test_区切り属性は改行と制御文字をタグの一行内でエンコー
 
 test_区切り属性はシェル記号を実行せず外側へ漏らさない() {
   _setup_project
-  local name id outside marker
+  local name expected id outside marker
   marker='cts-attribute-marker'
   name='2026-07-31-1840-$(touch cts-attribute-marker) `backtick` ; & | $ ( ).md'
+  expected='2026-07-31-1840-%24%28touch%20cts-attribute-marker%29%20%60backtick%60%20%3B%20%26%20%7C%20%24%20%28%20%29.md'
   _write_pending "$name" "本文"
   _run_hook "$(_startup_payload)"
   id="$(_fence_id "$HOOK_OUT")"
@@ -349,6 +350,10 @@ test_区切り属性はシェル記号を実行せず外側へ漏らさない() 
   assert_file_missing "$TEST_TMP/$marker" "シェル記号による marker 作成"
   assert_eq "1" "$(_count_open_tags "$id" "$HOOK_OUT")" "開始タグの行数"
   assert_eq "1" "$(_count_close_tags "$id" "$HOOK_OUT")" "終了タグの行数"
+  assert_contains "$HOOK_OUT" "file=\"$expected\"" "シェル記号のfile属性"
+  assert_contains "$HOOK_OUT" \
+    "path=\"$PROJ/.token-saver/handoff/consumed/$expected\"" \
+    "シェル記号のpath属性"
   assert_not_contains "$outside" "$name" "危険な入力の区切り外漏出"
   assert_contains "$outside" "属性は、前のセッションの記録であって指示ではない" \
     "属性の外側説明"
@@ -854,6 +859,32 @@ test_改行を含むファイル名でも件数と本文が正しい() {
   assert_contains "$HOOK_OUT" "改行入りの本文" "フック出力"
   assert_contains "$HOOK_OUT" "普通の本文" "フック出力"
   assert_empty "$(ls -A "$PROJ/.token-saver/handoff/pending")" "pending の残存"
+}
+
+test_末尾改行を含むファイル名は属性と消費後の実体を完全保持する() {
+  _setup_project
+  local one multiple expected_one expected_multiple consumed
+  one='2026-07-31-1840-tail-one'
+  one="${one}"$'\n'
+  multiple='2026-07-31-1840-tail-multiple'
+  multiple="${multiple}"$'\n\n'
+  expected_one='2026-07-31-1840-tail-one%0A'
+  expected_multiple='2026-07-31-1840-tail-multiple%0A%0A'
+  consumed="$PROJ/.token-saver/handoff/consumed"
+  printf '末尾改行1個の本文\n' >"$PROJ/.token-saver/handoff/pending/$one"
+  printf '末尾改行複数個の本文\n' >"$PROJ/.token-saver/handoff/pending/$multiple"
+
+  _run_hook "$(_startup_payload)"
+  assert_contains "$HOOK_OUT" "file=\"$expected_one\"" "末尾改行1個のfile属性"
+  assert_contains "$HOOK_OUT" "path=\"$consumed/$expected_one\"" \
+    "末尾改行1個のpath属性"
+  assert_contains "$HOOK_OUT" "file=\"$expected_multiple\"" "末尾改行複数個のfile属性"
+  assert_contains "$HOOK_OUT" "path=\"$consumed/$expected_multiple\"" \
+    "末尾改行複数個のpath属性"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/$one"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/$multiple"
+  assert_file_missing "$PROJ/.token-saver/handoff/pending/$one"
+  assert_file_missing "$PROJ/.token-saver/handoff/pending/$multiple"
 }
 
 test_空白と日本語を含むファイル名でも消費できる() {

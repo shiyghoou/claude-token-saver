@@ -112,7 +112,11 @@ escaped_links=()
 
 for f in ${entries[@]+"${entries[@]}"}; do
   if [ -L "$f" ]; then
-    target="$(cts_resolve_path "$f" 2>/dev/null)" || target=""
+    if cts_resolve_path "$f" 2>/dev/null; then
+      target="$CTS_RESOLVED_PATH"
+    else
+      target=""
+    fi
     if [ -z "$target" ] || { [ ! -e "$target" ] && [ ! -L "$target" ]; }; then
       broken_links+=("$f")
       continue
@@ -205,7 +209,11 @@ _stage_file() {
     # 「このリンクのclaim先」と「リンクが指す実体」を区別する必要がある。
     src_real="$src"
   else
-    src_real="$(cts_resolve_path "$src" 2>/dev/null)" || src_real="$src"
+    if cts_resolve_path "$src" 2>/dev/null; then
+      src_real="$CTS_RESOLVED_PATH"
+    else
+      src_real="$src"
+    fi
   fi
 
   # 相対シンボリックリンクは pending から inflight へ移すと解決先が変わる。
@@ -216,10 +224,12 @@ _stage_file() {
   CTS_IN_PROGRESS_STAGE=""
   CTS_IN_PROGRESS_SNAPSHOT=""
   if [ "$read_body" -eq 1 ] && [ -L "$src" ]; then
-    read_source="$(cts_resolve_path "$src" 2>/dev/null)" || {
+    if cts_resolve_path "$src" 2>/dev/null; then
+      read_source="$CTS_RESOLVED_PATH"
+    else
       CTS_STAGE_KIND="リンク切れ"
       read_source=""
-    }
+    fi
     if [ -n "$read_source" ]; then
       if [ ! -e "$read_source" ] && [ ! -L "$read_source" ]; then
         CTS_STAGE_KIND="リンク切れ"
@@ -258,7 +268,11 @@ _stage_file() {
 
   if [ "$read_body" -eq 1 ] && [ -z "$CTS_STAGE_KIND" ]; then
     if [ -n "$read_source" ]; then
-      target="$(cts_resolve_path "$read_source" 2>/dev/null)" || target=""
+      if cts_resolve_path "$read_source" 2>/dev/null; then
+        target="$CTS_RESOLVED_PATH"
+      else
+        target=""
+      fi
       if [ -z "$target" ] || { [ ! -e "$target" ] && [ ! -L "$target" ]; }; then
         CTS_STAGE_KIND="リンク切れ"
       elif ! cts_path_is_within "$target" "$handoff_real"; then
@@ -497,7 +511,8 @@ done
 # safe byte 以外を %XX へエンコードし、開始タグを割れない1行の記録として扱う。
 _open_tag() {
   local name safe_name safe_path
-  name="$(basename -- "$1" 2>/dev/null)" || name=""
+  cts_path_parts "$1"
+  name="$CTS_PATH_BASENAME"
   safe_name="$(cts_encode_attribute "$name" 2>/dev/null)" || safe_name=""
   safe_path="$(cts_encode_attribute "$2" 2>/dev/null)" || safe_path=""
   printf '<handoff:%s file="%s" path="%s">\n' \
@@ -530,7 +545,8 @@ printf 'フック自身の行にファイル名やパスが現れることはな
 
 # ファイル名の昇順＝時刻の昇順という前提が破れたことに気づけるようにする。
 for f in ${injected_stage[@]+"${injected_stage[@]}"}; do
-  case "$(basename -- "$f" 2>/dev/null)" in
+  cts_path_parts "$f"
+  case "$CTS_PATH_BASENAME" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*) ;;
     *)
       printf '（ファイル名が YYYY-MM-DD-HHMM で始まらない引き継ぎがある。出力順が時刻順と一致しない可能性がある。）\n'
