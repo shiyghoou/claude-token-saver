@@ -1040,6 +1040,16 @@ test_personalスコープは_gitignoreを新規作成しない() {
   assert_file_exists "$TARGET/.token-saver/installed.json" "台帳"
 }
 
+test_personalスコープの完了メッセージは共有更新手順を案内する() {
+  _setup_target
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" ".gitignore は変更していない" \
+    "--personalの完了メッセージ"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "--shared" \
+    "--personalの共有更新案内"
+}
+
 test_sharedスコープは個人の設置物を変更せず_台帳のスキルだけ除外する() {
   _setup_target
   _run_install_args --personal
@@ -1060,6 +1070,8 @@ test_sharedスコープの完了メッセージはフック導入を示さない
   _setup_target
   _run_install_args --shared
   assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" \
+    "完了。共有設定（.gitignore）を更新した。" "--sharedの完了メッセージ"
   assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "引き継ぎフックが有効" \
     "--sharedの完了メッセージ"
 }

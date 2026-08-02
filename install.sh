@@ -520,6 +520,8 @@ if [ "${#warnings[@]}" -gt 0 ]; then
 else
   if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
     info "完了。共有設定（.gitignore）を更新した。"
+  elif [ "$do_personal" = 1 ] && [ "$do_shared" = 0 ]; then
+    info "完了。個人設定を更新した。.gitignore は変更していない。共有設定も更新する場合は install.sh --shared を実行せよ。"
   else
     info "完了。新しいセッションを開始すると引き継ぎフックが有効になる。"
   fi
