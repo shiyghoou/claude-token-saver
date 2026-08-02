@@ -43,7 +43,7 @@ jobs:
 
       - name: ShellCheckを実行する
         run: |
-          git ls-files -z -- 'install.sh' 'uninstall.sh' 'scripts/' |
+          git ls-files -z -- 'install.sh' 'uninstall.sh' 'scripts/*.sh' 'scripts/**/*.sh' |
             xargs -0 shellcheck --shell=bash --severity=error
 
       - name: テストを実行する
