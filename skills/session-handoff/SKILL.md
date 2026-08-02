@@ -114,6 +114,8 @@ ID はフックが起動ごとに発行する使い捨ての識別子で、値�
   claude-token-saver を clone した先の `scripts/` にある**（導入先へ入るのはフックの設定と
   このスキルだけである）。場所は `.claude/settings.json` の SessionStart フックの
   コマンド行に絶対パスで書かれているので、そこから辿れる。
+- SessionStart の設定グループには `matcher: "startup|clear"` が付く。設定側で発火源を
+  絞ったうえで、フック本体も標準入力の `source` を fail-closed に判定する。
 - **発火するのは `startup` / `clear` のときだけである。** `resume` と `compact` では消費されない
   （圧縮のたびに引き継ぎが消えるのを避けるため）。発火源を判定できなかった場合も消費しない。
   手でフックを回して確かめたいときは `CTS_FORCE=1 <clone 先>/scripts/handoff-check.sh` とする。

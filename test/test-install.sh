@@ -45,6 +45,31 @@ _hook_commands() {
   printf '%s\n' "$HOOK_COMMANDS"
 }
 
+# settings.local.json から指定フックの matcher 一覧を HOOK_MATCHERS へ読み込む。
+# matcher が無いグループは空行で表し、利用者の既存グループと自前グループを
+# 位置で取り違えないよう、設定の並びをそのまま返す。
+_load_hook_matchers() {
+  local event="$1"
+  if [ ! -f "$SETTINGS" ]; then
+    HOOK_MATCHERS='(settings.local.json は存在しない)'
+    return 0
+  fi
+  HOOK_MATCHERS="$(python3 -c '
+import json, sys
+event = sys.argv[1]
+with open(sys.argv[2]) as f:
+    data = json.load(f)
+for group in data.get("hooks", {}).get(event, []):
+    print(group.get("matcher", ""))
+' "$event" "$SETTINGS" 2>"$TEST_TMP/.matchererr")" ||
+    _fail "settings.local.json のmatcherを解析できない: $(cat "$TEST_TMP/.matchererr")"
+}
+
+_hook_matchers() {
+  _load_hook_matchers "$1" || exit 1
+  printf '%s\n' "$HOOK_MATCHERS"
+}
+
 # パーミッションを 8 進で返す。GNU と BSD で書式が違う。
 _perm() {
   stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
@@ -53,9 +78,12 @@ _perm() {
 test_settings_が無ければ作って_SessionStart_に登録する() {
   _setup_target
   _run_install
+  local matchers
+  matchers="$(_hook_matchers SessionStart)"
   assert_eq "0" "$INSTALL_STATUS" "終了コード"
   assert_file_exists "$SETTINGS"
   assert_contains "$(_hook_commands SessionStart)" "handoff-check.sh" "SessionStart のコマンド"
+  assert_eq "startup|clear" "$matchers" "SessionStart のmatcher"
 }
 
 test_生成した_settings_は妥当な_JSON_である() {
@@ -69,8 +97,11 @@ test_二度実行してもフックが重複しない() {
   _setup_target
   _run_install
   _run_install
+  local matchers
+  matchers="$(_hook_matchers SessionStart)"
   assert_eq "0" "$INSTALL_STATUS" "2回目の終了コード"
   assert_count 1 "$(_hook_commands SessionStart)" "handoff-check.sh" "handoff-check.sh の登録数"
+  assert_eq "startup|clear" "$matchers" "SessionStart のmatcher"
 }
 
 test_既存の他フックを壊さない() {
@@ -584,10 +615,60 @@ test_matcher_付きのユーザー独自フックは残す() {
 EOF
   _run_install
   _run_install
-  local cmds
+  local cmds matchers
   cmds="$(_hook_commands SessionStart)"
+  matchers="$(_hook_matchers SessionStart)"
   assert_contains "$cmds" "独自フック" "SessionStart のコマンド"
   assert_contains "$(cat "$SETTINGS")" "matcher" "settings.local.json"
+  assert_contains "$matchers" "startup|clear" "自前SessionStartのmatcher"
+}
+
+test_旧形式のSessionStart登録をmatcher付きへ移行する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude" "$TARGET/.token-saver"
+  python3 - "$SETTINGS" "$TARGET/.token-saver/installed.json" \
+    "$REPO_ROOT/scripts/handoff-check.sh" <<'PY'
+import json
+import shlex
+import sys
+
+settings, ledger, command = sys.argv[1:]
+quoted = shlex.quote(command)
+with open(settings, "w") as f:
+    json.dump({"hooks": {"SessionStart": [{"hooks": [
+        {"type": "command", "command": quoted}
+    ]}]}}, f)
+with open(ledger, "w") as f:
+    json.dump({"hooks": [quoted]}, f)
+PY
+
+  local out rc=0 matchers
+  out="$(python3 "$REPO_ROOT/lib/settings-hooks.py" install "$SETTINGS" \
+    --ledger "$TARGET/.token-saver/installed.json" \
+    --matcher "SessionStart=startup|clear" \
+    "SessionStart:$REPO_ROOT/scripts/handoff-check.sh" 2>&1)" || rc=$?
+  assert_eq "0" "$rc" "旧形式移行の終了コード: $out"
+  matchers="$(_hook_matchers SessionStart)"
+  assert_eq "startup|clear" "$matchers" "移行後のmatcher"
+  assert_count 1 "$(_hook_commands SessionStart)" "handoff-check.sh" "移行後の登録数"
+}
+
+test_不正なmatcher指定を設定変更前に拒否する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude" "$TARGET/.token-saver"
+  printf '{"permissions":{}}\n' >"$SETTINGS"
+  printf '{"skills":[]}\n' >"$TARGET/.token-saver/installed.json"
+  cp "$SETTINGS" "$TEST_TMP/settings.before"
+  cp "$TARGET/.token-saver/installed.json" "$TEST_TMP/ledger.before"
+
+  local out rc=0
+  out="$(python3 "$REPO_ROOT/lib/settings-hooks.py" install "$SETTINGS" \
+    --ledger "$TARGET/.token-saver/installed.json" \
+    --matcher SessionStart 2>&1)" || rc=$?
+  assert_eq "64" "$rc" "不正matcherの終了コード"
+  assert_contains "$out" "matcher の指定が妥当でない" "不正matcherのエラー"
+  assert_eq "$(cat "$TEST_TMP/settings.before")" "$(cat "$SETTINGS")" "設定の未変更"
+  assert_eq "$(cat "$TEST_TMP/ledger.before")" "$(cat "$TARGET/.token-saver/installed.json")" "台帳の未変更"
 }
 
 test_既存の_settings_をバックアップする() {

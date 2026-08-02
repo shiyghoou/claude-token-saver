@@ -35,7 +35,8 @@ cd <導入したいリポジトリ>
 
 1. `.token-saver/handoff/{pending,consumed}` を作る
 2. `skills/` 配下を `.claude/skills/<name>` へシンボリックリンクする
-3. `.claude/settings.local.json` の `SessionStart` に `handoff-check.sh` を登録する。
+3. `.claude/settings.local.json` の `SessionStart` に `handoff-check.sh` を
+   `matcher: "startup|clear"` 付きで登録する。
    既存のユーザー独自フックは壊さない。既存の設定を初めて書き換える場合は、
    `.cts-backup` がまだ無ければ書き換え前の内容を退避する（新規作成時は対象なし）
 4. `.gitignore` の `# claude-token-saver` ブロックを（再）生成する。中身は `.token-saver/`、
@@ -239,8 +240,9 @@ fail-closed により利用者のフックが残ったまま外せなくなる�
 
 ### 発火の条件
 
-`SessionStart` の発火源が `startup` / `clear` / `resume` のときだけ発火する。
-**`compact` では発火しない** — 圧縮のたびに引き継ぎが消費されるのを避けるためである。
+`SessionStart` の設定側matcherは `startup|clear` である。フック本体も発火源が
+`startup` / `clear` のときだけ発火する。
+**`resume` / `compact` では発火しない** — 履歴の復元や圧縮のたびに引き継ぎが消費されるのを避けるためである。
 `fork` も発火しない（会話履歴を引き継ぐため注入が要らない）。
 
 判定は **fail-closed** である。発火源が空・不明でも、ペイロードが壊れていても、標準入力が閉じなくても、

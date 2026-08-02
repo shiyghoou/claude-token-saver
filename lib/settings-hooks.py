@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # settings.local.json のフック登録を書き換える。
 #
-#   settings-hooks.py install <path> --ledger <ledger> <event>:<command> ...
+#   settings-hooks.py install <path> --ledger <ledger> [--matcher EVENT=REGEX] <event>:<command> ...
 #   settings-hooks.py remove  <path> [--ledger <ledger>] [--guess]
 #   settings-hooks.py same    <path> <other>   # 2つの設定がデータとして同値か
 #
@@ -221,7 +221,21 @@ def save_if_changed(path, data, original):
     return True
 
 
-def cmd_install(path, ledger_path, specs):
+def cmd_install(path, ledger_path, specs, matchers):
+    parsed_specs = []
+    events = set()
+    for spec in specs:
+        event, separator, command = spec.partition(":")
+        if not separator or not event or not command:
+            sys.stderr.write("フック指定が妥当でない: %r\n" % spec)
+            return 64
+        parsed_specs.append((event, command))
+        events.add(event)
+    for event in matchers:
+        if event not in events:
+            sys.stderr.write("matcher のイベントがフック指定に無い: %s\n" % event)
+            return 64
+
     data, original = load(path)
     known = recorded_hooks(ledger_path)
     candidates = [] if known is not None else guess_candidates(data)
@@ -238,17 +252,14 @@ def cmd_install(path, ledger_path, specs):
     added = []
     commands = []
     hooks = data.setdefault("hooks", {})
-    for spec in specs:
-        event, separator, command = spec.partition(":")
-        if not separator or not event or not command:
-            sys.stderr.write("フック指定が妥当でない: %r\n" % spec)
-            return 64
+    for event, command in parsed_specs:
         # 空白を含むパスをそのまま入れると、シェルが単語分割して毎セッション
         # rc=127 で失敗する。クォートしてから登録する。
         quoted = shlex.quote(command)
-        hooks.setdefault(event, []).append(
-            {"hooks": [{"type": "command", "command": quoted}]}
-        )
+        group = {"hooks": [{"type": "command", "command": quoted}]}
+        if event in matchers:
+            group["matcher"] = matchers[event]
+        hooks.setdefault(event, []).append(group)
         commands.append(quoted)
         added.append("%s → %s" % (event, os.path.basename(command)))
 
@@ -329,13 +340,14 @@ def main(argv):
     if len(argv) < 3 or argv[1] not in ("install", "remove"):
         sys.stderr.write(
             "usage: settings-hooks.py {install|remove} <path> "
-            "[--ledger <ledger>] [--guess] [event:command ...]\n"
+            "[--ledger <ledger>] [--matcher EVENT=REGEX] [--guess] [event:command ...]\n"
         )
         return 64
 
     rest = argv[3:]
     ledger_path = ""
     guess = False
+    matchers = {}
     specs = []
     i = 0
     while i < len(rest):
@@ -354,6 +366,17 @@ def main(argv):
             guess = True
             i += 1
             continue
+        if token == "--matcher":
+            if argv[1] != "install" or i + 1 >= len(rest):
+                sys.stderr.write("--matcher は install で EVENT=REGEX を指定する\n")
+                return 64
+            event, separator, matcher = rest[i + 1].partition("=")
+            if not separator or not event or not matcher or event in matchers:
+                sys.stderr.write("matcher の指定が妥当でない: %r\n" % rest[i + 1])
+                return 64
+            matchers[event] = matcher
+            i += 2
+            continue
         if token.startswith("-"):
             sys.stderr.write("不明なオプションまたは引数: %s\n" % token)
             return 64
@@ -361,7 +384,7 @@ def main(argv):
         i += 1
 
     if argv[1] == "install":
-        return cmd_install(argv[2], ledger_path, specs)
+        return cmd_install(argv[2], ledger_path, specs, matchers)
     if specs:
         sys.stderr.write("remove にフック指定は渡せない\n")
         return 64
