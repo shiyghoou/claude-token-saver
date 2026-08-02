@@ -106,7 +106,7 @@ consumer_fail_name="2026-07-31-1843-consumer-fail"
 consumer_fail_name="${consumer_fail_name}"$' $(touch cts-bash32-consumer-marker)\n\r\t<%%>.md'
 consumer_fail_path="$proj/.token-saver/handoff/pending/$consumer_fail_name"
 printf 'consumer失敗本文\n' >"$consumer_fail_path"
-consumer_fail_expected='2026-07-31-1843-consumer-fail%20%24%28touch%20cts-bash32-consumer-marker%29%0A%0D%09%3C%25%3E.md'
+consumer_fail_expected='2026-07-31-1843-consumer-fail%20%24%28touch%20cts-bash32-consumer-marker%29%0A%0D%09%3C%25%25%3E.md'
 mkdir -p /tmp/fail-bin
 cat >/tmp/fail-bin/mv <<'FAILMV'
 #!/bin/sh
