@@ -222,6 +222,16 @@ fail-closed により利用者のフックが残ったまま外せなくなる�
 - `python3` — `install.sh` / `uninstall.sh` と token-report の計測エンジンで使う。
   **SessionStart フック本体は python3 に依存しない。**
 
+#### Python 互換性の検証範囲
+
+`lib/*.py` を検証対象とし、依存は標準ライブラリと同ディレクトリの `ledger` のみである。
+Python 3.6.15、3.8.20、3.12.3 で `python -B test/python-compatibility.py` の成功を確認した。
+
+ローカルでは `python3 -B test/python-compatibility.py` を実行する。CI の
+`python-compatibility` job は、`python:3.6.15-slim-buster` と
+`python:3.8.20-slim-bookworm` で同じスモークを実行する。この記録は確認済みの
+バージョンに限るもので、Python 3.6 未満や未検証の将来版を保証しない。
+
 ## 引き継ぎ（session-handoff）
 
 ```
