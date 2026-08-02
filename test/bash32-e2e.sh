@@ -37,6 +37,7 @@ trap 'rm -rf "$work"' EXIT
 
 cat >"$work/run.sh" <<'INNER'
 set -u
+cd /tmp
 bash --version | head -1
 proj=/tmp/proj
 rm -rf "$proj"
@@ -55,6 +56,82 @@ printf 'CANARY=%s\n' "$(grep -c 'カナリア-BASH32-本文' /tmp/out)"
 printf 'PENDING=%s\n' "$(ls -A "$proj/.token-saver/handoff/pending" | wc -l | tr -d ' ')"
 printf 'CONSUMED=%s\n' "$(ls -A "$proj/.token-saver/handoff/consumed" | wc -l | tr -d ' ')"
 printf 'STDERR_TEXT<<%s\n' "$(cat /tmp/err)"
+
+# unsafe byte列をBash 3.2上で通し、od/tr経路、固定%XX属性、タグの一行性、
+# marker非生成、フックstderr無漏出を確認する。
+rm -f /tmp/cts-bash32-marker
+hostile_name="$(printf '2026-07-31-1841-unsafe 日本語\t$(touch cts-bash32-marker)\n\r<%%>.md')"
+hostile_path="$proj/.token-saver/handoff/pending/$hostile_name"
+printf 'unsafe本文\n' >"$hostile_path"
+printf '{"session_id":"abc","source":"startup","cwd":"%s"}' "$proj" \
+  | bash /repo/scripts/handoff-check.sh >/tmp/unsafe-out 2>/tmp/unsafe-err
+printf 'UNSAFE_EXIT=%s\n' "$?"
+unsafe_expected='2026-07-31-1841-unsafe%20%E6%97%A5%E6%9C%AC%E8%AA%9E%09%24%28touch%20cts-bash32-marker%29%0A%0D%3C%25%3E.md'
+printf 'UNSAFE_STDERR_BYTES=%s\n' "$(wc -c </tmp/unsafe-err | tr -d ' ')"
+printf 'UNSAFE_TAG_LINES=%s\n' "$(grep -c '^<handoff:' /tmp/unsafe-out || true)"
+printf 'UNSAFE_FILE_ATTR=%s\n' \
+  "$(grep -c -F "file=\"$unsafe_expected\"" /tmp/unsafe-out || true)"
+printf 'UNSAFE_PATH_ATTR=%s\n' \
+  "$(grep -c -F "path=\"$proj/.token-saver/handoff/consumed/$unsafe_expected\"" /tmp/unsafe-out || true)"
+printf 'UNSAFE_RAW_SHELL=%s\n' "$(grep -c -F '$(touch' /tmp/unsafe-out || true)"
+if [ -e /tmp/cts-bash32-marker ]; then
+  printf 'UNSAFE_MARKER=1\n'
+else
+  printf 'UNSAFE_MARKER=0\n'
+fi
+if [ -f "$proj/.token-saver/handoff/consumed/$hostile_name" ]; then
+  printf 'UNSAFE_CONSUMED=1\n'
+else
+  printf 'UNSAFE_CONSUMED=0\n'
+fi
+
+# standalone consumer も制御文字・Unicodeを含む名前をそのまま移動できることを確認する。
+consume_name='2026-07-31-1842-consume 日本語'
+consume_name="${consume_name}"$'\t\n\r'
+consume_path="$proj/.token-saver/handoff/pending/$consume_name"
+printf 'standalone本文\n' >"$consume_path"
+CLAUDE_PROJECT_DIR="$proj" bash /repo/scripts/handoff-consume.sh -- "$consume_path" \
+  >/tmp/consume-out 2>/tmp/consume-err
+printf 'CONSUME_EXIT=%s\n' "$?"
+printf 'CONSUME_STDERR_BYTES=%s\n' "$(wc -c </tmp/consume-err | tr -d ' ')"
+if [ -f "$proj/.token-saver/handoff/consumed/$consume_name" ]; then
+  printf 'CONSUME_MOVED=1\n'
+else
+  printf 'CONSUME_MOVED=0\n'
+fi
+
+# standalone consumer の失敗時も、攻撃者制御の path を raw のまま stderr に出さない。
+rm -f /tmp/cts-bash32-consumer-marker
+consumer_fail_name="2026-07-31-1843-consumer-fail"
+consumer_fail_name="${consumer_fail_name}"$' $(touch cts-bash32-consumer-marker)\n\r\t<%%>.md'
+consumer_fail_path="$proj/.token-saver/handoff/pending/$consumer_fail_name"
+printf 'consumer失敗本文\n' >"$consumer_fail_path"
+consumer_fail_expected='2026-07-31-1843-consumer-fail%20%24%28touch%20cts-bash32-consumer-marker%29%0A%0D%09%3C%25%25%3E.md'
+mkdir -p /tmp/fail-bin
+cat >/tmp/fail-bin/mv <<'FAILMV'
+#!/bin/sh
+exit 1
+FAILMV
+chmod +x /tmp/fail-bin/mv
+PATH="/tmp/fail-bin:$PATH" CLAUDE_PROJECT_DIR="$proj" \
+  bash /repo/scripts/handoff-consume.sh -- "$consumer_fail_path" \
+  >/tmp/consume-fail-out 2>/tmp/consume-fail-err
+printf 'CONSUME_FAIL_EXIT=%s\n' "$?"
+printf 'CONSUME_FAIL_STDERR_LINES=%s\n' "$(wc -l </tmp/consume-fail-err | tr -d ' ')"
+printf 'CONSUME_FAIL_EXPECTED=%s\n' \
+  "$(grep -c -F "消費できなかった: $proj/.token-saver/handoff/pending/$consumer_fail_expected" /tmp/consume-fail-err || true)"
+printf 'CONSUME_FAIL_RAW_SHELL=%s\n' \
+  "$(grep -c -F '$(touch' /tmp/consume-fail-err || true)"
+if [ -e /tmp/cts-bash32-consumer-marker ]; then
+  printf 'CONSUME_FAIL_MARKER=1\n'
+else
+  printf 'CONSUME_FAIL_MARKER=0\n'
+fi
+if [ -f "$consumer_fail_path" ]; then
+  printf 'CONSUME_FAIL_PENDING=1\n'
+else
+  printf 'CONSUME_FAIL_PENDING=0\n'
+fi
 
 # 未消費ゼロなら無出力・終了コード 0 であること（未導入時と挙動が変わらない）。
 rm -rf "$proj/.token-saver/handoff/pending"
@@ -127,6 +204,23 @@ want 'CANARY=1'             "本文が注入されていない"
 want 'STDERR_BYTES=0'       "標準エラーを汚している"
 want 'PENDING=0'            "pending が消費されていない"
 want 'CONSUMED=1'           "consumed へ移っていない"
+want 'UNSAFE_EXIT=0'        "unsafe入力で終了コードが 0 でない"
+want 'UNSAFE_STDERR_BYTES=0' "unsafe入力で標準エラーを汚している"
+want 'UNSAFE_TAG_LINES=1'   "unsafe入力で開始タグが一行でない"
+want 'UNSAFE_FILE_ATTR=1'   "unsafe入力のfile属性が固定値でない"
+want 'UNSAFE_PATH_ATTR=1'   "unsafe入力のpath属性が固定値でない"
+want 'UNSAFE_RAW_SHELL=0'   "unsafe入力のraw shell文字列が漏れている"
+want 'UNSAFE_MARKER=0'      "unsafe入力でshell markerが作成された"
+want 'UNSAFE_CONSUMED=1'    "unsafe入力の実体名が保持されていない"
+want 'CONSUME_EXIT=0'       "standalone consumer の終了コードが 0 でない"
+want 'CONSUME_STDERR_BYTES=0' "standalone consumer が標準エラーを汚している"
+want 'CONSUME_MOVED=1'      "standalone consumer が名前を保持して移動していない"
+want 'CONSUME_FAIL_EXIT=1'  "standalone consumer の失敗を終了コードで示していない"
+want 'CONSUME_FAIL_STDERR_LINES=1' "consumer失敗時stderrが一行でない"
+want 'CONSUME_FAIL_EXPECTED=1' "consumer失敗時stderrのエンコード済みpathが無い"
+want 'CONSUME_FAIL_RAW_SHELL=0' "consumer失敗時stderrにraw shell文字列が漏れている"
+want 'CONSUME_FAIL_MARKER=0' "consumer失敗時にshell markerが作成された"
+want 'CONSUME_FAIL_PENDING=1' "consumer失敗時にpendingファイルが失われた"
 want 'EMPTY_EXIT=0'         "未消費ゼロで終了コードが 0 でない"
 want 'EMPTY_STDOUT_BYTES=0' "未消費ゼロなのに出力がある"
 want 'EMPTY_STDERR_BYTES=0' "未消費ゼロで標準エラーを汚している"

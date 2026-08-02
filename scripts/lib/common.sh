@@ -166,12 +166,53 @@ cts_fence_id() {
   printf '%s' "$id"
 }
 
-# 出力の1行へ埋め込める形へ落とす。制御文字（改行を含む）と " < > を落とす。
-# ファイル名は攻撃者が決められる。改行を通せばフック自身の出力に見える行を
-# 作れるし、引用符と山括弧を通せば区切りの開始タグを割れる。
-# ファイル名・パスを出すところでは、区切りの中か外かを問わず必ず通す。
-cts_sanitize_text() {
-  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177"<>'
+# 属性値を1行の記録へ埋め込めるよう、unsafe byte を %XX へエンコードする。
+# ファイル名とパスは攻撃者が決められるため、制御文字、引用符、山括弧を含む
+# safe byte 以外をそのまま出力しない。NUL は Bash 文字列に保持できないため対象外。
+cts_encode_attribute() {
+  local value="$1" encoded="" byte hex i=0
+  local LC_ALL=C
+
+  while [ "$i" -lt "${#value}" ]; do
+    byte="${value:$i:1}"
+    case "$byte" in
+      [A-Za-z0-9._/-]) encoded="$encoded$byte" ;;
+      *)
+        hex="$(printf '%s' "$byte" | od -An -t x1 2>/dev/null)" || return 1
+        hex="$(printf '%s' "$hex" | tr -d '[:space:]' 2>/dev/null)" || return 1
+        hex="$(printf '%s' "$hex" | tr 'a-f' 'A-F' 2>/dev/null)" || return 1
+        case "$hex" in
+          [0-9A-F][0-9A-F]) encoded="$encoded%$hex" ;;
+          *) return 1 ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s' "$encoded"
+}
+
+# パスを dirname 相当と basename 相当に分ける。command substitution は末尾の
+# 改行を落とすため、攻撃者が決められるファイル名では出力せず共通変数へ格納する。
+CTS_PATH_DIRNAME=""
+CTS_PATH_BASENAME=""
+cts_path_parts() {
+  local value="$1" dir base
+  CTS_PATH_DIRNAME=""
+  CTS_PATH_BASENAME=""
+  case "$value" in
+    */*)
+      dir="${value%/*}"
+      base="${value##*/}"
+      [ -n "$dir" ] || dir="/"
+      ;;
+    *)
+      dir="."
+      base="$value"
+      ;;
+  esac
+  CTS_PATH_DIRNAME="$dir"
+  CTS_PATH_BASENAME="$base"
 }
 
 # パス中のシンボリックリンクを1段ずつ解決し、解決後の物理的な絶対パスを返す。
@@ -179,20 +220,35 @@ cts_sanitize_text() {
 # 別のリンク先へ解決する対象ではない。
 # realpath / readlink -f を使わないのは、どちらも macOS の既定環境に無いためである
 # （readlink 自体は -f 無しなら POSIX の範囲で使える）。
-# 循環リンクで回り続けないよう、たどる段数に上限を置く。
+# 循環リンクで回り続けないよう、たどる段数に上限を置く。結果は
+# CTS_RESOLVED_PATH に入り、呼び出し側が command substitution を使わずに受け取る。
+CTS_RESOLVED_PATH=""
 cts_resolve_path() {
   local p="$1" dir base link n=0
+  CTS_RESOLVED_PATH=""
   while [ "$n" -lt 40 ]; do
-    dir="$(dirname -- "$p")"
-    base="$(basename -- "$p")"
-    dir="$(cd -P -- "$dir" 2>/dev/null && pwd -P)" || return 1
+    cts_path_parts "$p"
+    dir="$CTS_PATH_DIRNAME"
+    base="$CTS_PATH_BASENAME"
+    # command substitution は末尾改行を落とすため、最後に sentinel を置いて
+    # 物理パス中の末尾改行を保持してから sentinel だけを除く。
+    dir="$(cd -P -- "$dir" 2>/dev/null && pwd -P && printf '\001')" || return 1
+    dir="${dir%$'\001'}"
+    # pwd -P 自身が付けた終端改行を1つだけ除く。これより多く除くと、
+    # 物理パス名に含まれる末尾改行まで失われる。
+    dir="${dir%$'\n'}"
     [ -n "$dir" ] || return 1
     case "$dir" in
       */) p="$dir$base" ;;
       *) p="$dir/$base" ;;
     esac
     [ -L "$p" ] || break
-    link="$(readlink -- "$p" 2>/dev/null)" || return 1
+    # symlink のリンク先にも末尾改行を許す。readlink の出力を sentinel で
+    # 閉じてから受け取ることで、command substitution の改行切捨てを避ける。
+    link="$(readlink -- "$p" 2>/dev/null && printf '\001')" || return 1
+    link="${link%$'\001'}"
+    # readlink 自身が付けた終端改行を1つだけ除き、リンク先名の末尾改行は残す。
+    link="${link%$'\n'}"
     case "$link" in
       /*) p="$link" ;;
       *) p="$dir/$link" ;;
@@ -200,7 +256,8 @@ cts_resolve_path() {
     n=$((n + 1))
   done
   [ "$n" -lt 40 ] || return 1
-  printf '%s' "$p"
+  CTS_RESOLVED_PATH="$p"
+  return 0
 }
 
 # path が dir 自身か、その配下にあるなら 0。どちらも解決済みの絶対パスであること。
@@ -249,7 +306,8 @@ cts_reserve_destination() {
   CTS_RESERVED_LOCK=""
   mkdir -p -- "$dest_dir" || return 1
 
-  base="$(basename -- "$src")" || return 1
+  cts_path_parts "$src"
+  base="$CTS_PATH_BASENAME"
   while [ "$n" -lt 10000 ]; do
     if [ "$n" -eq 0 ]; then
       dest="$dest_dir/$base"

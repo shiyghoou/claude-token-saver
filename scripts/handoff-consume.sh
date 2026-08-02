@@ -15,6 +15,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 consumed_dir="$(cts_handoff_dir)/consumed"
 
+# エラー表示でもファイル名・パスは攻撃者制御値である。属性と同じ byte-level
+# エンコーダーを通し、エンコードできない場合は値を含まない固定文へ倒す。
+cts_consume_diagnostic() {
+  local label="$1" path="$2" encoded
+  if encoded="$(cts_encode_attribute "$path" 2>/dev/null)"; then
+    printf '%s: %s\n' "$label" "$encoded" >&2
+  else
+    printf '%s。\n' "$label" >&2
+  fi
+}
+
 # ハイフンで始まるパスを引数として渡せるようにする。
 if [ "$#" -gt 0 ] && [ "$1" = "--" ]; then
   shift
@@ -27,11 +38,14 @@ if [ "$#" -gt 0 ]; then
   rc=0
   for f in "$@"; do
     if [ ! -f "$f" ]; then
-      printf '通常ファイルではない: %s\n' "$f" >&2
+      cts_consume_diagnostic "通常ファイルではない" "$f"
       rc=1
       continue
     fi
-    cts_consume_file "$f" "$consumed_dir" || { printf '消費できなかった: %s\n' "$f" >&2; rc=1; }
+    cts_consume_file "$f" "$consumed_dir" || {
+      cts_consume_diagnostic "消費できなかった" "$f"
+      rc=1
+    }
   done
   exit "$rc"
 fi
@@ -63,7 +77,7 @@ done
 
 for f in ${entries[@]+"${entries[@]}"}; do
   if ! cts_consume_file "$f" "$consumed_dir"; then
-    printf '消費できなかった: %s\n' "$f" >&2
+    cts_consume_diagnostic "消費できなかった" "$f"
     rc=1
   fi
 done

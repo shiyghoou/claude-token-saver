@@ -189,6 +189,32 @@ test_一括消費は失敗後も後続のファイルを試す() {
   assert_file_exists "$PROJ/.token-saver/handoff/consumed/b.md"
 }
 
+test_攻撃者制御のファイル名は移動失敗時もstderrへ生出力しない() {
+  _setup_project
+  local name expected path shadow
+  name='2026-07-31-1840-hostile'
+  name="${name}"$'\n\r\t<" & %>.md'
+  expected='2026-07-31-1840-hostile%0A%0D%09%3C%22%20%26%20%25%3E.md'
+  path="$PROJ/.token-saver/handoff/pending/$name"
+  printf '移動失敗する本文\n' >"$path"
+
+  shadow="$TEST_TMP/mv-always-fails"
+  mkdir -p "$shadow"
+  printf '#!/bin/sh\nexit 1\n' >"$shadow/mv"
+  chmod +x "$shadow/mv"
+  PATH="$shadow:$PATH" bash "$CONSUME" -- "$path" \
+    >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
+  CONSUME_STATUS=$?
+  CONSUME_ERR="$(cat "$TEST_TMP/.err")"
+
+  assert_ne "0" "$CONSUME_STATUS" "終了コード"
+  assert_contains "$CONSUME_ERR" \
+    "消費できなかった: $PROJ/.token-saver/handoff/pending/$expected" \
+    "エンコード済み標準エラー"
+  assert_not_contains "$CONSUME_ERR" "$name" "標準エラーのrawファイル名"
+  assert_file_exists "$path"
+}
+
 test_同名宛先への並行移動でも既存と両方を保持する() {
   _setup_project
   local consumed="$PROJ/.token-saver/handoff/consumed"
