@@ -49,3 +49,21 @@ test_ShellCheck対象がBashスクリプトだけを含む() {
   assert_contains "$selected" "scripts/lib/paths.sh" \
     "scripts/libのShellCheck対象を維持する"
 }
+
+test_Python互換性CIが固定イメージで読み取り専用スモークを実行する() {
+  local workflow
+  if ! workflow="$(cat "$REPO_ROOT/.github/workflows/test.yml")"; then
+    _fail "test.ymlの読み込みに失敗した"
+  fi
+
+  assert_contains "$workflow" "python-compatibility:" \
+    "Python互換性の独立job"
+  assert_contains "$workflow" "python:3.6.15-slim-buster" \
+    "Python 3.6の固定公式イメージ"
+  assert_contains "$workflow" "python:3.8.20-slim-bookworm" \
+    "Python 3.8の固定公式イメージ"
+  assert_contains "$workflow" "readonly" \
+    "リポジトリの読み取り専用マウント"
+  assert_contains "$workflow" "python -B test/python-compatibility.py" \
+    "Python互換性スモークの実行"
+}
