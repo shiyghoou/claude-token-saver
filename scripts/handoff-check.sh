@@ -494,13 +494,12 @@ while [ "$i" -lt "${#injected_display[@]}" ]; do
 done
 
 # 区切りタグを1つ書く。属性はファイル名とパスに由来する＝攻撃者が決められる。
-# 制御文字や引用符を落とさないと、ファイル名だけで開始タグを割り、
-# 囲いの外へ任意の行を出せる。
+# safe byte 以外を %XX へエンコードし、開始タグを割れない1行の記録として扱う。
 _open_tag() {
   local name safe_name safe_path
   name="$(basename -- "$1" 2>/dev/null)" || name=""
-  safe_name="$(cts_sanitize_text "$name" 2>/dev/null)" || safe_name=""
-  safe_path="$(cts_sanitize_text "$2" 2>/dev/null)" || safe_path=""
+  safe_name="$(cts_encode_attribute "$name" 2>/dev/null)" || safe_name=""
+  safe_path="$(cts_encode_attribute "$2" 2>/dev/null)" || safe_path=""
   printf '<handoff:%s file="%s" path="%s">\n' \
     "$fence_id" \
     "$safe_name" \

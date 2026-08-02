@@ -166,12 +166,30 @@ cts_fence_id() {
   printf '%s' "$id"
 }
 
-# 出力の1行へ埋め込める形へ落とす。制御文字（改行を含む）と " < > を落とす。
-# ファイル名は攻撃者が決められる。改行を通せばフック自身の出力に見える行を
-# 作れるし、引用符と山括弧を通せば区切りの開始タグを割れる。
-# ファイル名・パスを出すところでは、区切りの中か外かを問わず必ず通す。
-cts_sanitize_text() {
-  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177"<>'
+# 属性値を1行の記録へ埋め込めるよう、unsafe byte を %XX へエンコードする。
+# ファイル名とパスは攻撃者が決められるため、制御文字、引用符、山括弧を含む
+# safe byte 以外をそのまま出力しない。NUL は Bash 文字列に保持できないため対象外。
+cts_encode_attribute() {
+  local value="$1" encoded="" byte hex i=0
+  local LC_ALL=C
+
+  while [ "$i" -lt "${#value}" ]; do
+    byte="${value:$i:1}"
+    case "$byte" in
+      [A-Za-z0-9._/-]) encoded="$encoded$byte" ;;
+      *)
+        hex="$(printf '%s' "$byte" | od -An -t x1 2>/dev/null)" || return 1
+        hex="$(printf '%s' "$hex" | tr -d '[:space:]' 2>/dev/null)" || return 1
+        hex="$(printf '%s' "$hex" | tr 'a-f' 'A-F' 2>/dev/null)" || return 1
+        case "$hex" in
+          [0-9A-F][0-9A-F]) encoded="$encoded%$hex" ;;
+          *) return 1 ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s' "$encoded"
 }
 
 # パス中のシンボリックリンクを1段ずつ解決し、解決後の物理的な絶対パスを返す。
