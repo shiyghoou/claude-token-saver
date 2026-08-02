@@ -17,6 +17,13 @@ _run_install() {
   INSTALL_ERR="$(cat "$TEST_TMP/.err")"
 }
 
+_run_install_args() {
+  bash "$INSTALL" "$@" "$TARGET" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
+  INSTALL_STATUS=$?
+  INSTALL_OUT="$(cat "$TEST_TMP/.out")"
+  INSTALL_ERR="$(cat "$TEST_TMP/.err")"
+}
+
 # settings.local.json から指定フックのコマンド一覧を HOOK_COMMANDS へ読み込む。
 # 「登録が消えた」と「ファイルが読めなかった」を取り違えないため、
 # 不在は明示的な文言を返し、解析できないときはテストを失敗させる。
@@ -998,6 +1005,17 @@ test_台帳無しのinstallは推測候補を消さず警告する() {
   assert_contains "$(_hook_commands SessionStart)" "$TEST_TMP/old/scripts/handoff-check.sh" \
     "推測候補である利用者のフック"
   assert_contains "$INSTALL_OUT$INSTALL_ERR" "推測" "推測候補の警告"
+}
+
+test_インストールの重複スコープを変更前に拒否する() {
+  _setup_target
+  printf '利用者の除外\n' >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_install_args --personal --shared
+  assert_ne "0" "$INSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "不正なスコープ指定で.gitignoreが変更された"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "スコープ" "エラー"
 }
 
 test_インストール引数の不正値を拒否する() {

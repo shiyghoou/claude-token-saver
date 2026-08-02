@@ -21,6 +21,13 @@ _run_uninstall() {
   UNINSTALL_ERR="$(cat "$TEST_TMP/.err")"
 }
 
+_run_uninstall_args() {
+  bash "$UNINSTALL" "$@" "$TARGET" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
+  UNINSTALL_STATUS=$?
+  UNINSTALL_OUT="$(cat "$TEST_TMP/.out")"
+  UNINSTALL_ERR="$(cat "$TEST_TMP/.err")"
+}
+
 # 台帳の無い旧環境向けの推測経路。既定では通らないので、明示的に opt-in する。
 _run_uninstall_guess() {
   bash "$UNINSTALL" --guess "$TARGET" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
@@ -974,6 +981,17 @@ test_導入先の余分な位置引数を拒否する() {
   out="$(bash "$UNINSTALL" "$TARGET" "$TEST_TMP/other-target" 2>&1)" || rc=$?
   assert_ne "0" "$rc" "余分な位置引数の終了コード"
   assert_contains "$out" "1つ" "余分な位置引数の出力"
+}
+
+test_アンインストールのshared_guess組合せを変更前に拒否する() {
+  _setup_target
+  printf '利用者の除外\n' >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_uninstall_args --shared --guess
+  assert_ne "0" "$UNINSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "不正なスコープ指定で.gitignoreが変更された"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "スコープ" "エラー"
 }
 
 test_token_reportの導入先entrypointを安全かつ冪等に外す() {
