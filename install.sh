@@ -2,7 +2,7 @@
 # claude-token-saver を導入先リポジトリへインストールする。
 #
 #   cd <導入先リポジトリ> && /path/to/claude-token-saver/install.sh
-#   install.sh <導入先ディレクトリ>
+#   install.sh [--personal|--shared] <導入先ディレクトリ>
 #
 # 冪等である。二度実行しても設定は重複しない。
 # 環境変数 CTS_NO_SYMLINK=1 でスキルのリンクをコピーへ強制的に退避できる。
@@ -13,11 +13,19 @@ set -uo pipefail
 # 物理パスで解決する。シンボリックリンク経由で呼ばれたときに綴りの違う
 # パスが登録され、実パス経由の再実行で二重登録になるのを防ぐ。
 CTS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+scope_arg=""
 target_args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --personal | --shared)
+      if [ -n "$scope_arg" ]; then
+        printf 'エラー: スコープは --personal または --shared のいずれか1つだけ指定できる\n' >&2
+        exit 1
+      fi
+      scope_arg="$1"
+      ;;
     -h | --help)
-      printf 'usage: install.sh [<導入先ディレクトリ>]\n'
+      printf 'usage: install.sh [--personal|--shared] [<導入先ディレクトリ>]\n'
       exit 0
       ;;
     -*)
@@ -28,6 +36,12 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+do_personal=1
+do_shared=1
+case "$scope_arg" in
+  --personal) do_shared=0 ;;
+  --shared) do_personal=0 ;;
+esac
 if [ "${#target_args[@]}" -gt 1 ]; then
   printf 'エラー: 導入先ディレクトリは1つだけ指定できる\n' >&2
   exit 1
@@ -98,13 +112,24 @@ cts_reject_managed_symlinks() {
 command -v python3 >/dev/null 2>&1 ||
   die "python3 が必要である（settings.local.json を壊さずに編集するため）。フック自体は python3 に依存しない。"
 
-cts_reject_managed_symlinks
-python3 "$CTS_HOME/lib/ledger.py" check-writable "$SETTINGS" ||
-  die "settings.local.json に安全に書き込めない"
-python3 "$CTS_HOME/lib/ledger.py" check-writable "$GITIGNORE" ||
-  die ".gitignore に安全に書き込めない"
+if [ "$do_personal" = 1 ]; then
+  cts_reject_managed_symlinks
+  python3 "$CTS_HOME/lib/ledger.py" check-writable "$SETTINGS" ||
+    die "settings.local.json に安全に書き込めない"
+fi
+if [ "$do_shared" = 1 ]; then
+  python3 "$CTS_HOME/lib/ledger.py" check-writable "$GITIGNORE" ||
+    die ".gitignore に安全に書き込めない"
+fi
 
 info "claude-token-saver を導入する: $TARGET"
+
+installed_skills=()
+gitignore_existed=1
+[ -e "$GITIGNORE" ] || [ -L "$GITIGNORE" ] || gitignore_existed=0
+legacy_ledger="$TARGET/$(cts_legacy_ledger_rel)"
+
+if [ "$do_personal" = 1 ]; then
 
 # --- 1. ディレクトリ ---------------------------------------------------------
 
@@ -170,7 +195,6 @@ cts_migrate_dir "$TARGET/$(cts_legacy_handoff_rel)/consumed" \
                 "$TARGET/$(cts_handoff_rel)/consumed"
 
 # 台帳は1ファイルなので個別に扱う。
-legacy_ledger="$TARGET/$(cts_legacy_ledger_rel)"
 if [ -f "$legacy_ledger" ]; then
   if [ -e "$LEDGER" ]; then
     migrate_conflicts=$((migrate_conflicts + 1))
@@ -276,11 +300,6 @@ if [ "$migrated" -gt 0 ] || [ "$migrate_conflicts" -gt 0 ]; then
   info "旧パス（.claude 配下）からの移行: $migrated 件を移行、$migrate_conflicts 件は衝突のため旧側に残した"
 fi
 
-# .gitignore を新規に作るかどうかは、この時点でしか分からない。
-# uninstall.sh が「空になったから消してよい」と判断する根拠になる。
-gitignore_existed=1
-[ -e "$GITIGNORE" ] || [ -L "$GITIGNORE" ] || gitignore_existed=0
-
 # --- 2. フックの登録 ---------------------------------------------------------
 
 # 実体のあるスクリプトだけを登録する。存在しないコマンドを登録すると、
@@ -349,7 +368,6 @@ fi
 mkdir -p "$TARGET/.claude/skills" || die "skills ディレクトリを作成できない"
 
 # 実際に設置したスキルだけを .gitignore へ書くため、名前を集める。
-installed_skills=()
 found_skills=0
 
 # 台帳が無い旧環境向けの推測。リンク先が「どこかのクローンの skills/<同名>」で
@@ -429,7 +447,29 @@ done
 [ "$found_skills" -gt 0 ] ||
   warn "skills/ にスキルが1つも無いため何も設置していない（クローンが不完全である）"
 
+fi
+
+if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
+  shared_ledger="$TARGET/$(cts_ledger_rel)"
+  if ! python3 "$CTS_HOME/lib/ledger.py" has-record "$shared_ledger" any &&
+     python3 "$CTS_HOME/lib/ledger.py" has-record "$legacy_ledger" any; then
+    shared_ledger="$legacy_ledger"
+  fi
+
+  # 共有設定では個人領域を推測しない。台帳に実際に記録されたスキル名だけを
+  # 読み、台帳が無ければ状態ディレクトリの除外だけを書く。
+  while IFS=$'\037' read -r name _src _mode; do
+    case "$name" in
+      "" | . | .. | */*)
+        [ -z "$name" ] || warn "台帳のスキル名が不正なので .gitignore に書かない: $name"
+        ;;
+      *) installed_skills+=("$name") ;;
+    esac
+  done < <(python3 "$CTS_HOME/lib/ledger.py" list-skills "$shared_ledger")
+fi
+
 # --- 4. .gitignore -----------------------------------------------------------
+if [ "$do_shared" = 1 ]; then
 
 # 引き継ぎと状態ファイルは利用実績であり、既定では版管理しない。
 # スキルのリンクは絶対パスを指す環境依存の産物であり、版管理へ入れると
@@ -456,8 +496,11 @@ esac
 
 # 自分で作った .gitignore だけを、取り外しのときに消してよい。
 if [ "$gitignore_existed" = 0 ] && [ -e "$GITIGNORE" ]; then
-  python3 "$CTS_HOME/lib/ledger.py" set-flag "$LEDGER" gitignore_created 1 ||
-    die "台帳を更新できない"
+  if [ "$do_personal" = 1 ]; then
+    python3 "$CTS_HOME/lib/ledger.py" set-flag "$LEDGER" gitignore_created 1 ||
+      die "台帳を更新できない"
+  fi
+fi
 fi
 
 # --- 5. まとめ ---------------------------------------------------------------

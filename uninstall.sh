@@ -2,7 +2,7 @@
 # install.sh を取り消す。
 #
 #   cd <導入先リポジトリ> && /path/to/claude-token-saver/uninstall.sh
-#   uninstall.sh [--guess] [<導入先ディレクトリ>]
+#   uninstall.sh [--personal|--shared] [--guess] [<導入先ディレクトリ>]
 #
 # .token-saver/handoff/ 配下の実ファイルは消さない。引き継ぎは作業の記録であり、
 # アンインストールで失われてよいものではない。
@@ -12,7 +12,7 @@
 # 張った同名のリンクや自作のフックを巻き込んで消す。台帳の無い旧版で導入した
 # 環境のために --guess を用意する。それを付けたときだけ従来の推測へ落ちる。
 #
-#   uninstall.sh [--guess] [<導入先ディレクトリ>]
+#   uninstall.sh [--personal|--shared] [--guess] [<導入先ディレクトリ>]
 #
 # 環境変数 CTS_STRICT=1 で、警告があれば終了コードを非 0 にする（CI 向け）。
 
@@ -25,12 +25,20 @@ set -uo pipefail
 CTS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 GUESS=0
+scope_arg=""
 pos=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --personal | --shared)
+      if [ -n "$scope_arg" ]; then
+        printf 'エラー: スコープは --personal または --shared のいずれか1つだけ指定できる\n' >&2
+        exit 1
+      fi
+      scope_arg="$1"
+      ;;
     --guess) GUESS=1 ;;
     -h | --help)
-      printf 'usage: uninstall.sh [--guess] [<導入先ディレクトリ>]\n'
+      printf 'usage: uninstall.sh [--personal|--shared] [--guess] [<導入先ディレクトリ>]\n'
       exit 0
       ;;
     -*)
@@ -41,6 +49,16 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+do_personal=1
+do_shared=1
+case "$scope_arg" in
+  --personal) do_shared=0 ;;
+  --shared) do_personal=0 ;;
+esac
+if [ "$scope_arg" = "--shared" ] && [ "$GUESS" = 1 ]; then
+  printf 'エラー: --guess は --personal スコープでのみ指定できる\n' >&2
+  exit 1
+fi
 target_arg="${pos[0]:-$PWD}"
 if [ "${#pos[@]}" -gt 1 ]; then
   printf 'エラー: 導入先ディレクトリは1つだけ指定できる\n' >&2
@@ -97,9 +115,9 @@ cts_reject_managed_symlinks() {
 }
 
 command -v python3 >/dev/null 2>&1 ||
-  die "python3 が必要である（settings.local.json を壊さずに編集するため）。"
+  die "python3 が必要である（settings.local.json と .gitignore を壊さずに編集するため）。"
 
-cts_reject_managed_symlinks
+[ "$do_personal" = 1 ] && cts_reject_managed_symlinks
 
 info "claude-token-saver を取り外す: $TARGET"
 
@@ -132,6 +150,8 @@ token_report_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" tok
 # 未追跡ファイルとして git に現れる）。
 skills_left=0
 token_report_left=0
+
+if [ "$do_personal" = 1 ]; then
 
 # --- 1b. target-local token-report entrypoint --------------------------------
 
@@ -279,24 +299,71 @@ if [ "$have_ledger" = 1 ] || [ "$GUESS" = 1 ]; then
   rmdir "$TARGET/.claude/skills" 2>/dev/null || true
 fi
 
+fi
+
 # --- 3. .gitignore -----------------------------------------------------------
+
+handoff_dir="$TARGET/$(cts_handoff_rel)"
+legacy_handoff_dir="$TARGET/$(cts_legacy_handoff_rel)"
+state_dir="$TARGET/$(cts_base_rel)"
+shared_left=0
+
+if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
+  # 共有設定だけを外すときは個人領域を変更しない。台帳に記録されたスキル、
+  # 状態ファイル、引き継ぎ、token-report の入口が残るなら、除外を外して
+  # 未追跡ファイルを露出させない。
+  if [ "$have_skill_record" = 1 ]; then
+    while IFS=$'\037' read -r name _src _mode; do
+      case "$name" in
+        "" | . | .. | */*)
+          [ -z "$name" ] || {
+            warn "台帳のスキル名が不正なので .gitignore の除外を外さない: $name"
+            shared_left=1
+          }
+          ;;
+        *)
+          dest="$TARGET/.claude/skills/$name"
+          if [ -e "$dest" ] || [ -L "$dest" ]; then
+            shared_left=1
+          fi
+          ;;
+      esac
+    done < <(python3 "$CTS_HOME/lib/ledger.py" list-skills "$LEDGER")
+  fi
+
+  for state_candidate in "$state_dir" "$TARGET/$(cts_legacy_state_rel)" \
+    "$handoff_dir" "$legacy_handoff_dir"; do
+    if [ -L "$state_candidate" ]; then
+      shared_left=1
+    elif [ -d "$state_candidate" ] &&
+         [ -n "$(find "$state_candidate" \( -type f -o -type l \) -print -quit 2>/dev/null)" ]; then
+      shared_left=1
+    fi
+  done
+fi
 
 # スキルより後に処理する。除外を外してから設置物を残すと、絶対パスのリンクが
 # 未追跡ファイルとして git に現れ、利用者の作業を汚す。
 # ブロックは START/END マーカーで自分のものと確定できるため、台帳の有無には
 # 依存しない（推測ではない）。
-if [ "$skills_left" = 1 ] || [ "$token_report_left" = 1 ]; then
-  warn "管理対象の設置物が残っているため .gitignore の除外を外していない"
-elif [ -f "$GITIGNORE" ]; then
-  python3 "$CTS_HOME/lib/gitignore-block.py" remove "$GITIGNORE"
-  case "$?" in
-    0) ;;
-    2) warnings+=(".gitignore のブロックが不正または改行形式が混在しているため削除していない") ;;
-    *) die ".gitignore を更新できない" ;;
-  esac
+if [ "$do_shared" = 1 ]; then
+  if { [ "$do_personal" = 1 ] &&
+       { [ "$skills_left" = 1 ] || [ "$token_report_left" = 1 ]; }; } ||
+     { [ "$do_personal" = 0 ] && [ "$shared_left" = 1 ]; }; then
+    warn "管理対象の設置物が残っているため .gitignore の除外を外していない"
+  elif [ -f "$GITIGNORE" ]; then
+    python3 "$CTS_HOME/lib/gitignore-block.py" remove "$GITIGNORE"
+    case "$?" in
+      0) ;;
+      2) warnings+=(".gitignore のブロックが不正または改行形式が混在しているため削除していない") ;;
+      *) die ".gitignore を更新できない" ;;
+    esac
+  fi
 fi
 
 # --- 4. 残したものの通知と後片付け -------------------------------------------
+
+if [ "$do_personal" = 1 ]; then
 
 # .gitignore を消してよいかは、install.sh が作ったかどうかで決まる。
 # 追跡済みの空の .gitignore を消すと、利用者のコミットから勝手に消える。
@@ -365,7 +432,8 @@ if [ "$have_ledger" = 1 ] || [ "$GUESS" = 1 ]; then
   # 中身が無くなったファイルのうち、install.sh より前には無かったものを消す。
   # install.sh が作ったものでも、利用者がその後コミットしていれば消さない。
   # 台帳のフラグは「作った」しか語らず、現在の追跡状態を語らないためである。
-  if [ "$gitignore_created" = 1 ] && [ -f "$GITIGNORE" ] && [ ! -s "$GITIGNORE" ]; then
+  if [ "$do_shared" = 1 ] && [ "$gitignore_created" = 1 ] &&
+     [ -f "$GITIGNORE" ] && [ ! -s "$GITIGNORE" ]; then
     if git -C "$TARGET" ls-files --error-unmatch .gitignore >/dev/null 2>&1; then
       info "  .gitignore は空になったが版管理されているため残した"
     else
@@ -390,6 +458,8 @@ if [ "$have_ledger" = 1 ] || [ "$GUESS" = 1 ]; then
   fi
 
   rmdir "$TARGET/.claude" 2>/dev/null || true
+fi
+
 fi
 
 if [ "${#warnings[@]}" -gt 0 ]; then

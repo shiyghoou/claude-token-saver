@@ -1018,6 +1018,80 @@ test_インストールの重複スコープを変更前に拒否する() {
   assert_contains "$INSTALL_OUT$INSTALL_ERR" "スコープ" "エラー"
 }
 
+test_personalスコープは_gitignoreを変更しない() {
+  _setup_target
+  printf 'node_modules/\n' >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "--personal が.gitignoreを変更した"
+  assert_file_exists "$SETTINGS" "settings.local.json"
+  assert_file_exists "$TARGET/.claude/skills/session-handoff" "スキル"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "台帳"
+}
+
+test_personalスコープは_gitignoreを新規作成しない() {
+  _setup_target
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.gitignore" "--personal後の.gitignore"
+  assert_file_exists "$SETTINGS" "settings.local.json"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "台帳"
+}
+
+test_sharedスコープは個人の設置物を変更せず_台帳のスキルだけ除外する() {
+  _setup_target
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "personalの終了コード"
+  cp "$SETTINGS" "$TEST_TMP/settings.before"
+  cp "$TARGET/.token-saver/installed.json" "$TEST_TMP/ledger.before"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "sharedの終了コード"
+  cmp -s "$TEST_TMP/settings.before" "$SETTINGS" ||
+    _fail "--shared がsettings.local.jsonを変更した"
+  cmp -s "$TEST_TMP/ledger.before" "$TARGET/.token-saver/installed.json" ||
+    _fail "--shared が台帳を変更した"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".token-saver/" ".gitignore"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignore"
+}
+
+test_sharedスコープは台帳が無ければ推測しない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/skills/session-handoff"
+  printf '利用者のスキル\n' >"$TARGET/.claude/skills/session-handoff/SKILL.md"
+  printf '{"permissions":{}}\n' >"$SETTINGS"
+  cp "$SETTINGS" "$TEST_TMP/settings.before"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.token-saver/installed.json" "台帳"
+  assert_file_exists "$TARGET/.claude/skills/session-handoff/SKILL.md" "既存スキル"
+  cmp -s "$TEST_TMP/settings.before" "$SETTINGS" ||
+    _fail "--shared がsettings.local.jsonを変更した"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".token-saver/" ".gitignore"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignoreの推測除外"
+}
+
+test_sharedスコープは旧台帳を読み取るが移行しない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.token-saver"
+  python3 - "$TARGET/.claude/.token-saver/installed.json" "$REPO_ROOT/skills/session-handoff" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w") as handle:
+    json.dump({"skills": [{"name": "session-handoff", "src": sys.argv[2], "mode": "link"}]}, handle)
+    handle.write("\n")
+PY
+  cp "$TARGET/.claude/.token-saver/installed.json" "$TEST_TMP/legacy-ledger.before"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.token-saver/installed.json" "共有専用で作られた新台帳"
+  cmp -s "$TEST_TMP/legacy-ledger.before" "$TARGET/.claude/.token-saver/installed.json" ||
+    _fail "--shared が旧台帳を変更または移行した"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignore"
+}
+
 test_インストール引数の不正値を拒否する() {
   local out rc=0
   out="$(bash "$INSTALL" --help 2>&1)" || rc=$?
