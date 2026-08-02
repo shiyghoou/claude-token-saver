@@ -978,6 +978,12 @@ test_guessでもスクリプト名だけを含む利用者コマンドを消さ�
 test_導入先の余分な位置引数を拒否する() {
   _setup_target
   local out rc=0
+  out="$(bash "$UNINSTALL" --help 2>&1)" || rc=$?
+  assert_eq "0" "$rc" "--help の終了コード"
+  assert_contains "$out" "--personal" "--help の個人スコープ"
+  assert_contains "$out" "--shared" "--help の共有スコープ"
+
+  rc=0
   out="$(bash "$UNINSTALL" "$TARGET" "$TEST_TMP/other-target" 2>&1)" || rc=$?
   assert_ne "0" "$rc" "余分な位置引数の終了コード"
   assert_contains "$out" "1つ" "余分な位置引数の出力"
@@ -1057,6 +1063,44 @@ test_sharedスコープは空の_gitignoreを削除しない() {
   assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
   assert_file_exists "$TARGET/.gitignore" "空の.gitignore"
   assert_empty "$(cat "$TARGET/.gitignore")" "空の.gitignoreの内容"
+}
+
+test_sharedスコープは旧台帳のスキルが残れば共有除外を外さない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.token-saver" "$TARGET/.claude/skills/session-handoff"
+  printf '旧台帳のスキル\n' >"$TARGET/.claude/skills/session-handoff/SKILL.md"
+  python3 - "$TARGET/.claude/.token-saver/installed.json" "$REPO_ROOT/skills/session-handoff" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w") as handle:
+    json.dump({"skills": [{"name": "session-handoff", "src": sys.argv[2], "mode": "link"}]}, handle)
+    handle.write("\n")
+PY
+  {
+    printf '%s\n' "$GITIGNORE_START"
+    printf '.token-saver/\n.claude/skills/session-handoff\n'
+    printf '%s\n' "$GITIGNORE_END"
+  } >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_uninstall_args --shared
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "旧台帳の残存スキルがあるのに共有除外を外した"
+  assert_file_exists "$TARGET/.claude/.token-saver/installed.json" "旧台帳"
+  assert_file_exists "$TARGET/.claude/skills/session-handoff/SKILL.md" "スキル"
+}
+
+test_sharedスコープは_gitignoreのシンボリックリンクを変更しない() {
+  _setup_target
+  printf '%s\n' "$GITIGNORE_START" '.token-saver/' "$GITIGNORE_END" >"$TEST_TMP/real.gitignore"
+  ln -s "$TEST_TMP/real.gitignore" "$TARGET/.gitignore"
+  _run_uninstall_args --shared
+  assert_ne "0" "$UNINSTALL_STATUS" "終了コード"
+  if [ ! -L "$TARGET/.gitignore" ]; then
+    _fail "--shared が.gitignoreのシンボリックリンクを置き換えた"
+  fi
+  assert_contains "$(cat "$TEST_TMP/real.gitignore")" "$GITIGNORE_START" "リンク先の内容"
 }
 
 test_token_reportの導入先entrypointを安全かつ冪等に外す() {

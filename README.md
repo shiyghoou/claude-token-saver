@@ -44,6 +44,17 @@ cd <導入したいリポジトリ>
 5. 導入先から計測を実行する `.token-saver/token-report.sh` を設置する
 6. 設置したものを `.token-saver/installed.json`（台帳）へ記録する
 
+### 個人設定と共有設定のスコープ
+
+引数なしの `install.sh` は、従来どおり個人設定と共有設定の両方を更新する。分けて実行したいときは、次のスコープを明示する。
+
+```bash
+~/claude-token-saver/install.sh --personal   # settings・フック・スキル・状態・台帳だけ
+~/claude-token-saver/install.sh --shared     # .gitignoreだけ
+```
+
+`--personal` は `.gitignore` を作成・変更しない。`--shared` は既存の新旧台帳を読み取り、実際に記録されたスキルだけを除外へ含める。台帳が無い場合は `.token-saver/` だけを書き、スキルを推測しない。共有設定を複数のクローンへ反映する場合も、各導入先で `--shared` を実行する。
+
 ### 配置
 
 ```
@@ -108,8 +119,12 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 取り外しは `uninstall.sh`。`.token-saver/handoff/` 配下の実ファイルは消さない。
 
 ```bash
-/path/to/claude-token-saver/uninstall.sh [--guess] [<導入先ディレクトリ>]
+/path/to/claude-token-saver/uninstall.sh [--personal|--shared] [--guess] [<導入先ディレクトリ>]
 ```
+
+`uninstall.sh --personal` は個人設定・フック・スキル・状態・台帳だけを外し、`.gitignore` を残す。個人側を外したあと、共有ブロックも不要なら `uninstall.sh --shared` を実行する。`--shared` は個人用設置物を削除せず、台帳・状態・引き継ぎ・残存スキルがある場合は未追跡ファイルを露出させないためブロックを残す。所有者が不明な空の `.gitignore` 自体は削除しない。
+
+`--guess` は台帳の無い旧環境を推測する個人側のオプションであり、`--shared --guess` は拒否される。
 
 ## 計測（token-report）
 

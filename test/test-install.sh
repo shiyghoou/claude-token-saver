@@ -1092,11 +1092,61 @@ PY
   assert_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignore"
 }
 
+test_sharedスコープは再実行で_gitignoreを再書き込みしない() {
+  _setup_target
+  _run_install_args --personal
+  _run_install_args --shared
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "sharedの再実行で.gitignoreが変化した"
+}
+
+test_sharedスコープは複数クローンで個別の台帳を読む() {
+  local first="$TEST_TMP/target-first" second="$TEST_TMP/target-second"
+  mkdir -p "$first" "$second"
+  ( cd "$first" && git init -q . )
+  ( cd "$second" && git init -q . )
+
+  TARGET="$first"
+  SETTINGS="$TARGET/.claude/settings.local.json"
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "first personalの終了コード"
+
+  TARGET="$second"
+  SETTINGS="$TARGET/.claude/settings.local.json"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "second sharedの終了コード"
+  assert_file_missing "$SETTINGS" "secondのsettings"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" "secondの推測除外"
+
+  TARGET="$first"
+  SETTINGS="$TARGET/.claude/settings.local.json"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "first sharedの終了コード"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" "firstの台帳由来除外"
+}
+
+test_sharedスコープは_gitignoreのシンボリックリンクを変更しない() {
+  _setup_target
+  printf '利用者の設定\n' >"$TEST_TMP/real.gitignore"
+  ln -s "$TEST_TMP/real.gitignore" "$TARGET/.gitignore"
+  _run_install_args --shared
+  assert_ne "0" "$INSTALL_STATUS" "終了コード"
+  if [ ! -L "$TARGET/.gitignore" ]; then
+    _fail "--shared が.gitignoreのシンボリックリンクを置き換えた"
+  fi
+  assert_eq "利用者の設定" "$(cat "$TEST_TMP/real.gitignore")" "リンク先の内容"
+}
+
 test_インストール引数の不正値を拒否する() {
   local out rc=0
   out="$(bash "$INSTALL" --help 2>&1)" || rc=$?
   assert_eq "0" "$rc" "--help の終了コード"
   assert_contains "$out" "usage:" "--help の出力"
+  assert_contains "$out" "--personal" "--help の個人スコープ"
+  assert_contains "$out" "--shared" "--help の共有スコープ"
 
   rc=0
   out="$(bash "$INSTALL" -P 2>&1)" || rc=$?

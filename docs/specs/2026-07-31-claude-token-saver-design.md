@@ -369,6 +369,18 @@ Stop フックとして、累積 `cache_read` が閾値に達したらセッシ�
 `.gitignore` と `settings.local.json` の解析・編集ロジックは `lib/` に置き、`install.sh` と `uninstall.sh` で
 共有する。片方だけ直す事故を防ぐためである。
 
+### 個人設定と共有設定を分けるCLIスコープ
+
+引数なしは後方互換のため個人設定と共有設定の両方を扱う。明示的なスコープは相互排他的である。
+
+- `install.sh --personal` は `.claude/settings.local.json`、フック、スキル、`.token-saver/`、台帳だけを更新し、`.gitignore` を作成・変更しない。
+- `install.sh --shared` は `.gitignore` だけを更新する。現在の台帳にスキル記録が無ければ旧台帳を読み取り、どちらにも記録が無ければ `.token-saver/` だけを書き、スキルを推測しない。台帳や個人ファイルは作成・変更しない。
+- `uninstall.sh --personal` は個人側だけを外し、`.gitignore` を残す。
+- `uninstall.sh --shared` は `.gitignore` の管理ブロックだけを扱い、台帳、settings、フック、スキル、entrypoint、状態を削除しない。記録済みスキル、token-report entrypoint、handoff、状態ファイルが残る場合は、未追跡ファイルを露出させないためブロックを残す。所有者が不明な空の `.gitignore` 自体も削除しない。
+- `uninstall.sh --guess` は従来どおり個人側の推測経路であり、`--shared --guess` は拒否する。
+
+共有設定を個人設定より先に適用・解除しても個人側へ副作用を出さない。個人側を解除したあとに共有ブロックを解除する場合は、`--personal`、`--shared` の順に実行する。
+
 `uninstall.sh` は上記を取り消す。`.handoff/` 配下の実ファイルは消さない。取り消しの際は:
 
 - `.gitignore` の削除は START と END の**対が揃っている場合のみ**行う。END を欠いたまま削除すると

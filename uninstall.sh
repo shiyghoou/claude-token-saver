@@ -39,6 +39,9 @@ while [ "$#" -gt 0 ]; do
     --guess) GUESS=1 ;;
     -h | --help)
       printf 'usage: uninstall.sh [--personal|--shared] [--guess] [<導入先ディレクトリ>]\n'
+      printf '  --personal  個人設定・フック・スキル・状態だけを外す\n'
+      printf '  --shared    .gitignoreだけを外す\n'
+      printf '  --guess     台帳の無い旧環境を推測して外す（個人側のみ）\n'
       exit 0
       ;;
     -*)
@@ -307,12 +310,20 @@ handoff_dir="$TARGET/$(cts_handoff_rel)"
 legacy_handoff_dir="$TARGET/$(cts_legacy_handoff_rel)"
 state_dir="$TARGET/$(cts_base_rel)"
 shared_left=0
+shared_skill_ledger="$TARGET/$(cts_ledger_rel)"
+shared_have_skill_record=0
+if python3 "$CTS_HOME/lib/ledger.py" has-record "$shared_skill_ledger" skills; then
+  shared_have_skill_record=1
+elif python3 "$CTS_HOME/lib/ledger.py" has-record "$LEGACY_LEDGER" skills; then
+  shared_skill_ledger="$LEGACY_LEDGER"
+  shared_have_skill_record=1
+fi
 
 if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
   # 共有設定だけを外すときは個人領域を変更しない。台帳に記録されたスキル、
   # 状態ファイル、引き継ぎ、token-report の入口が残るなら、除外を外して
   # 未追跡ファイルを露出させない。
-  if [ "$have_skill_record" = 1 ]; then
+  if [ "$shared_have_skill_record" = 1 ]; then
     while IFS=$'\037' read -r name _src _mode; do
       case "$name" in
         "" | . | .. | */*)
@@ -328,7 +339,7 @@ if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
           fi
           ;;
       esac
-    done < <(python3 "$CTS_HOME/lib/ledger.py" list-skills "$LEDGER")
+    done < <(python3 "$CTS_HOME/lib/ledger.py" list-skills "$shared_skill_ledger")
   fi
 
   for state_candidate in "$state_dir" "$TARGET/$(cts_legacy_state_rel)" \

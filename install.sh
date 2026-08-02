@@ -26,6 +26,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     -h | --help)
       printf 'usage: install.sh [--personal|--shared] [<導入先ディレクトリ>]\n'
+      printf '  --personal  個人設定・フック・スキル・状態だけを更新する\n'
+      printf '  --shared    .gitignoreだけを更新する\n'
+      printf '  （オプションなしは従来どおり両方を更新する）\n'
       exit 0
       ;;
     -*)
@@ -451,8 +454,8 @@ fi
 
 if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
   shared_ledger="$TARGET/$(cts_ledger_rel)"
-  if ! python3 "$CTS_HOME/lib/ledger.py" has-record "$shared_ledger" any &&
-     python3 "$CTS_HOME/lib/ledger.py" has-record "$legacy_ledger" any; then
+  if ! python3 "$CTS_HOME/lib/ledger.py" has-record "$shared_ledger" skills &&
+     python3 "$CTS_HOME/lib/ledger.py" has-record "$legacy_ledger" skills; then
     shared_ledger="$legacy_ledger"
   fi
 
