@@ -286,8 +286,10 @@ gitignore_existed=1
 # 実体のあるスクリプトだけを登録する。存在しないコマンドを登録すると、
 # 導入先のセッションでフックが毎回失敗する。
 hook_specs=()
+hook_matchers=()
 if [ -f "$CTS_HOME/scripts/handoff-check.sh" ]; then
   hook_specs+=("SessionStart:$CTS_HOME/scripts/handoff-check.sh")
+  hook_matchers+=("--matcher" "SessionStart=startup|clear")
 else
   warn "scripts/handoff-check.sh が無いため SessionStart フックを登録しない（クローンが不完全である）"
 fi
@@ -326,7 +328,7 @@ if [ "${#hook_specs[@]}" -gt 0 ]; then
   fi
 
   python3 "$CTS_HOME/lib/settings-hooks.py" install "$SETTINGS" \
-    --ledger "$LEDGER" "${hook_specs[@]}"
+    --ledger "$LEDGER" "${hook_matchers[@]}" "${hook_specs[@]}"
   settings_status=$?
   case "$settings_status" in
     0) ;;
