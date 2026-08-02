@@ -21,6 +21,13 @@ _run_uninstall() {
   UNINSTALL_ERR="$(cat "$TEST_TMP/.err")"
 }
 
+_run_uninstall_args() {
+  bash "$UNINSTALL" "$@" "$TARGET" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
+  UNINSTALL_STATUS=$?
+  UNINSTALL_OUT="$(cat "$TEST_TMP/.out")"
+  UNINSTALL_ERR="$(cat "$TEST_TMP/.err")"
+}
+
 # 台帳の無い旧環境向けの推測経路。既定では通らないので、明示的に opt-in する。
 _run_uninstall_guess() {
   bash "$UNINSTALL" --guess "$TARGET" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
@@ -971,9 +978,129 @@ test_guessでもスクリプト名だけを含む利用者コマンドを消さ�
 test_導入先の余分な位置引数を拒否する() {
   _setup_target
   local out rc=0
+  out="$(bash "$UNINSTALL" --help 2>&1)" || rc=$?
+  assert_eq "0" "$rc" "--help の終了コード"
+  assert_contains "$out" "--personal" "--help の個人スコープ"
+  assert_contains "$out" "--shared" "--help の共有スコープ"
+
+  rc=0
   out="$(bash "$UNINSTALL" "$TARGET" "$TEST_TMP/other-target" 2>&1)" || rc=$?
   assert_ne "0" "$rc" "余分な位置引数の終了コード"
   assert_contains "$out" "1つ" "余分な位置引数の出力"
+}
+
+test_アンインストールのshared_guess組合せを変更前に拒否する() {
+  _setup_target
+  printf '利用者の除外\n' >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_uninstall_args --shared --guess
+  assert_ne "0" "$UNINSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "不正なスコープ指定で.gitignoreが変更された"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "スコープ" "エラー"
+}
+
+test_personalスコープは_gitignoreを残して個人だけ外す() {
+  _setup_target
+  _run_install
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_uninstall_args --personal
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "--personal が.gitignoreを変更した"
+  assert_file_missing "$SETTINGS" "settings.local.json"
+  assert_file_missing "$TARGET/.claude/skills/session-handoff" "スキル"
+  assert_file_missing "$TARGET/.token-saver/installed.json" "台帳"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".token-saver/" ".gitignoreの共有除外"
+}
+
+test_sharedスコープは個人設置物と台帳を残して除外を保持する() {
+  _setup_target
+  _run_install
+  cp "$SETTINGS" "$TEST_TMP/settings.before"
+  cp "$TARGET/.token-saver/installed.json" "$TEST_TMP/ledger.before"
+  _run_uninstall_args --shared
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/settings.before" "$SETTINGS" ||
+    _fail "--shared がsettings.local.jsonを変更した"
+  cmp -s "$TEST_TMP/ledger.before" "$TARGET/.token-saver/installed.json" ||
+    _fail "--shared が台帳を変更した"
+  assert_file_exists "$TARGET/.claude/skills/session-handoff" "個人のスキル"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".token-saver/" ".gitignore"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "残っている" "残存物の案内"
+}
+
+test_sharedスコープは個人削除後に共有除外だけを外す() {
+  _setup_target
+  _run_install
+  _run_uninstall_args --personal
+  assert_file_exists "$TARGET/.gitignore" "personal後の.gitignore"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".token-saver/" "personal後の共有除外"
+  _run_uninstall_args --shared
+  assert_eq "0" "$UNINSTALL_STATUS" "sharedの終了コード"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" "$GITIGNORE_START" ".gitignoreのSTART"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" "$GITIGNORE_END" ".gitignoreのEND"
+  assert_empty "$(cat "$TARGET/.gitignore")" "空になった.gitignore"
+  assert_file_exists "$TARGET/.gitignore" "空の.gitignore"
+}
+
+test_sharedスコープは引き継ぎが残れば共有除外を外さない() {
+  _setup_target
+  _run_install
+  printf '残す引き継ぎ\n' >"$TARGET/.token-saver/handoff/pending/a.md"
+  _run_uninstall_args --personal
+  assert_file_exists "$TARGET/.token-saver/handoff/pending/a.md" "引き継ぎ"
+  _run_uninstall_args --shared
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_exists "$TARGET/.token-saver/handoff/pending/a.md" "引き継ぎ"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".token-saver/" ".gitignoreの共有除外"
+}
+
+test_sharedスコープは空の_gitignoreを削除しない() {
+  _setup_target
+  : >"$TARGET/.gitignore"
+  _run_uninstall_args --shared
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_exists "$TARGET/.gitignore" "空の.gitignore"
+  assert_empty "$(cat "$TARGET/.gitignore")" "空の.gitignoreの内容"
+}
+
+test_sharedスコープは旧台帳のスキルが残れば共有除外を外さない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.token-saver" "$TARGET/.claude/skills/session-handoff"
+  printf '旧台帳のスキル\n' >"$TARGET/.claude/skills/session-handoff/SKILL.md"
+  python3 - "$TARGET/.claude/.token-saver/installed.json" "$REPO_ROOT/skills/session-handoff" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w") as handle:
+    json.dump({"skills": [{"name": "session-handoff", "src": sys.argv[2], "mode": "link"}]}, handle)
+    handle.write("\n")
+PY
+  {
+    printf '%s\n' "$GITIGNORE_START"
+    printf '.token-saver/\n.claude/skills/session-handoff\n'
+    printf '%s\n' "$GITIGNORE_END"
+  } >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_uninstall_args --shared
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "旧台帳の残存スキルがあるのに共有除外を外した"
+  assert_file_exists "$TARGET/.claude/.token-saver/installed.json" "旧台帳"
+  assert_file_exists "$TARGET/.claude/skills/session-handoff/SKILL.md" "スキル"
+}
+
+test_sharedスコープは_gitignoreのシンボリックリンクを変更しない() {
+  _setup_target
+  printf '%s\n' "$GITIGNORE_START" '.token-saver/' "$GITIGNORE_END" >"$TEST_TMP/real.gitignore"
+  ln -s "$TEST_TMP/real.gitignore" "$TARGET/.gitignore"
+  _run_uninstall_args --shared
+  assert_ne "0" "$UNINSTALL_STATUS" "終了コード"
+  if [ ! -L "$TARGET/.gitignore" ]; then
+    _fail "--shared が.gitignoreのシンボリックリンクを置き換えた"
+  fi
+  assert_contains "$(cat "$TEST_TMP/real.gitignore")" "$GITIGNORE_START" "リンク先の内容"
 }
 
 test_token_reportの導入先entrypointを安全かつ冪等に外す() {

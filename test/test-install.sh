@@ -17,6 +17,13 @@ _run_install() {
   INSTALL_ERR="$(cat "$TEST_TMP/.err")"
 }
 
+_run_install_args() {
+  bash "$INSTALL" "$@" "$TARGET" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
+  INSTALL_STATUS=$?
+  INSTALL_OUT="$(cat "$TEST_TMP/.out")"
+  INSTALL_ERR="$(cat "$TEST_TMP/.err")"
+}
+
 # settings.local.json から指定フックのコマンド一覧を HOOK_COMMANDS へ読み込む。
 # 「登録が消えた」と「ファイルが読めなかった」を取り違えないため、
 # 不在は明示的な文言を返し、解析できないときはテストを失敗させる。
@@ -1000,11 +1007,166 @@ test_台帳無しのinstallは推測候補を消さず警告する() {
   assert_contains "$INSTALL_OUT$INSTALL_ERR" "推測" "推測候補の警告"
 }
 
+test_インストールの重複スコープを変更前に拒否する() {
+  _setup_target
+  printf '利用者の除外\n' >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_install_args --personal --shared
+  assert_ne "0" "$INSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "不正なスコープ指定で.gitignoreが変更された"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "スコープ" "エラー"
+}
+
+test_personalスコープは_gitignoreを変更しない() {
+  _setup_target
+  printf 'node_modules/\n' >"$TARGET/.gitignore"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "--personal が.gitignoreを変更した"
+  assert_file_exists "$SETTINGS" "settings.local.json"
+  assert_file_exists "$TARGET/.claude/skills/session-handoff" "スキル"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "台帳"
+}
+
+test_personalスコープは_gitignoreを新規作成しない() {
+  _setup_target
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.gitignore" "--personal後の.gitignore"
+  assert_file_exists "$SETTINGS" "settings.local.json"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "台帳"
+}
+
+test_personalスコープの完了メッセージは共有更新手順を案内する() {
+  _setup_target
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" ".gitignore は変更していない" \
+    "--personalの完了メッセージ"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "--shared" \
+    "--personalの共有更新案内"
+}
+
+test_sharedスコープは個人の設置物を変更せず_台帳のスキルだけ除外する() {
+  _setup_target
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "personalの終了コード"
+  cp "$SETTINGS" "$TEST_TMP/settings.before"
+  cp "$TARGET/.token-saver/installed.json" "$TEST_TMP/ledger.before"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "sharedの終了コード"
+  cmp -s "$TEST_TMP/settings.before" "$SETTINGS" ||
+    _fail "--shared がsettings.local.jsonを変更した"
+  cmp -s "$TEST_TMP/ledger.before" "$TARGET/.token-saver/installed.json" ||
+    _fail "--shared が台帳を変更した"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".token-saver/" ".gitignore"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignore"
+}
+
+test_sharedスコープの完了メッセージはフック導入を示さない() {
+  _setup_target
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" \
+    "完了。共有設定（.gitignore）を更新した。" "--sharedの完了メッセージ"
+  assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "引き継ぎフックが有効" \
+    "--sharedの完了メッセージ"
+}
+
+test_sharedスコープは台帳が無ければ推測しない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/skills/session-handoff"
+  printf '利用者のスキル\n' >"$TARGET/.claude/skills/session-handoff/SKILL.md"
+  printf '{"permissions":{}}\n' >"$SETTINGS"
+  cp "$SETTINGS" "$TEST_TMP/settings.before"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.token-saver/installed.json" "台帳"
+  assert_file_exists "$TARGET/.claude/skills/session-handoff/SKILL.md" "既存スキル"
+  cmp -s "$TEST_TMP/settings.before" "$SETTINGS" ||
+    _fail "--shared がsettings.local.jsonを変更した"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".token-saver/" ".gitignore"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignoreの推測除外"
+}
+
+test_sharedスコープは旧台帳を読み取るが移行しない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/.token-saver"
+  python3 - "$TARGET/.claude/.token-saver/installed.json" "$REPO_ROOT/skills/session-handoff" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w") as handle:
+    json.dump({"skills": [{"name": "session-handoff", "src": sys.argv[2], "mode": "link"}]}, handle)
+    handle.write("\n")
+PY
+  cp "$TARGET/.claude/.token-saver/installed.json" "$TEST_TMP/legacy-ledger.before"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.token-saver/installed.json" "共有専用で作られた新台帳"
+  cmp -s "$TEST_TMP/legacy-ledger.before" "$TARGET/.claude/.token-saver/installed.json" ||
+    _fail "--shared が旧台帳を変更または移行した"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignore"
+}
+
+test_sharedスコープは再実行で_gitignoreを再書き込みしない() {
+  _setup_target
+  _run_install_args --personal
+  _run_install_args --shared
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
+    _fail "sharedの再実行で.gitignoreが変化した"
+}
+
+test_sharedスコープは複数クローンで個別の台帳を読む() {
+  local first="$TEST_TMP/target-first" second="$TEST_TMP/target-second"
+  mkdir -p "$first" "$second"
+  ( cd "$first" && git init -q . )
+  ( cd "$second" && git init -q . )
+
+  TARGET="$first"
+  SETTINGS="$TARGET/.claude/settings.local.json"
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "first personalの終了コード"
+
+  TARGET="$second"
+  SETTINGS="$TARGET/.claude/settings.local.json"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "second sharedの終了コード"
+  assert_file_missing "$SETTINGS" "secondのsettings"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" "secondの推測除外"
+
+  TARGET="$first"
+  SETTINGS="$TARGET/.claude/settings.local.json"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "first sharedの終了コード"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" "firstの台帳由来除外"
+}
+
+test_sharedスコープは_gitignoreのシンボリックリンクを変更しない() {
+  _setup_target
+  printf '利用者の設定\n' >"$TEST_TMP/real.gitignore"
+  ln -s "$TEST_TMP/real.gitignore" "$TARGET/.gitignore"
+  _run_install_args --shared
+  assert_ne "0" "$INSTALL_STATUS" "終了コード"
+  if [ ! -L "$TARGET/.gitignore" ]; then
+    _fail "--shared が.gitignoreのシンボリックリンクを置き換えた"
+  fi
+  assert_eq "利用者の設定" "$(cat "$TEST_TMP/real.gitignore")" "リンク先の内容"
+}
+
 test_インストール引数の不正値を拒否する() {
   local out rc=0
   out="$(bash "$INSTALL" --help 2>&1)" || rc=$?
   assert_eq "0" "$rc" "--help の終了コード"
   assert_contains "$out" "usage:" "--help の出力"
+  assert_contains "$out" "--personal" "--help の個人スコープ"
+  assert_contains "$out" "--shared" "--help の共有スコープ"
 
   rc=0
   out="$(bash "$INSTALL" -P 2>&1)" || rc=$?
