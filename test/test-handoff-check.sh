@@ -887,6 +887,21 @@ test_末尾改行を含むファイル名は属性と消費後の実体を完全
   assert_file_missing "$PROJ/.token-saver/handoff/pending/$multiple"
 }
 
+test_cts_resolve_pathは生きたリンクと末尾改行を保持する() {
+  . "$REPO_ROOT/scripts/lib/common.sh"
+  local target_dir target link expected
+  target_dir="$TEST_TMP/target"$'\n'
+  target="$target_dir/real.md"$'\n'
+  link="$TEST_TMP/live-link.md"
+  mkdir -p "$target_dir"
+  printf 'リンク解決の本文\n' >"$target"
+  ln -s "$target" "$link"
+
+  cts_resolve_path "$link"
+  expected="$target"
+  assert_eq "$expected" "$CTS_RESOLVED_PATH" "解決後パス"
+}
+
 test_空白と日本語を含むファイル名でも消費できる() {
   _setup_project
   _write_pending "2026-07-31-1840 引き継ぎ メモ.md" "日本語名の本文"

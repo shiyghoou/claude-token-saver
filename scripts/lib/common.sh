@@ -234,6 +234,9 @@ cts_resolve_path() {
     # 物理パス中の末尾改行を保持してから sentinel だけを除く。
     dir="$(cd -P -- "$dir" 2>/dev/null && pwd -P && printf '\001')" || return 1
     dir="${dir%$'\001'}"
+    # pwd -P 自身が付けた終端改行を1つだけ除く。これより多く除くと、
+    # 物理パス名に含まれる末尾改行まで失われる。
+    dir="${dir%$'\n'}"
     [ -n "$dir" ] || return 1
     case "$dir" in
       */) p="$dir$base" ;;
@@ -244,6 +247,8 @@ cts_resolve_path() {
     # 閉じてから受け取ることで、command substitution の改行切捨てを避ける。
     link="$(readlink -- "$p" 2>/dev/null && printf '\001')" || return 1
     link="${link%$'\001'}"
+    # readlink 自身が付けた終端改行を1つだけ除き、リンク先名の末尾改行は残す。
+    link="${link%$'\n'}"
     case "$link" in
       /*) p="$link" ;;
       *) p="$dir/$link" ;;

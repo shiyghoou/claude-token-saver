@@ -27,7 +27,7 @@
 #     （pending 配下に実ファイルがあれば uninstall 後も残る、という同一の性質）
 390
 skip-max 5
-test-handoff-check.sh 90
+test-handoff-check.sh 91
 test-handoff-consume.sh 20
 test-install.sh 86
 test-paths.sh 7
