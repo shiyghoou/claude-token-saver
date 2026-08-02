@@ -1056,6 +1056,14 @@ test_sharedスコープは個人の設置物を変更せず_台帳のスキル�
   assert_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignore"
 }
 
+test_sharedスコープの完了メッセージはフック導入を示さない() {
+  _setup_target
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "引き継ぎフックが有効" \
+    "--sharedの完了メッセージ"
+}
+
 test_sharedスコープは台帳が無ければ推測しない() {
   _setup_target
   mkdir -p "$TARGET/.claude/skills/session-handoff"

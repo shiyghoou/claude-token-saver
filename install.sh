@@ -518,6 +518,10 @@ if [ "${#warnings[@]}" -gt 0 ]; then
   # CI から呼ぶと、未適用のまま rc=0 で通ってしまう。明示的に厳格を選べるようにする。
   [ -n "${CTS_STRICT:-}" ] && exit 1
 else
-  info "完了。新しいセッションを開始すると引き継ぎフックが有効になる。"
+  if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
+    info "完了。共有設定（.gitignore）を更新した。"
+  else
+    info "完了。新しいセッションを開始すると引き継ぎフックが有効になる。"
+  fi
 fi
 exit 0
