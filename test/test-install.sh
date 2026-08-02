@@ -1064,6 +1064,57 @@ test_管理対象親ディレクトリのシンボリックリンクを辿らな
   assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "Traceback" "管理対象親ディレクトリの出力"
 }
 
+test_token_reportの導入先entrypointが対象repoへレポートを書く() {
+  _setup_target
+  config="$TEST_TMP/claude-config"
+  home="$TEST_TMP/report-home"
+  mkdir -p "$config/projects" "$home"
+  project_key="$(printf '%s' "$TARGET" | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$config/projects/$project_key"
+  python3 - "$config/projects/$project_key/session.jsonl" <<'PYEOF'
+import json
+import sys
+from datetime import datetime, timezone
+
+row = {
+    "type": "assistant",
+    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "message": {
+        "id": "installed-entrypoint",
+        "model": "claude-install-fixture",
+        "usage": {"input_tokens": 1, "cache_creation_input_tokens": 10,
+                  "cache_read_input_tokens": 100, "output_tokens": 1},
+        "content": [],
+    },
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(row) + "\n")
+PYEOF
+  before_source_reports="$(find "$REPO_ROOT/.token-saver/token-reports" -maxdepth 1 -type f -print 2>/dev/null | LC_ALL=C sort)"
+  before_source_status="$(git -C "$REPO_ROOT" status --short)"
+  _run_install
+  entrypoint="$TARGET/.token-saver/token-report.sh"
+  assert_eq "0" "$INSTALL_STATUS" "install終了コード"
+  assert_file_exists "$entrypoint" "導入先entrypoint"
+  [ -x "$entrypoint" ] || _fail "導入先entrypointに実行権限がない"
+
+  (
+    cd "$TEST_TMP" &&
+    HOME="$home" CLAUDE_CONFIG_DIR="$config" bash "$entrypoint" --days 0
+  ) >"$TEST_TMP/report.out" 2>"$TEST_TMP/report.err"
+  report_status=$?
+  reports="$(find "$TARGET/.token-saver/token-reports" -maxdepth 1 -type f -name '*.md' -print)"
+  report_count="$(printf '%s\n' "$reports" | sed '/^$/d' | wc -l | tr -d ' ')"
+  after_source_reports="$(find "$REPO_ROOT/.token-saver/token-reports" -maxdepth 1 -type f -print 2>/dev/null | LC_ALL=C sort)"
+  after_source_status="$(git -C "$REPO_ROOT" status --short)"
+  assert_eq "0" "$report_status" "導入済みentrypoint終了コード"
+  assert_eq "1" "$report_count" "導入先のレポート件数"
+  assert_contains "$(cat "$reports")" "main 合計: **112**" "導入先repoの集計"
+  assert_eq "$before_source_reports" "$after_source_reports" "helper clone側のレポート一覧"
+  assert_eq "$before_source_status" "$after_source_status" "helper clone側のworktree状態"
+  assert_count 1 "$(cat "$TEST_TMP/report.out")" "書き出しました:" "成功メッセージ"
+}
+
 test_混在改行の_gitignoreは往復で変更しない() {
   _setup_target
   printf 'a\r\nb\nc' >"$TARGET/.gitignore"

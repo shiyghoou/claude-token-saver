@@ -17,6 +17,7 @@
 cts_base_rel()           { printf '%s' '.token-saver'; }
 cts_handoff_rel()        { printf '%s' '.token-saver/handoff'; }
 cts_ledger_rel()         { printf '%s' '.token-saver/installed.json'; }
+cts_token_report_rel()   { printf '%s' '.token-saver/token-report.sh'; }
 
 # 旧パス。install.sh の移行と uninstall.sh のフォールバックだけが使う。
 cts_legacy_handoff_rel() { printf '%s' '.claude/.handoff'; }
