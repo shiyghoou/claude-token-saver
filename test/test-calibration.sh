@@ -55,6 +55,35 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 PYEOF
 }
 
+_fixture_with_duplicate_session_events() {
+  FIXTURE_TRANSCRIPT="$TEST_TMP/duplicate-session.jsonl"
+  python3 - "$FIXTURE_TRANSCRIPT" <<'PYEOF'
+import json
+import sys
+
+def row(message_id, cache_read):
+    return {
+        "type": "assistant",
+        "sessionId": "session-duplicate",
+        "message": {
+            "id": message_id,
+            "usage": {
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": cache_read,
+                "output_tokens": 1,
+            },
+            "content": [],
+        },
+    }
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(row("message-once", 10)) + "\n")
+    handle.write(json.dumps(row("message-once", 10)) + "\n")
+    handle.write(json.dumps(row("message-twice", 20)) + "\n")
+PYEOF
+}
+
 _run_python_harness() {
   mode="$1"
   shift
@@ -70,6 +99,10 @@ if mode == "median":
 elif mode == "session_count":
     scan = module["scan_transcripts"]([sys.argv[3]], None)
     print(len(scan.session_stats))
+elif mode == "session_stats":
+    scan = module["scan_transcripts"]([sys.argv[3]], None)
+    stats = scan.session_stats[sys.argv[4]]
+    print("{},{}".format(stats.cache_read, stats.assistant_turns))
 else:
     raise SystemExit("unknown harness mode")
 PYEOF
@@ -89,4 +122,16 @@ test_sessionIdが無いusageをサンプル数へ入れない() {
   _fixture_with_missing_session_id
   output="$(_run_python_harness session_count "$FIXTURE_TRANSCRIPT")"
   assert_eq "0" "$output" "不明sessionの除外"
+}
+
+test_session_statsがcache_readとassistant_turnsを集計する() {
+  _fixture_with_sessions 10 20
+  output="$(_run_python_harness session_stats "$FIXTURE_TRANSCRIPT" session-0)"
+  assert_eq "10,1" "$output" "通常sessionの統計"
+}
+
+test_session_statsは同一sessionの重複usageを一度だけ数える() {
+  _fixture_with_duplicate_session_events
+  output="$(_run_python_harness session_stats "$FIXTURE_TRANSCRIPT" session-duplicate)"
+  assert_eq "30,2" "$output" "重複排除後のsession統計"
 }
