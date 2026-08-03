@@ -25,7 +25,7 @@
 #     （どちらも .token-saver/handoff/{pending,consumed} の存在だけを見る同一の検証）
 #   - test-uninstall.sh: test_引き継ぎの実ファイルは消さない / test_実ファイルのある_handoff_は残す
 #     （pending 配下に実ファイルがあれば uninstall 後も残る、という同一の性質）
-452
+453
 skip-max 5
 test-handoff-check.sh 91
 test-handoff-consume.sh 20
@@ -33,7 +33,7 @@ test-install.sh 101
 test-paths.sh 7
 test-runner-selftest.sh 77
 test-suggest-session-cut-docs.sh 5
-test-suggest-session-cut.sh 27
+test-suggest-session-cut.sh 28
 test-uninstall.sh 80
 test-token-report.sh 19
 test-token-report-launcher.sh 14

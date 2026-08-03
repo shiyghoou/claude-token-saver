@@ -894,6 +894,24 @@ EOF
   assert_file_missing "$FIXTURE_ROOT/.token-saver/token-report.sh" "token-report へ混ぜない"
 }
 
+test_SCRIPT_DIR解決時のdirname失敗でも無音で終了する() {
+  local dirname_called="$TEST_TMP/dirname.called"
+  mkdir -p "$TEST_TMP/bin"
+  cat >"$TEST_TMP/bin/dirname" <<'EOF'
+#!/usr/bin/env bash
+printf 'dirname wrapper failure\n' >&2
+touch "$CTS_TEST_DIRNAME_CALLED"
+exit 1
+EOF
+  chmod +x "$TEST_TMP/bin/dirname"
+
+  _run_hook '{}' "$TEST_TMP" env CTS_TEST_DIRNAME_CALLED="$dirname_called"
+  assert_file_exists "$dirname_called" "PATH上のdirnameラッパーが実行される"
+  assert_eq "0" "$HOOK_RC" "dirname失敗時の終了コード"
+  assert_empty "$HOOK_STDOUT" "dirname失敗時の stdout"
+  assert_empty "$HOOK_STDERR" "dirname失敗時の stderr"
+}
+
 test_cache更新がtmpからrenameされる() {
   implementation="$(cat "$REPO_ROOT/scripts/suggest-session-cut.sh")"
   assert_contains "$implementation" 'dirname "${BASH_SOURCE[0]}"' \
