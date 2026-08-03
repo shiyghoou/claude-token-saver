@@ -463,6 +463,60 @@ EOF
   assert_empty "$HOOK_STDERR" "ローテーション失敗後の再実行 stderr"
 }
 
+test_ログローテーション途中失敗時も全世代を保持する() {
+  _fixture_repo
+  mkdir -p "$FIXTURE_STATE_DIR"
+  printf 'current generation' >"$FIXTURE_STATE_DIR/events.log"
+  printf 'backup generation one' >"$FIXTURE_STATE_DIR/events.log.1"
+  printf 'backup generation two' >"$FIXTURE_STATE_DIR/events.log.2"
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"log-rotate-midway-fail","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-log-rotate-midway-fail" "$FIXTURE_TRANSCRIPT")"
+
+  real_mv="$(command -v mv)"
+  mkdir -p "$TEST_TMP/bin"
+  cat >"$TEST_TMP/bin/mv" <<'EOF'
+#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "$1" = "$CTS_TEST_FAIL_MV_SOURCE" ] && \
+    [ "$2" = "$CTS_TEST_FAIL_MV_DESTINATION" ]; then
+  exit 1
+fi
+exec "$CTS_TEST_REAL_MV" "$@"
+EOF
+  chmod +x "$TEST_TMP/bin/mv"
+
+  _run_hook "$payload" "$FIXTURE_ROOT" env \
+    CTS_SESSION_CUT_LOG_MAX_BYTES=1 CTS_SESSION_CUT_LOG_BACKUPS=2 \
+    CTS_TEST_REAL_MV="$real_mv" \
+    CTS_TEST_FAIL_MV_SOURCE="$FIXTURE_STATE_DIR/events.log.1" \
+    CTS_TEST_FAIL_MV_DESTINATION="$FIXTURE_STATE_DIR/events.log.2"
+  assert_eq "0" "$HOOK_RC" "ローテーション途中失敗時の終了コード"
+  assert_empty "$HOOK_STDOUT" "ローテーション途中失敗時は提案しない"
+  assert_empty "$HOOK_STDERR" "ローテーション途中失敗時の stderr"
+  assert_eq "current generation" "$(cat "$FIXTURE_STATE_DIR/events.log")" \
+    "途中失敗時も現行ログを保持する"
+  assert_eq "backup generation one" "$(cat "$FIXTURE_STATE_DIR/events.log.1")" \
+    "途中失敗時も第1世代を保持する"
+  assert_eq "backup generation two" "$(cat "$FIXTURE_STATE_DIR/events.log.2")" \
+    "途中失敗時も第2世代を保持する"
+  rotation_tmp=""
+  for candidate in "$FIXTURE_STATE_DIR"/.suggest-session-cut.rotate.*; do
+    [ -e "$candidate" ] || continue
+    rotation_tmp="$candidate"
+  done
+  assert_empty "$rotation_tmp" "ロールバック成功時はローテーション退避を残さない"
+
+  _run_hook "$payload" "$FIXTURE_ROOT" env \
+    CTS_SESSION_CUT_LOG_MAX_BYTES=1 CTS_SESSION_CUT_LOG_BACKUPS=2 \
+    CTS_TEST_REAL_MV="$real_mv" \
+    CTS_TEST_FAIL_MV_SOURCE="$FIXTURE_STATE_DIR/events.log.1" \
+    CTS_TEST_FAIL_MV_DESTINATION="$FIXTURE_STATE_DIR/events.log.2"
+  assert_eq "0" "$HOOK_RC" "ローテーション途中失敗後の再実行終了コード"
+  assert_empty "$HOOK_STDOUT" "ローテーション途中失敗後に即時再提案しない"
+  assert_empty "$HOOK_STDERR" "ローテーション途中失敗後の再実行 stderr"
+}
+
 test_状態書き込み失敗時は提案せずclearも他状態も触らない() {
   _fixture_repo
   mkdir -p "$FIXTURE_ROOT/.token-saver"

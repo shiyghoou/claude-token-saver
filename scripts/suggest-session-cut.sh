@@ -116,30 +116,99 @@ _cts_cleanup_state() {
   \) -mtime "+$retention_days" -exec rm -f {} \; 2>/dev/null || true
 }
 
+_cts_rollback_log_rotation() {
+  local log="$1" backups="$2" rotation_tmp="$3" oldest_saved="$4"
+  local moved_generations="$5" current_moved="$6" i next
+
+  # 現行ログを移動済みなら最初に戻し、空いた世代へ低い番号から戻す。
+  # 途中で戻せなければそこで止め、残りを上書きせず各パスか退避先へ保持する。
+  if [ "$current_moved" = 1 ]; then
+    mv "$log.1" "$log" 2>/dev/null || return 1
+  fi
+  for i in $moved_generations; do
+    next=$((i + 1))
+    mv "$log.$next" "$log.$i" 2>/dev/null || return 1
+  done
+  if [ "$oldest_saved" = 1 ]; then
+    mv "$rotation_tmp" "$log.$backups" 2>/dev/null || return 1
+  else
+    rm -f "$rotation_tmp" 2>/dev/null || return 1
+  fi
+  return 0
+}
+
 _cts_rotate_log() {
-  local max_bytes="$1" backups="$2" incoming_bytes="${3:-0}" log="$CTS_LOG" size i next
+  local max_bytes="$1" backups="$2" incoming_bytes="${3:-0}" log="$CTS_LOG"
+  local size i next rotation_tmp oldest_saved moved_generations current_moved
   [ -f "$log" ] || return 0
   size="$(wc -c <"$log" 2>/dev/null | tr -d '[:space:]')" || return 1
   _cts_valid_integer "$size" || return 1
   _cts_valid_integer "$incoming_bytes" || return 1
   [ $((size + incoming_bytes)) -gt "$max_bytes" ] || return 0
 
-  i="$backups"
+  rotation_tmp="$(mktemp "$CTS_STATE_DIR/.suggest-session-cut.rotate.XXXXXX" 2>/dev/null)" || return 1
+  oldest_saved=0
+  moved_generations=""
+  current_moved=0
+
+  if [ "$backups" -eq 0 ]; then
+    if ! mv "$log" "$rotation_tmp" 2>/dev/null; then
+      [ -e "$log" ] && rm -f "$rotation_tmp" 2>/dev/null
+      return 1
+    fi
+    if rm -f "$rotation_tmp" 2>/dev/null; then
+      return 0
+    fi
+    mv "$rotation_tmp" "$log" 2>/dev/null || true
+    return 1
+  fi
+
+  # ログ世代は通常ファイルだけを扱う。削除不能なディレクトリ等があれば、
+  # 何も動かす前にfail-closedで終了する。
+  i=1
+  while [ "$i" -le "$backups" ]; do
+    if { [ -e "$log.$i" ] || [ -L "$log.$i" ]; } && [ ! -f "$log.$i" ]; then
+      rm -f "$rotation_tmp" 2>/dev/null || true
+      return 1
+    fi
+    i=$((i + 1))
+  done
+
+  # 最古世代を削除せず先に退避する。以降は常に空いた宛先へ移す。
+  if [ -e "$log.$backups" ] || [ -L "$log.$backups" ]; then
+    if ! mv "$log.$backups" "$rotation_tmp" 2>/dev/null; then
+      [ -e "$log.$backups" ] && rm -f "$rotation_tmp" 2>/dev/null
+      return 1
+    fi
+    oldest_saved=1
+  fi
+
+  i=$((backups - 1))
   while [ "$i" -gt 0 ]; do
-    if [ "$i" -eq "$backups" ]; then
-      rm -f "$log.$i" 2>/dev/null || return 1
-    else
-      next=$((i + 1))
-      if [ -e "$log.$i" ]; then
-        mv "$log.$i" "$log.$next" 2>/dev/null || return 1
+    next=$((i + 1))
+    if [ -e "$log.$i" ] || [ -L "$log.$i" ]; then
+      if ! mv "$log.$i" "$log.$next" 2>/dev/null; then
+        _cts_rollback_log_rotation "$log" "$backups" "$rotation_tmp" \
+          "$oldest_saved" "$moved_generations" "$current_moved" || true
+        return 1
       fi
+      moved_generations="$i $moved_generations"
     fi
     i=$((i - 1))
   done
-  if [ "$backups" -gt 0 ]; then
-    mv "$log" "$log.1" 2>/dev/null || return 1
-  else
-    rm -f "$log" 2>/dev/null || return 1
+
+  if ! mv "$log" "$log.1" 2>/dev/null; then
+    _cts_rollback_log_rotation "$log" "$backups" "$rotation_tmp" \
+      "$oldest_saved" "$moved_generations" "$current_moved" || true
+    return 1
+  fi
+  current_moved=1
+
+  # 全世代を移動できた場合に限り、退避した最古世代を破棄する。
+  if ! rm -f "$rotation_tmp" 2>/dev/null; then
+    _cts_rollback_log_rotation "$log" "$backups" "$rotation_tmp" \
+      "$oldest_saved" "$moved_generations" "$current_moved" || true
+    return 1
   fi
   return 0
 }
