@@ -32,6 +32,14 @@
 - [ ] 現行Pythonで既存の `test/test-install.sh`、`test/test-uninstall.sh` と全体テストを実行し、変更前の基準値を記録する。
 - [ ] Python 3.6/3.8の実行ファイルまたはDockerイメージを確認し、実機検証に使う固定バージョンを決める。
 
+### 互換性監査記録
+
+- `lib/gitignore-block.py`: `os`、`sys`、同ディレクトリの `ledger`
+- `lib/ledger.py`: `json`、`errno`、`os`、`sys`、`tempfile`
+- `lib/settings-hooks.py`: `json`、`os`、`shlex`、`sys`、同ディレクトリの `ledger`
+- `lib` 本体では `pathlib`、`typing`、`subprocess`、外部パッケージは使用していない
+- `subprocess` の使用は検証harnessの `test/python-compatibility.py` に限る
+
 ## Task 2: Python対象スモークテストを追加する
 
 **Files:**
