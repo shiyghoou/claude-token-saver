@@ -107,12 +107,100 @@ _cts_write_atomic() {
   return 0
 }
 
+_cts_prepare_state_dir() {
+  local base state physical
+  base="$CTS_ROOT/$(cts_base_rel)"
+  state="$CTS_ROOT/$(cts_session_cut_rel)"
+
+  # mkdir -p は途中のsymlinkを追従するため、固定の2段を個別に作成・検査する。
+  [ ! -L "$base" ] || return 1
+  if [ -e "$base" ]; then
+    [ -d "$base" ] || return 1
+  else
+    mkdir "$base" 2>/dev/null || return 1
+  fi
+  [ ! -L "$base" ] || return 1
+  physical="$(cd -P "$base" 2>/dev/null && pwd -P)" || return 1
+  [ "$physical" = "$base" ] || return 1
+
+  [ ! -L "$state" ] || return 1
+  if [ -e "$state" ]; then
+    [ -d "$state" ] || return 1
+  else
+    mkdir "$state" 2>/dev/null || return 1
+  fi
+  [ ! -L "$state" ] || return 1
+  physical="$(cd -P "$state" 2>/dev/null && pwd -P)" || return 1
+  [ "$physical" = "$state" ] || return 1
+
+  CTS_STATE_DIR="$state"
+  return 0
+}
+
+_cts_plain_file_or_missing() {
+  local path="$1"
+  [ ! -L "$path" ] || return 1
+  [ ! -e "$path" ] || [ -f "$path" ]
+}
+
+_cts_log_symlinks_absent() {
+  local candidate suffix
+  [ ! -L "$CTS_LOG" ] || return 1
+  for candidate in "$CTS_LOG".*; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    suffix="${candidate#"$CTS_LOG."}"
+    _cts_positive_integer "$suffix" || continue
+    [ ! -L "$candidate" ] || return 1
+  done
+  return 0
+}
+
+_cts_state_entries_safe() {
+  local candidate
+  for candidate in "$CTS_STATE_DIR"/*.cache "$CTS_STATE_DIR"/*.marker; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    [ ! -L "$candidate" ] && [ -f "$candidate" ] || return 1
+  done
+  return 0
+}
+
+_cts_stale_regular_file() {
+  local path="$1" retention_days="$2" found
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  found="$(find "$path" -type f -mtime "+$retention_days" -print 2>/dev/null)"
+  [ -n "$found" ]
+}
+
 _cts_cleanup_state() {
-  local retention_days="$1"
-  # state_dir はこのフック自身が作った固定の管理ディレクトリである。
-  # findの対象をここから広げない。
+  local retention_days="$1" cache marker
+
+  # cache/markerは片方だけを期限切れとして消すと同じ境界を再提案する。
+  # ペアが揃っている間は両方が古い場合だけ一緒に掃除する。
+  for cache in "$CTS_STATE_DIR"/*.cache; do
+    [ -f "$cache" ] && [ ! -L "$cache" ] || continue
+    marker="${cache%.cache}.marker"
+    if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+      if _cts_stale_regular_file "$cache" "$retention_days" &&
+         _cts_stale_regular_file "$marker" "$retention_days"; then
+        rm -f "$cache" "$marker" 2>/dev/null || true
+      fi
+    elif _cts_stale_regular_file "$cache" "$retention_days"; then
+      rm -f "$cache" 2>/dev/null || true
+    fi
+  done
+
+  for marker in "$CTS_STATE_DIR"/*.marker; do
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    cache="${marker%.marker}.cache"
+    if { [ ! -f "$cache" ] || [ -L "$cache" ]; } &&
+       _cts_stale_regular_file "$marker" "$retention_days"; then
+      rm -f "$marker" 2>/dev/null || true
+    fi
+  done
+
+  # state_dir は検査済みの固定管理ディレクトリである。対象をここから広げない。
   find "$CTS_STATE_DIR" -type f \( \
-    -name '*.cache' -o -name '*.marker' -o -name '*.tmp' -o -name '.suggest-session-cut.*' \
+    -name '*.tmp' -o -name '.suggest-session-cut.*' \
   \) -mtime "+$retention_days" -exec rm -f {} \; 2>/dev/null || true
 }
 
@@ -140,6 +228,7 @@ _cts_rollback_log_rotation() {
 _cts_rotate_log() {
   local max_bytes="$1" backups="$2" incoming_bytes="${3:-0}" log="$CTS_LOG"
   local size i next rotation_tmp oldest_saved moved_generations current_moved
+  local candidate suffix generations
   [ -f "$log" ] || return 0
   size="$(wc -c <"$log" 2>/dev/null | tr -d '[:space:]')" || return 1
   _cts_valid_integer "$size" || return 1
@@ -163,38 +252,44 @@ _cts_rotate_log() {
     return 1
   fi
 
-  # ログ世代は通常ファイルだけを扱う。削除不能なディレクトリ等があれば、
-  # 何も動かす前にfail-closedで終了する。
-  i=1
-  while [ "$i" -le "$backups" ]; do
-    if { [ -e "$log.$i" ] || [ -L "$log.$i" ]; } && [ ! -f "$log.$i" ]; then
+  # 実在する数値世代だけを列挙する。backupsが巨大でも1..Nを走査しない。
+  generations=""
+  for candidate in "$log".*; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    suffix="${candidate#"$log."}"
+    _cts_positive_integer "$suffix" || continue
+    [ "$suffix" -le "$backups" ] 2>/dev/null || continue
+    if [ -L "$candidate" ] || [ ! -f "$candidate" ]; then
       rm -f "$rotation_tmp" 2>/dev/null || true
       return 1
     fi
-    i=$((i + 1))
+    generations="$generations $suffix"
   done
-
-  # 最古世代を削除せず先に退避する。以降は常に空いた宛先へ移す。
-  if [ -e "$log.$backups" ] || [ -L "$log.$backups" ]; then
-    if ! mv "$log.$backups" "$rotation_tmp" 2>/dev/null; then
-      [ -e "$log.$backups" ] && rm -f "$rotation_tmp" 2>/dev/null
+  if [ -n "$generations" ]; then
+    generations="$(printf '%s\n' $generations | sort -nr 2>/dev/null)" || {
+      rm -f "$rotation_tmp" 2>/dev/null || true
       return 1
-    fi
-    oldest_saved=1
+    }
   fi
 
-  i=$((backups - 1))
-  while [ "$i" -gt 0 ]; do
-    next=$((i + 1))
-    if [ -e "$log.$i" ] || [ -L "$log.$i" ]; then
-      if ! mv "$log.$i" "$log.$next" 2>/dev/null; then
-        _cts_rollback_log_rotation "$log" "$backups" "$rotation_tmp" \
-          "$oldest_saved" "$moved_generations" "$current_moved" || true
+  # 降順に実在世代だけを移す。最古の保持上限世代は先に退避し、
+  # 途中失敗時に全世代を元へ戻せるようにする。
+  for i in $generations; do
+    if [ "$i" -eq "$backups" ]; then
+      if ! mv "$log.$i" "$rotation_tmp" 2>/dev/null; then
+        [ -e "$log.$i" ] && rm -f "$rotation_tmp" 2>/dev/null
         return 1
       fi
-      moved_generations="$i $moved_generations"
+      oldest_saved=1
+      continue
     fi
-    i=$((i - 1))
+    next=$((i + 1))
+    if ! mv "$log.$i" "$log.$next" 2>/dev/null; then
+      _cts_rollback_log_rotation "$log" "$backups" "$rotation_tmp" \
+        "$oldest_saved" "$moved_generations" "$current_moved" || true
+      return 1
+    fi
+    moved_generations="$i $moved_generations"
   done
 
   if ! mv "$log" "$log.1" 2>/dev/null; then
@@ -213,14 +308,24 @@ _cts_rotate_log() {
   return 0
 }
 
+_cts_exit_cleanup() {
+  if [ -n "${CTS_TMP_FILE:-}" ]; then
+    rm -f "$CTS_TMP_FILE" 2>/dev/null || true
+  fi
+  if [ -n "${CTS_LOCK_DIR:-}" ]; then
+    rmdir "$CTS_LOCK_DIR" 2>/dev/null || true
+  fi
+}
+
 _cts_main() {
   local cwd session_id transcript root state_key cache marker state_fingerprint
   local initial increment retention_days log_max_bytes log_backups
   local total current_boundary marker_boundary marker_index boundary
   local cache_content marker_content now
-  local payload_source log_entry log_entry_bytes
+  local payload_source log_entry log_entry_bytes lock_candidate
   CTS_TMP_FILE=""
-  trap 'if [ -n "${CTS_TMP_FILE:-}" ]; then rm -f "$CTS_TMP_FILE"; fi' EXIT
+  CTS_LOCK_DIR=""
+  trap '_cts_exit_cleanup' EXIT
 
   # common.shの標準入力読取・top-level JSON文字列抽出を共有する。
   # shellcheck source=scripts/lib/common.sh
@@ -228,6 +333,11 @@ _cts_main() {
   cts_read_payload
   payload_source="$CTS_HOOK_PAYLOAD"
   [ -n "$payload_source" ] || return 0
+
+  # common.shの軽量field抽出は完全なJSONパーサではない。必須フィールドを
+  # 抽出する前に、Stop payload全体を末尾まで検証する。
+  printf '%s\n' "$payload_source" | \
+    awk -f "$SCRIPT_DIR/lib/suggest-session-cut-json.awk" >/dev/null 2>&1 || return 0
 
   cwd="$(cts_json_field cwd)"
   session_id="$(cts_json_field session_id)"
@@ -256,9 +366,16 @@ _cts_main() {
   _cts_setting CTS_SESSION_CUT_LOG_BACKUPS log_backups 5 1
   log_backups="$CTS_SETTING_VALUE"
 
-  CTS_STATE_DIR="$root/$(cts_session_cut_rel)"
+  CTS_STATE_DIR=""
+  _cts_prepare_state_dir || return 0
   CTS_LOG="$CTS_STATE_DIR/events.log"
-  mkdir -p "$CTS_STATE_DIR" 2>/dev/null || return 0
+  _cts_state_entries_safe || return 0
+  _cts_log_symlinks_absent || return 0
+
+  lock_candidate="$CTS_STATE_DIR/.suggest-session-cut.lock"
+  mkdir "$lock_candidate" 2>/dev/null || return 0
+  CTS_LOCK_DIR="$lock_candidate"
+
   _cts_cleanup_state "$retention_days"
 
   total="$(awk -f "$SCRIPT_DIR/lib/suggest-session-cut-usage.awk" "$transcript" 2>/dev/null)" || return 0
@@ -271,6 +388,8 @@ _cts_main() {
   esac
   cache="$CTS_STATE_DIR/$state_key.cache"
   marker="$CTS_STATE_DIR/$state_key.marker"
+  _cts_plain_file_or_missing "$cache" || return 0
+  _cts_plain_file_or_missing "$marker" || return 0
 
   marker_index=0
   marker_boundary=0

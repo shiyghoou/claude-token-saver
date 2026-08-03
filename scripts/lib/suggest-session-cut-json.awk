@@ -1,10 +1,8 @@
-# suggest-session-cut.shが使う設定JSONを末尾まで完全検証し、root直下の
-# suggest_session_cutオブジェクト直下にある指定数値フィールドを1つ読む。
-# 対象値を見つけても早期終了せず、不正な末尾や構文があれば何も出力しない。
+# Stop hook payloadを依存追加なしで完全検証するPOSIX awk JSONパーサ。
+# 値を抽出するcommon.shより先に使い、末尾の壊れた入力もfail-closedにする。
 
 BEGIN {
   text = ""
-  candidate_found = 0
 }
 
 {
@@ -19,20 +17,15 @@ function skip_ws(    c) {
   }
 }
 
-function take_string(    c, escaped, out) {
+function take_string(    c, escaped) {
   if (substr(text, pos, 1) != "\"") return 0
   pos++
-  out = ""
   while (pos <= length(text)) {
     c = substr(text, pos, 1)
     pos++
-    if (c == "\"") {
-      string_value = out
-      return 1
-    }
+    if (c == "\"") return 1
     if (c != "\\") {
       if (c ~ /[[:cntrl:]]/) return 0
-      out = out c
       continue
     }
     if (pos > length(text)) return 0
@@ -41,14 +34,10 @@ function take_string(    c, escaped, out) {
     if (escaped == "u") {
       if (pos + 3 > length(text) ||
           substr(text, pos, 4) !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) return 0
-      out = out "\\u" substr(text, pos, 4)
       pos += 4
-    } else if (escaped == "\"" || escaped == "\\" || escaped == "/") {
-      out = out escaped
-    } else if (escaped == "b" || escaped == "f" || escaped == "n" ||
-               escaped == "r" || escaped == "t") {
-      out = out "\\" escaped
-    } else {
+    } else if (escaped != "\"" && escaped != "\\" && escaped != "/" &&
+               escaped != "b" && escaped != "f" && escaped != "n" &&
+               escaped != "r" && escaped != "t") {
       return 0
     }
   }
@@ -78,48 +67,27 @@ function take_number(    start, c) {
     if (substr(text, pos, 1) !~ /^[0-9]$/) { pos = start; return 0 }
     while (substr(text, pos, 1) ~ /^[0-9]$/) pos++
   }
-  number_value = substr(text, start, pos - start)
   return 1
 }
 
-function take_literal(    value) {
-  if (substr(text, pos, 4) == "true") { pos += 4; literal_value = "true"; return 1 }
-  if (substr(text, pos, 5) == "false") { pos += 5; literal_value = "false"; return 1 }
-  if (substr(text, pos, 4) == "null") { pos += 4; literal_value = "null"; return 1 }
+function take_literal() {
+  if (substr(text, pos, 4) == "true") { pos += 4; return 1 }
+  if (substr(text, pos, 5) == "false") { pos += 5; return 1 }
+  if (substr(text, pos, 4) == "null") { pos += 4; return 1 }
   return 0
 }
 
-function record_scalar(path, kind, value) {
-  if (path == "/suggest_session_cut/" config_key &&
-      kind == "number" && value ~ /^[0-9][0-9]*$/) {
-    candidate = value
-    candidate_found = 1
-  }
-}
-
-function parse_value(path,    c) {
+function parse_value(    c) {
   skip_ws()
   c = substr(text, pos, 1)
-  if (c == "{") return parse_object(path)
-  if (c == "[") return parse_array(path)
-  if (c == "\"") {
-    if (!take_string()) return 0
-    record_scalar(path, "string", string_value)
-    return 1
-  }
-  if (c == "-" || c ~ /^[0-9]$/) {
-    if (!take_number()) return 0
-    record_scalar(path, "number", number_value)
-    return 1
-  }
-  if (take_literal()) {
-    record_scalar(path, "literal", literal_value)
-    return 1
-  }
-  return 0
+  if (c == "{") return parse_object()
+  if (c == "[") return parse_array()
+  if (c == "\"") return take_string()
+  if (c == "-" || c ~ /^[0-9]$/) return take_number()
+  return take_literal()
 }
 
-function parse_object(path,    key, c) {
+function parse_object(    c) {
   if (substr(text, pos, 1) != "{") return 0
   pos++
   skip_ws()
@@ -127,11 +95,10 @@ function parse_object(path,    key, c) {
   while (1) {
     skip_ws()
     if (!take_string()) return 0
-    key = string_value
     skip_ws()
     if (substr(text, pos, 1) != ":") return 0
     pos++
-    if (!parse_value(path "/" key)) return 0
+    if (!parse_value()) return 0
     skip_ws()
     c = substr(text, pos, 1)
     if (c == "}") { pos++; return 1 }
@@ -140,15 +107,13 @@ function parse_object(path,    key, c) {
   }
 }
 
-function parse_array(path,    array_index, c) {
+function parse_array(    c) {
   if (substr(text, pos, 1) != "[") return 0
   pos++
-  array_index = 0
   skip_ws()
   if (substr(text, pos, 1) == "]") { pos++; return 1 }
   while (1) {
-    if (!parse_value(path "/" array_index)) return 0
-    array_index++
+    if (!parse_value()) return 0
     skip_ws()
     c = substr(text, pos, 1)
     if (c == "]") { pos++; return 1 }
@@ -159,10 +124,8 @@ function parse_array(path,    array_index, c) {
 
 END {
   pos = 1
-  if (!parse_value("")) exit 2
+  if (!parse_value()) exit 2
   skip_ws()
   if (pos <= length(text)) exit 2
-  if (!candidate_found) exit 1
-  print candidate
   exit 0
 }
