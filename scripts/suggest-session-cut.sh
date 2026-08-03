@@ -119,27 +119,27 @@ _cts_cleanup_state() {
 _cts_rotate_log() {
   local max_bytes="$1" backups="$2" incoming_bytes="${3:-0}" log="$CTS_LOG" size i next
   [ -f "$log" ] || return 0
-  size="$(wc -c <"$log" 2>/dev/null | tr -d '[:space:]')" || return 0
-  _cts_valid_integer "$size" || return 0
-  _cts_valid_integer "$incoming_bytes" || incoming_bytes=0
+  size="$(wc -c <"$log" 2>/dev/null | tr -d '[:space:]')" || return 1
+  _cts_valid_integer "$size" || return 1
+  _cts_valid_integer "$incoming_bytes" || return 1
   [ $((size + incoming_bytes)) -gt "$max_bytes" ] || return 0
 
   i="$backups"
   while [ "$i" -gt 0 ]; do
     if [ "$i" -eq "$backups" ]; then
-      rm -f "$log.$i"
+      rm -f "$log.$i" 2>/dev/null || return 1
     else
       next=$((i + 1))
       if [ -e "$log.$i" ]; then
-        mv "$log.$i" "$log.$next" 2>/dev/null || true
+        mv "$log.$i" "$log.$next" 2>/dev/null || return 1
       fi
     fi
     i=$((i - 1))
   done
   if [ "$backups" -gt 0 ]; then
-    mv "$log" "$log.1" 2>/dev/null || true
+    mv "$log" "$log.1" 2>/dev/null || return 1
   else
-    rm -f "$log"
+    rm -f "$log" 2>/dev/null || return 1
   fi
   return 0
 }
@@ -234,10 +234,13 @@ _cts_main() {
     return 0
   fi
 
+  # markerを先に進める。以降のログ処理に失敗して提案を抑止した場合も、同じ境界を
+  # 次のStopで即時再提案しないfail-closed側の順序にする。
   log_entry="$(printf '%s boundary=%s' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unknown)" "$boundary")"
-  log_entry_bytes="$(printf '%s\n' "$log_entry" | wc -c 2>/dev/null | tr -d '[:space:]')" || log_entry_bytes=0
-  _cts_rotate_log "$log_max_bytes" "$log_backups" "$log_entry_bytes"
-  printf '%s\n' "$log_entry" >>"$CTS_LOG" 2>/dev/null || true
+  log_entry_bytes="$(printf '%s\n' "$log_entry" | wc -c 2>/dev/null | tr -d '[:space:]')" || return 0
+  _cts_valid_integer "$log_entry_bytes" || return 0
+  _cts_rotate_log "$log_max_bytes" "$log_backups" "$log_entry_bytes" || return 0
+  printf '%s\n' "$log_entry" >>"$CTS_LOG" 2>/dev/null || return 0
   printf '累積 cache_read が %s に達しました。引き継ぎを書いてから、手動で新しいセッションへ切り替えることを検討してください。/clear は自動実行しません。\n' "$boundary"
   return 0
 }

@@ -272,6 +272,70 @@ EOF
   assert_contains "$HOOK_STDOUT" "$SUGGEST_SESSION_CUT_MESSAGE" "無効値は既定値へフォールバック"
 }
 
+test_設定値はroot直下suggest_session_cutの直下だけから読む() {
+  for case_name in unrelated_parent nested_parent nested_target string_value; do
+    FIXTURE_ROOT="$TEST_TMP/config scope $case_name"
+    FIXTURE_TRANSCRIPT="$FIXTURE_ROOT/session.jsonl"
+    FIXTURE_STATE_DIR="$FIXTURE_ROOT/.token-saver/session-cut"
+    mkdir -p "$FIXTURE_ROOT/.claude"
+    case "$case_name" in
+      unrelated_parent)
+        cat >"$FIXTURE_ROOT/.claude/token-saver.json" <<'EOF'
+{
+  "other": { "initial_cache_read": 1 },
+  "suggest_session_cut": { "initial_cache_read": 20 }
+}
+EOF
+        ;;
+      nested_parent)
+        cat >"$FIXTURE_ROOT/.claude/token-saver.json" <<'EOF'
+{
+  "other": { "suggest_session_cut": { "initial_cache_read": 1 } },
+  "suggest_session_cut": { "initial_cache_read": 20 }
+}
+EOF
+        ;;
+      nested_target)
+        cat >"$FIXTURE_ROOT/.claude/token-saver.json" <<'EOF'
+{
+  "suggest_session_cut": {
+    "nested": { "initial_cache_read": 1 },
+    "initial_cache_read": 20
+  }
+}
+EOF
+        ;;
+      string_value)
+        cat >"$FIXTURE_ROOT/.claude/token-saver.json" <<'EOF'
+{
+  "note": "文字列中の \"initial_cache_read\": 1 は設定ではない",
+  "suggest_session_cut": { "initial_cache_read": 20 }
+}
+EOF
+        ;;
+    esac
+
+    _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"cfg-scope-low","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":19,"output_tokens":0}}}
+EOF
+    payload="$(_payload "$FIXTURE_ROOT" "session-config-scope-low-$case_name" "$FIXTURE_TRANSCRIPT")"
+    _run_hook "$payload" "$FIXTURE_ROOT" env
+    assert_eq "0" "$HOOK_RC" "設定スコープ閾値未満の終了コード $case_name"
+    assert_empty "$HOOK_STDOUT" "設定スコープ外の値では提案しない $case_name"
+    assert_empty "$HOOK_STDERR" "設定スコープ閾値未満の stderr $case_name"
+
+    _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"cfg-scope-high","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":20,"output_tokens":0}}}
+EOF
+    payload="$(_payload "$FIXTURE_ROOT" "session-config-scope-high-$case_name" "$FIXTURE_TRANSCRIPT")"
+    _run_hook "$payload" "$FIXTURE_ROOT" env
+    assert_eq "0" "$HOOK_RC" "root直下設定値の終了コード $case_name"
+    assert_contains "$HOOK_STDOUT" "$SUGGEST_SESSION_CUT_MESSAGE" \
+      "root直下suggest_session_cutの直下値を使う $case_name"
+    assert_empty "$HOOK_STDERR" "root直下設定値の stderr $case_name"
+  done
+}
+
 test_状態パスはgit形状や空白に依らずtoken_saver配下を使う() {
   for kind in no_git git_dir git_file; do
     FIXTURE_ROOT="$TEST_TMP/root $kind"
@@ -348,6 +412,55 @@ EOF
     assert_contains "$current_log" "boundary=30000000" "追記は新しいevents.logへ行う $case_name"
     assert_not_contains "$current_log" "$seed" "追記後ログへ退避前内容を混ぜない $case_name"
   done
+}
+
+test_events_log追記不能時は状態を進めて無出力で終了する() {
+  _fixture_repo
+  mkdir -p "$FIXTURE_STATE_DIR/events.log"
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"log-write-fail","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-log-write-fail" "$FIXTURE_TRANSCRIPT")"
+  _run_hook "$payload" "$FIXTURE_ROOT" env
+  assert_eq "0" "$HOOK_RC" "events.log追記不能時の終了コード"
+  assert_empty "$HOOK_STDOUT" "events.log追記不能時は提案しない"
+  assert_empty "$HOOK_STDERR" "events.log追記不能時の stderr"
+  _state_file_text ".cache"
+  assert_contains "$CTS_STATE_FILE_TEXT" "total=30000000" "追記失敗前にcacheを更新する"
+  _state_file_text ".marker"
+  assert_contains "$CTS_STATE_FILE_TEXT" "boundary_index=1" "追記失敗前にmarkerを進める"
+  assert_contains "$CTS_STATE_FILE_TEXT" "boundary=30000000" "追記失敗時のmarker境界"
+
+  _run_hook "$payload" "$FIXTURE_ROOT" env
+  assert_eq "0" "$HOOK_RC" "events.log追記不能後の再実行終了コード"
+  assert_empty "$HOOK_STDOUT" "events.log追記不能後に即時再提案しない"
+  assert_empty "$HOOK_STDERR" "events.log追記不能後の再実行 stderr"
+}
+
+test_ログローテーション失敗時は状態を進めて無出力で終了する() {
+  _fixture_repo
+  mkdir -p "$FIXTURE_STATE_DIR/events.log.1"
+  printf 'rotation source' >"$FIXTURE_STATE_DIR/events.log"
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"log-rotate-fail","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-log-rotate-fail" "$FIXTURE_TRANSCRIPT")"
+  _run_hook "$payload" "$FIXTURE_ROOT" env \
+    CTS_SESSION_CUT_LOG_MAX_BYTES=1 CTS_SESSION_CUT_LOG_BACKUPS=1
+  assert_eq "0" "$HOOK_RC" "ログローテーション失敗時の終了コード"
+  assert_empty "$HOOK_STDOUT" "ログローテーション失敗時は提案しない"
+  assert_empty "$HOOK_STDERR" "ログローテーション失敗時の stderr"
+  assert_file_exists "$FIXTURE_STATE_DIR/events.log" "失敗時は元ログを残す"
+  assert_eq "rotation source" "$(cat "$FIXTURE_STATE_DIR/events.log")" \
+    "失敗時は元ログを変更しない"
+  _state_file_text ".marker"
+  assert_contains "$CTS_STATE_FILE_TEXT" "boundary=30000000" "ローテーション失敗前にmarkerを進める"
+
+  _run_hook "$payload" "$FIXTURE_ROOT" env \
+    CTS_SESSION_CUT_LOG_MAX_BYTES=1 CTS_SESSION_CUT_LOG_BACKUPS=1
+  assert_eq "0" "$HOOK_RC" "ローテーション失敗後の再実行終了コード"
+  assert_empty "$HOOK_STDOUT" "ローテーション失敗後に即時再提案しない"
+  assert_empty "$HOOK_STDERR" "ローテーション失敗後の再実行 stderr"
 }
 
 test_状態書き込み失敗時は提案せずclearも他状態も触らない() {

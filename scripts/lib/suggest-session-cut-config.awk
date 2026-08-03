@@ -1,7 +1,8 @@
 # suggest-session-cut.sh が使う設定JSONから、指定された数値フィールドを1つ読む。
-# jq/Pythonへ依存しないための小さな字句スキャナであり、文字列本文中の同名文字列を
-# 設定値として拾わない。設定全体の妥当性を評価するものではなく、対象キーの値が
-# JSONの非負整数ならそれだけを出力する。不正な設定は呼び出し側が既定値へ戻す。
+# jq/Pythonへ依存しないための小さな字句スキャナであり、root直下にある
+# suggest_session_cutオブジェクトの直下だけを設定値として扱う。設定全体の妥当性を
+# 評価するものではなく、対象キーの値が非負整数ならそれだけを出力する。
+# 不正な設定は呼び出し側が既定値へ戻す。
 
 BEGIN {
   text = ""
@@ -66,28 +67,145 @@ function take_digits(    start) {
   return 1
 }
 
+function take_atom(    c, start) {
+  start = pos
+  while (pos <= length(text)) {
+    c = substr(text, pos, 1)
+    if (c == " " || c == "\t" || c == "\r" || c == "\n" ||
+        c == "{" || c == "}" || c == "[" || c == "]" ||
+        c == ":" || c == ",") {
+      break
+    }
+    pos++
+  }
+  if (pos == start) return 0
+  atom_value = substr(text, start, pos - start)
+  return 1
+}
+
 END {
   wanted = config_key
   pos = 1
+  depth = 0
+  root_seen = 0
+  target_depth = 0
+
   while (pos <= length(text)) {
-    if (substr(text, pos, 1) == "\"") {
+    skip_ws()
+    if (pos > length(text)) break
+    c = substr(text, pos, 1)
+    token = ""
+    token_value = ""
+    if (c == "\"") {
       if (!take_string()) exit 2
-      if (string_value == wanted) {
-        skip_ws()
-        if (substr(text, pos, 1) == ":") {
-          pos++
-          skip_ws()
-          if (take_digits()) {
-            # JSONの数値の直後に識別子文字があれば、数値の一部として扱わない。
-            if (substr(text, pos, 1) !~ /^[A-Za-z0-9_.+-]$/) {
-              print number_value
-              exit 0
-            }
+      token = "string"
+      token_value = string_value
+    } else if (c == "{" || c == "}" || c == "[" || c == "]" ||
+               c == ":" || c == ",") {
+      token = c
+      pos++
+    } else {
+      if (!take_atom()) exit 2
+      token = "atom"
+      token_value = atom_value
+    }
+
+    if (!root_seen) {
+      if (token != "{") exit 2
+      root_seen = 1
+      depth = 1
+      container[depth] = "object"
+      state[depth] = "key"
+      continue
+    }
+
+    if (depth == 0) exit 2
+    if (container[depth] == "object") {
+      if (state[depth] == "key") {
+        if (token == "}") {
+          if (target_depth == depth) target_depth = 0
+          delete container[depth]
+          delete state[depth]
+          delete object_key[depth]
+          depth--
+        } else if (token == "string") {
+          object_key[depth] = token_value
+          state[depth] = "colon"
+        } else {
+          exit 2
+        }
+      } else if (state[depth] == "colon") {
+        if (token != ":") exit 2
+        state[depth] = "value"
+      } else if (state[depth] == "value") {
+        parent_depth = depth
+        is_target = (parent_depth == 1 &&
+                     object_key[parent_depth] == "suggest_session_cut" &&
+                     token == "{")
+        if (parent_depth == target_depth && object_key[parent_depth] == wanted &&
+            token == "atom" && token_value ~ /^[0-9][0-9]*$/) {
+          print token_value
+          exit 0
+        }
+        state[parent_depth] = "after"
+        if (token == "{" || token == "[") {
+          depth++
+          if (token == "{") {
+            container[depth] = "object"
+            state[depth] = "key"
+          } else {
+            container[depth] = "array"
+            state[depth] = "value"
           }
+          if (is_target) target_depth = depth
+        } else if (token != "string" && token != "atom") {
+          exit 2
+        }
+      } else {
+        if (token == ",") {
+          state[depth] = "key"
+        } else if (token == "}") {
+          if (target_depth == depth) target_depth = 0
+          delete container[depth]
+          delete state[depth]
+          delete object_key[depth]
+          depth--
+        } else {
+          exit 2
         }
       }
     } else {
-      pos++
+      if (state[depth] == "value") {
+        if (token == "]") {
+          delete container[depth]
+          delete state[depth]
+          depth--
+        } else if (token == "{" || token == "[") {
+          state[depth] = "after"
+          depth++
+          if (token == "{") {
+            container[depth] = "object"
+            state[depth] = "key"
+          } else {
+            container[depth] = "array"
+            state[depth] = "value"
+          }
+        } else if (token == "string" || token == "atom") {
+          state[depth] = "after"
+        } else {
+          exit 2
+        }
+      } else {
+        if (token == ",") {
+          state[depth] = "value"
+        } else if (token == "]") {
+          delete container[depth]
+          delete state[depth]
+          depth--
+        } else {
+          exit 2
+        }
+      }
     }
   }
   exit 1
