@@ -30,6 +30,41 @@ description: Use when the session is about to be cut or cleared, when the user a
 
 `--personal` は共有の `.gitignore` を残し、`--shared` は個人用設置物を削除しない。台帳・状態・引き継ぎ・残存スキルがある場合、`--shared` は未追跡ファイルを露出させないため `.gitignore` のブロックを残す。台帳の無い旧環境を推測する `--guess` は個人側でのみ使う。
 
+## セッション切り提案（Stop フック）
+
+`install.sh` は `Stop` に `suggest-session-cut.sh` を登録する。フックは assistant message の
+`message.usage.cache_read_input_tokens` を累積し、初回 `30,000,000`、以後 `30,000,000` ごとの境界で
+一度だけ提案する。既定値は移植元の実測由来であり、他プロジェクトへ自動適合する保証はない。
+
+設定は導入先の `.claude/token-saver.json` に置き、設定 JSON の親キーは `suggest_session_cut` とする。
+正の整数を指定し、`log_backups` だけは `0` を指定できる。`log_backups` は 0 以上 1000 以下に制限し、
+上限を超えた値は既定値へ戻す。
+
+```json
+{
+  "suggest_session_cut": {
+    "initial_cache_read": 30000000,
+    "increment_cache_read": 30000000,
+    "retention_days": 7,
+    "log_max_bytes": 1048576,
+    "log_backups": 5
+  }
+}
+```
+
+環境変数 `CTS_SESSION_CUT_INITIAL_CACHE_READ`、`CTS_SESSION_CUT_INCREMENT_CACHE_READ`、
+`CTS_SESSION_CUT_RETENTION_DAYS`、`CTS_SESSION_CUT_LOG_MAX_BYTES`、
+`CTS_SESSION_CUT_LOG_BACKUPS` は設定ファイルより優先する。状態は `.token-saver/session-cut/` の
+`.cache`、`.marker`、`events.log` に保存し、linked worktree でも `.git/` へは書き込まない。
+状態は lock 内で同一ディレクトリの一時ファイルから rename し、symlink や rename 失敗時は
+旧状態を保持して fail-closed にする。
+検査済みの状態ディレクトリへ `cd -P` してから相対パスで操作し、差し替え後も外部へ追随しない。
+lock には owner PID を記録し、ライブPIDは尊重し、10分以上古い無効lockだけを回収する。
+
+設定ファイルが無い、または読めない場合は各設定値を、個別値が不正な場合はその値だけを既定値へ戻す。
+入力・トランスクリプト・状態を判定できない、または読み書きに失敗した場合は fail-closed とし、無出力・標準エラー空・終了コード `0` で抜ける。
+`/clear` は自動実行しません。提案が出たら、引き継ぎを書いてから、手動で新しいセッションへ切り替えることを検討してください。
+
 ## 引き継ぎを書くとき
 
 次のいずれかに当てはまったら書く。

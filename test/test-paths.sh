@@ -17,6 +17,7 @@ test_新パスの相対パスを返す() {
   assert_eq ".token-saver/handoff" "$(cts_handoff_rel)" "cts_handoff_rel"
   assert_eq ".token-saver/installed.json" "$(cts_ledger_rel)" "cts_ledger_rel"
   assert_eq ".token-saver/token-report.sh" "$(cts_token_report_rel)" "cts_token_report_rel"
+  assert_eq ".token-saver/session-cut" "$(cts_session_cut_rel)" "cts_session_cut_rel"
 }
 
 test_旧パスの相対パスを返す() {
@@ -32,6 +33,7 @@ test_新パスが_claude_配下を指さない() {
   assert_not_contains "$(cts_base_rel)" ".claude" "cts_base_rel"
   assert_not_contains "$(cts_handoff_rel)" ".claude" "cts_handoff_rel"
   assert_not_contains "$(cts_ledger_rel)" ".claude" "cts_ledger_rel"
+  assert_not_contains "$(cts_session_cut_rel)" ".claude" "cts_session_cut_rel"
 }
 
 test_末尾に改行を付けない() {

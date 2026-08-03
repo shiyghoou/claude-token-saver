@@ -142,6 +142,43 @@ printf 'EMPTY_EXIT=%s\n' "$?"
 printf 'EMPTY_STDOUT_BYTES=%s\n' "$(wc -c </tmp/out2 | tr -d ' ')"
 printf 'EMPTY_STDERR_BYTES=%s\n' "$(wc -c </tmp/err2 | tr -d ' ')"
 
+# Stop hook 本体を実際の payload と assistant JSONL で走らせる。
+# clear を PATH 上で監視し、自動実行されないことも Bash 3.2 上で確かめる。
+cut_proj='/tmp/cut proj'
+rm -rf "$cut_proj" /tmp/cut-bin /tmp/cts-bash32-clear-called
+mkdir -p "$cut_proj" /tmp/cut-bin
+cat >"$cut_proj/session.jsonl" <<'CUTJSONL'
+{"type":"assistant","message":{"id":"bash32-cut","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+CUTJSONL
+cat >/tmp/cut-bin/clear <<'CLEARSTUB'
+#!/bin/sh
+touch /tmp/cts-bash32-clear-called
+exit 99
+CLEARSTUB
+chmod +x /tmp/cut-bin/clear
+printf '{"session_id":"bash32-stop","transcript_path":"%s","cwd":"%s","permission_mode":"default","hook_event_name":"Stop","stop_hook_active":false}' \
+  "$cut_proj/session.jsonl" "$cut_proj" \
+  | PATH="/tmp/cut-bin:$PATH" bash /repo/scripts/suggest-session-cut.sh \
+      >/tmp/cut-out 2>/tmp/cut-err
+printf 'CUT_EXIT=%s\n' "$?"
+printf 'CUT_STDERR_BYTES=%s\n' "$(wc -c </tmp/cut-err | tr -d ' ')"
+printf 'CUT_SUGGEST=%s\n' \
+  "$(grep -c -F '手動で新しいセッションへ切り替えることを検討してください。' /tmp/cut-out || true)"
+if [ -d "$cut_proj/.token-saver/session-cut" ]; then
+  printf 'CUT_STATE_DIR=1\n'
+else
+  printf 'CUT_STATE_DIR=0\n'
+fi
+printf 'CUT_CACHE_COUNT=%s\n' \
+  "$(find "$cut_proj/.token-saver/session-cut" -type f -name '*.cache' 2>/dev/null | wc -l | tr -d ' ')"
+printf 'CUT_MARKER_COUNT=%s\n' \
+  "$(find "$cut_proj/.token-saver/session-cut" -type f -name '*.marker' 2>/dev/null | wc -l | tr -d ' ')"
+if [ -e /tmp/cts-bash32-clear-called ]; then
+  printf 'CUT_CLEAR_CALLED=1\n'
+else
+  printf 'CUT_CLEAR_CALLED=0\n'
+fi
+
 # bash:3.2 image には python3 が無いので、engine の最小出力契約だけを再現する。
 mkdir -p /tmp/fake-bin
 cat >/tmp/fake-bin/python3 <<'STUB'
@@ -224,6 +261,13 @@ want 'CONSUME_FAIL_PENDING=1' "consumer失敗時にpendingファイルが失わ�
 want 'EMPTY_EXIT=0'         "未消費ゼロで終了コードが 0 でない"
 want 'EMPTY_STDOUT_BYTES=0' "未消費ゼロなのに出力がある"
 want 'EMPTY_STDERR_BYTES=0' "未消費ゼロで標準エラーを汚している"
+want 'CUT_EXIT=0'            "suggest-session-cut の終了コードが 0 でない"
+want 'CUT_STDERR_BYTES=0'    "suggest-session-cut が標準エラーを汚している"
+want 'CUT_SUGGEST=1'         "assistant JSONL から切り替え提案が出ていない"
+want 'CUT_STATE_DIR=1'       "状態が導入先の .token-saver/session-cut に無い"
+want 'CUT_CACHE_COUNT=1'     "セッション cache が導入先に1件作られていない"
+want 'CUT_MARKER_COUNT=1'    "境界 marker が導入先に1件作られていない"
+want 'CUT_CLEAR_CALLED=0'    "suggest-session-cut が clear を自動実行した"
 want 'REPORT_EXIT=0'         "token-report launcher の終了コードが 0 でない"
 want 'REPORT_STDERR_BYTES=0' "token-report launcher が標準エラーを汚している"
 want 'REPORT_COUNT=1'        "導入先に token-report が1件作られていない"
@@ -238,4 +282,4 @@ $out" in
 STDOUT_BYTES=0"*) fail "標準出力が空である（本文が失われている）" ;;
 esac
 
-printf 'OK: bash 3.2 でフックと token-report launcher が正しく動作した\n'
+printf 'OK: bash 3.2 で handoff / suggest-session-cut / token-report が正しく動作した\n'

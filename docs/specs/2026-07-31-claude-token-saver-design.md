@@ -1,7 +1,7 @@
 # claude-token-saver 設計書
 
 - 作成日: 2026-07-31
-- 状態: ユーザーレビュー待ち
+- 状態: 段階3実装済み（段階4・5は未実装）
 - リポジトリ: `claude-token-saver`（個人 GitHub / public）
 
 引き継ぎと台帳の置き場所は `docs/specs/2026-07-31-token-saver-root-dir-design.md`
@@ -15,9 +15,9 @@ Claude Code のトークン消費を減らすためのヘルパーを、単一�
 1. コンテキストが膨らみきる前にセッションを切ること
 2. 切ったあと、作業を再開するために失われた文脈を最小のコストで復元すること
 
-現状、1 の「切り時の検知」は**移植元**（非公開の社内リポジトリ。以下この呼称で通す）に実装済みだが、
-2 の「引き継ぎ」が存在しない。
-そのため「切ると文脈を失う」ことを恐れて切らない、という運用上の詰まりが残っている。本スキルはその欠落を埋め、
+現在は、1 の「切り時の検知」は本リポジトリの段階3として実装済みであり、
+2 の「引き継ぎ」も段階1として実装済みである。
+実装前は「切ると文脈を失う」ことを恐れて切らない、という運用上の詰まりが残っていた。本スキルはその欠落を埋め、
 あわせて既存資産を任意のプロジェクトへ導入可能な形に一般化する。
 
 ## 2. 背景 — 既存資産の棚卸し
@@ -28,9 +28,9 @@ Claude Code のトークン消費を減らすためのヘルパーを、単一�
 | --- | --- | --- |
 | 計測エンジン | `measure-token-usage.py` | 完成・テスト付き |
 | 計測ランチャ | `token-usage.sh` / `token-usage.cmd` | 完成 |
-| セッション切り提案 | `suggest-session-cut.sh`（Stop フック） | マージ済み・テスト付き |
+| セッション切り提案 | `suggest-session-cut.sh`（Stop フック） | 移植元で実装済み・本リポジトリへ移植済み・テスト付き |
 | 委譲/モデル選定方針 | 運用ドキュメント1本 | 運用中 |
-| 引き継ぎ | なし | **未実装** |
+| 引き継ぎ | なし（本リポジトリで新規実装） | 本リポジトリでは実装済み |
 
 本リポジトリを正とし、移植元は導入する側に回る。移植完了後、移植元からスクリプト実体を削除して
 install に切り替える変更を別途入れる（移植元の変更なので、そちらの運用規約に従う）。
@@ -72,7 +72,13 @@ claude-token-saver/
 │   ├── suggest-session-cut.sh         Stop フック（移植）
 │   ├── handoff-check.sh               SessionStart フック（新規）
 │   ├── handoff-consume.sh             pending → consumed（新規）
-│   └── lib/                           フック実行時の共通処理（外部コマンドに依存しない）
+│   └── lib/                           フック実行時の共通処理
+│       ├── common.sh                  payload 読み取り・JSON文字列抽出・handoff共通処理
+│       ├── paths.sh                   状態パスの単一情報源
+│       ├── token-report-entrypoint.sh token-report launcher 共通処理
+│       ├── suggest-session-cut-json.awk    Stop payload の完全JSON validator
+│       ├── suggest-session-cut-config.awk  設定JSONのスコープ付きvalidator
+│       └── suggest-session-cut-usage.awk   assistant JSONL usage集計
 ├── test/
 │   ├── run.sh                         依存ゼロの bash テストランナー
 │   └── ...
@@ -221,24 +227,66 @@ launcher は engine の `--days` / `--all-projects` / `--paths` / `--top` / `--o
 - 画像の消費は現在の計測エンジンでは未計測である。
 - MCP サーバごとのトークン消費は実測できない。分かるのは設定済みか、呼ばれたか、何回かまでである。
 - 各種比率（1セッション占有率など）は特定期間・特定リポジトリの実測であり一般化されていない。
-- Stop フックによる切り時提案と calibrate はこの節の範囲外で、後続の §5.3 と §5.5 で扱う。
+- Stop フックによる切り時提案は §5.3、calibrate は §5.5 で扱う。
 
 ### 5.3 セッション切り提案（suggest-session-cut）
 
-Stop フックとして、累積 `cache_read` が閾値に達したらセッションを切ることを提案する。
+段階3で実装済みの Stop フックである。トランスクリプト JSONL の assistant message にある
+`message.usage.cache_read_input_tokens` をセッション単位で累積し、閾値に達したらセッションを切ることを提案する。
+発火は境界ごとに一度だけであり、同じ `message.id` を重複して数えず、id が無い行は `requestId` と usage 値を
+代替キーにして重複を抑える。文字列本文中の同名キーは集計対象にしない。
+`suggest-session-cut-json.awk` で Stop payload 全体を末尾まで完全な JSON として検証する前に、
+`cwd`、`session_id`、`transcript_path` を採用してはならない。トランスクリプトも各行を完全な JSON として検証し、
+assistant message の完全な usage object だけを集計する。
 
-一般化する点:
+設定は導入先の `.claude/token-saver.json` から読み、設定 JSON の親キーは `suggest_session_cut` とする。
+環境変数が設定ファイルより優先する。設定ファイルが無い、または読めない場合は各設定値を、個別値が不正な場合はその値だけを既定値へ戻す。
+`suggest-session-cut-config.awk` は設定全体を末尾まで検証し、root 直下の `suggest_session_cut` 直下にある数値だけを採用する。
 
-- **閾値の外出し**。既定は移植元の実測由来の 30,000,000（段階1）/ 60,000,000（段階2）/ 以降 30,000,000 ごと。
-  `.claude/token-saver.json` と環境変数で上書きできるようにする。**他環境ではそのままでは合わない**ことを README に明記する。
-- **`.git/` 配下への書き込み依存の解消**。現行はマーカー/キャッシュを `.git/` 内に置いている。
-  git worktree や非 git ディレクトリで壊れるため、保存先を `.token-saver/` 配下へ移す（`install.sh` が `.gitignore` へ追記）。
+```json
+{
+  "suggest_session_cut": {
+    "initial_cache_read": 30000000,
+    "increment_cache_read": 30000000,
+    "retention_days": 7,
+    "log_max_bytes": 1048576,
+    "log_backups": 5
+  }
+}
+```
 
-移植ついでに、敵対的レビューで指摘されたまま残っている繰り越し3件を解消する。public に出す前に直す。
+対応する環境変数は `CTS_SESSION_CUT_INITIAL_CACHE_READ`、`CTS_SESSION_CUT_INCREMENT_CACHE_READ`、
+`CTS_SESSION_CUT_RETENTION_DAYS`、`CTS_SESSION_CUT_LOG_MAX_BYTES`、`CTS_SESSION_CUT_LOG_BACKUPS` である。
+既定値は移植元の実測由来であり、他プロジェクトへ自動適合する保証はない。段階4の calibrate で実測に合わせる。
+値は正の整数で、`log_backups` だけは `0` を許す。`log_backups` は 0 以上 1000 以下に制限し、
+上限を超えた値は既定値へ戻す。
 
-1. 発火ログのローテーション未実装（肥大化しても削除手段がない）
-2. セッションごとのマーカー/キャッシュを掃除する仕組みがない（古いセッション分が残り続ける）
-3. キャッシュ書き込みが非アトミック（tmp → rename になっていない）
+状態は導入先の `.token-saver/session-cut/` に置く。
+
+```
+<root>/.token-saver/session-cut/
+├── <session-hash>.cache
+├── <session-hash>.marker
+└── events.log          発火ログ（上限超過前に .1, .2 ... へローテーション）
+```
+
+cache と marker は同じ管理ディレクトリ内の一時ファイルから rename して原子的に更新する。
+rename に失敗した場合は旧状態を保持し、提案を出さない。状態の読み取り、掃除、cache/marker 更新、
+ログ更新と提案判定は state dir 内の排他的な lock を取得してから行い、同じ境界を二重提案しない。
+期限切れの `.cache`、`.marker`、一時ファイルは `retention_days` に従って掃除する。
+検査済みの状態ディレクトリへ `cd -P` してから相対パスで操作し、差し替え後も外部へ追随しない。
+lock には owner PID を記録し、ライブPIDは尊重し、10分以上古い無効lockだけを回収する。
+Git repository と linked worktree では `git rev-parse --show-toplevel` の root を使い、`.git/` と gitdir 配下には書き込まない。
+`.token-saver`、`session-cut`、cache、marker、`events.log`、数値ログ世代のいずれかが symlink なら追従せず fail-closed にする。
+
+ログのローテーションは実在する数値ログ世代だけを列挙する。`1..log_backups` の全範囲は走査せず、
+実在世代を降順に移動する。途中の rename に失敗した場合は退避済み世代を元へ戻し、元ログと全世代を保持して提案を出さない。
+
+入力・トランスクリプト・状態を判定できない、または読み書きに失敗した場合は fail-closed とし、無出力・標準エラー空・終了コード `0` で抜ける。外部の `jq`、Python、`timeout` には依存しない。
+`/clear` は自動実行しません。提案後は、引き継ぎを書いてから、手動で新しいセッションへ切り替えることを検討してください。
+
+移植時に解消した繰り越し課題は、発火ログのローテーション、期限切れ状態と一時ファイルの掃除、
+cache/marker の tmp → rename による原子的な更新である。
 
 ### 5.4 委譲判断ガイド（delegation-policy）
 
@@ -307,7 +355,7 @@ Stop フックとして、累積 `cache_read` が閾値に達したらセッシ�
 ## 6. 機能間の連動
 
 ```
-[Stop フック] 累計 cache_read が閾値到達
+[Stop フック] 累計 cache_read_input_tokens が閾値到達
       ↓
   「セッションを切ることを推奨します」
       ↓
@@ -343,8 +391,8 @@ Stop フックとして、累積 `cache_read` が閾値に達したらセッシ�
    二重登録され、存在しないコマンドを毎セッション実行することになる。同定は basename で行う。
    `CTS_HOME` は `pwd -P` で物理パスへ解決する。既存のユーザー独自フック（別コマンド、`matcher` 付き）は保持する。
    **コマンド文字列はシェルクォートする。** クローンのパスに空白があると、そのままではフックが恒久的に壊れる。
-   **実体のあるスクリプトだけを登録する。** 存在しないコマンドを登録すると毎セッション失敗する
-   （`suggest-session-cut.sh` は段階3の成果物であり、それまでは登録されない。段階3で再実行すれば追加される）。
+   **実体のあるスクリプトだけを登録する。** 存在しないコマンドを登録すると毎セッション失敗する。
+   `suggest-session-cut.sh` の実体がある版では Stop フックも登録され、更新後に再実行すれば追加される。
 4. `.gitignore` の `# claude-token-saver` ブロックを**毎回再生成する**。存在の有無だけを見て
    追記済みなら何もしない作りにすると、段階が進んでスキルやレポート出力先が増えても既存の導入先へ永久に届かない。
    ブロックの中身は `.token-saver/`、レポート出力先、
@@ -432,6 +480,11 @@ Stop フックとして、累積 `cache_read` が閾値に達したらセッシ�
 - **設置しなかったスキルの無視行を `.gitignore` へ書かない**
 - **`install.sh` → `uninstall.sh` の往復で原状復帰する**（整形の膨張・空行・空ディレクトリが残らない）
 - **引き継ぎ本文に終端文字列を書いても、区切りの外へ出られない**
+- **suggest-session-cut が、閾値境界・重複 message・設定ファイル・環境変数・不正値フォールバックを正しく扱う**
+- **suggest-session-cut が、非 git ディレクトリと worktree、空白を含む root、読めない入力で fail-closed になる**
+- **suggest-session-cut の状態が `.git/` 外へ置かれ、cache/marker が原子的に更新され、期限掃除とログローテーションが動く**
+- **suggest-session-cut が `/clear` を実行せず、handoff/token-report の状態を変更しない**
+- **Stop フックの install/uninstall 往復で、利用者の独自 Stop フックを保持しつつ自分の登録だけを除去する**
 - **ファイル名に `"`、改行、制御文字、タグ記号、Windows 形式、空白、shell metacharacter を入れても、`file=` / `path=` は UTF-8 byte-level の大文字 `%XX` エンコードになり、開始タグが割れない。エンコードに失敗した場合は空属性になり、生値を出さない**
 - **区切りを実装から外したら赤くなる**（説明文との文字列衝突で緑にならないこと）
 - **`uninstall.sh` が、導入と無関係な同名スキルのリンクを外さない**
@@ -459,9 +512,11 @@ Stop フックとして、累積 `cache_read` が閾値に達したらセッシ�
 | --- | --- | --- |
 | 1 | 器＋`install.sh`＋引き継ぎ | 引き継ぎが動く |
 | 2 | 計測エンジン移植 | 計測が任意プロジェクトで回る |
-| 3 | 切り提案フック移植＋一般化＋繰り越し修正 | 自動提案が動く（既定値＝段階1） |
+| 3 | 切り提案フック移植＋一般化＋繰り越し修正 | 自動提案が動く（既定値＝移植元の実測由来） |
 | 4 | キャリブレーションと診断 | 実測に合った閾値と改善提案が出る（段階2） |
 | 5 | 委譲ガイドスキル＋移植元の切り替え | 二重管理が解消 |
+
+段階3は本リポジトリで実装済みであり、段階4のキャリブレーションと段階5の委譲ガイドは未実装である。
 
 ## 10. リスクと対処
 
