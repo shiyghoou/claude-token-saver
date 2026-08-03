@@ -452,6 +452,7 @@ _cts_main() {
   local total current_boundary marker_boundary marker_index boundary
   local cache_content marker_content now
   local payload_source log_entry log_entry_bytes lock_candidate
+  local calibration_state_fingerprint calibration_state_key
   local summary assistant_turns calibration_min_sessions calibration_min_turns
   local calibration_config_value calibration_prompt
   CTS_TMP_FILE=""
@@ -540,12 +541,17 @@ _cts_main() {
   case "$state_key" in
     '' | *[!0-9-]*) return 0 ;;
   esac
+  calibration_state_fingerprint="$(printf '%s\037%s' "$session_id" "$CTS_ROOT" | cksum 2>/dev/null)" || return 0
+  calibration_state_key="$(printf '%s\n' "$calibration_state_fingerprint" | awk '{print $1 "-" $2}')" || return 0
+  case "$calibration_state_key" in
+    '' | *[!0-9-]*) return 0 ;;
+  esac
   cache="$CTS_STATE_DIR/$state_key.cache"
   marker="$CTS_STATE_DIR/$state_key.marker"
   calibration_prompt=0
   if [ "$CTS_CALIBRATION_STATE_AVAILABLE" = 1 ]; then
     CTS_CALIBRATION_PROMPT=0
-    cts_calibration_record_session "$CTS_ROOT" "$state_key" "$total" "$assistant_turns" \
+    cts_calibration_record_session "$CTS_ROOT" "$calibration_state_key" "$total" "$assistant_turns" \
       "$calibration_min_sessions" "$calibration_min_turns" >/dev/null 2>&1 || true
     [ "${CTS_CALIBRATION_PROMPT:-0}" = 1 ] && calibration_prompt=1
   fi

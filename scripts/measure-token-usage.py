@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -150,7 +151,7 @@ def build_calibration(scan, args, since, main_paths, sub_paths):
         and baseline > 0
     )
     period = "全期間" if since is None else "直近 {} 日".format(args.days)
-    return {
+    result = {
         "eligible": eligible,
         "period": period,
         "min_sessions": settings["min_sessions"],
@@ -161,12 +162,28 @@ def build_calibration(scan, args, since, main_paths, sub_paths):
         "current_initial": current["initial_cache_read"],
         "current_increment": current["increment_cache_read"],
         "recommended_levels": [baseline, baseline * 2, baseline * 3] if eligible else [],
+        "prompt_key": calibration_prompt_key(
+            session_count,
+            assistant_turns,
+            settings["min_sessions"],
+            settings["min_assistant_turns"],
+        ),
         "fingerprint": calibration_fingerprint(
             args, since, settings, main_paths, sub_paths
         ),
         "source": CALIBRATION_SOURCE,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+    result["prompt_available"] = False
+    if eligible:
+        result["prompt_available"] = sync_calibration_state(
+            PROJECT_ROOT,
+            scan.session_stats,
+            settings["min_sessions"],
+            settings["min_assistant_turns"],
+            PROJECT_ROOT,
+        )
+    return result
 
 
 def write_calibration_snapshot(snapshot):
@@ -326,6 +343,246 @@ def median_non_negative_integer(values):
     if len(ordered) % 2:
         return ordered[middle]
     return (ordered[middle - 1] + ordered[middle]) // 2
+
+
+def calibration_prompt_key(session_count, assistant_turns, min_sessions, min_turns):
+    return "{}-{}-{}-{}".format(
+        session_count, assistant_turns, min_sessions, min_turns
+    )
+
+
+def _posix_cksum(value):
+    """Return the numeric key emitted by POSIX cksum for UTF-8 text."""
+    data = value.encode("utf-8", "surrogateescape")
+    table = []
+    for index in range(256):
+        crc = index << 24
+        for _bit in range(8):
+            if crc & 0x80000000:
+                crc = ((crc << 1) ^ 0x04C11DB7) & 0xFFFFFFFF
+            else:
+                crc = (crc << 1) & 0xFFFFFFFF
+        table.append(crc)
+
+    crc = 0
+    for byte in data:
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ table[((crc >> 24) ^ byte) & 0xFF]
+    length = len(data)
+    while length:
+        byte = length & 0xFF
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ table[((crc >> 24) ^ byte) & 0xFF]
+        length >>= 8
+    return "{}-{}".format((~crc) & 0xFFFFFFFF, len(data))
+
+
+def calibration_session_key(session_id, source_key):
+    return _posix_cksum("{}\037{}".format(session_id, source_key))
+
+
+def _calibration_state_paths(root):
+    if not isinstance(root, str) or not os.path.isabs(root):
+        return None
+    absolute = os.path.abspath(root)
+    current = os.path.sep
+    for component in absolute.split(os.path.sep):
+        if not component:
+            continue
+        current = os.path.join(current, component)
+        if os.path.islink(current):
+            return None
+    if not os.path.isdir(absolute) or os.path.islink(absolute):
+        return None
+    base = os.path.join(absolute, TOKEN_SAVER_DIRNAME)
+    calibration_dir = os.path.join(base, "calibration")
+    for directory in (base, calibration_dir):
+        if os.path.lexists(directory):
+            if os.path.islink(directory) or not os.path.isdir(directory):
+                return None
+        else:
+            try:
+                os.mkdir(directory)
+            except OSError:
+                return None
+    return (
+        calibration_dir,
+        os.path.join(calibration_dir, "sessions.tsv"),
+        os.path.join(calibration_dir, "state"),
+        os.path.join(calibration_dir, ".lock"),
+    )
+
+
+def _calibration_read_sessions(path):
+    if not os.path.lexists(path):
+        return {}
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    rows = {}
+    try:
+        with open(path, encoding="utf-8", newline="") as handle:
+            for line in handle:
+                fields = line.rstrip("\n").split("\t")
+                if (
+                    len(fields) != 4
+                    or not re.match(r"^[0-9][0-9-]*[0-9]$", fields[0])
+                    or not re.match(r"^[0-9]+$", fields[1])
+                    or not re.match(r"^[0-9]+$", fields[2])
+                    or not re.match(r"^[0-9]+$", fields[3])
+                ):
+                    return None
+                rows[fields[0]] = (int(fields[1]), int(fields[2]), int(fields[3]))
+    except (OSError, ValueError):
+        return None
+    return rows
+
+
+def _calibration_read_state(path):
+    state = {"prompted_key": "", "applied_key": ""}
+    if not os.path.lexists(path):
+        return state
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    seen = set()
+    try:
+        with open(path, encoding="utf-8", newline="") as handle:
+            for line in handle:
+                fields = line.rstrip("\n").split("=", 1)
+                if (
+                    len(fields) != 2
+                    or fields[0] not in state
+                    or fields[0] in seen
+                    or not re.match(r"^[0-9-]*$", fields[1])
+                ):
+                    return None
+                state[fields[0]] = fields[1]
+                seen.add(fields[0])
+    except OSError:
+        return None
+    return state
+
+
+def _calibration_write_atomic(path, text):
+    if os.path.lexists(path) and os.path.islink(path):
+        return False
+    descriptor = None
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".calibration-state.", suffix=".tmp", dir=os.path.dirname(path)
+        )
+        if os.path.islink(temporary):
+            os.close(descriptor)
+            descriptor = None
+            return False
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            descriptor = None
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        return True
+    except OSError:
+        return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def sync_calibration_state(root, session_stats, min_sessions, min_turns, source_key):
+    """Synchronize report session totals with the shell hook's state format."""
+    paths = _calibration_state_paths(root)
+    if paths is None:
+        return False
+    if (
+        not isinstance(session_stats, dict)
+        or not isinstance(source_key, str)
+        or not isinstance(min_sessions, int)
+        or isinstance(min_sessions, bool)
+        or min_sessions <= 0
+        or not isinstance(min_turns, int)
+        or isinstance(min_turns, bool)
+        or min_turns <= 0
+    ):
+        return False
+
+    _calibration_dir, sessions_path, state_path, lock_path = paths
+    if os.path.lexists(lock_path):
+        return False
+    try:
+        os.mkdir(lock_path)
+    except OSError:
+        return False
+
+    try:
+        rows = _calibration_read_sessions(sessions_path)
+        state = _calibration_read_state(state_path)
+        if rows is None or state is None:
+            return False
+        now = int(time.time())
+        positive_sample = False
+        for session_id in sorted(session_stats):
+            stats = session_stats[session_id]
+            cache_read = getattr(stats, "cache_read", None)
+            assistant_turns = getattr(stats, "assistant_turns", None)
+            if (
+                not isinstance(session_id, str)
+                or not isinstance(cache_read, int)
+                or isinstance(cache_read, bool)
+                or cache_read < 0
+                or not isinstance(assistant_turns, int)
+                or isinstance(assistant_turns, bool)
+                or assistant_turns < 0
+            ):
+                return False
+            key = calibration_session_key(session_id, source_key)
+            rows[key] = (cache_read, assistant_turns, now)
+            positive_sample = positive_sample or cache_read > 0
+
+        lines = []
+        for key in sorted(rows):
+            cache_read, assistant_turns, last_seen = rows[key]
+            lines.append("{}\t{}\t{}\t{}".format(
+                key, cache_read, assistant_turns, last_seen
+            ))
+        sessions_text = "\n".join(lines) + ("\n" if lines else "")
+        if not _calibration_write_atomic(sessions_path, sessions_text):
+            return False
+
+        session_count = len(rows)
+        assistant_turns = sum(row[1] for row in rows.values())
+        prompt_key = calibration_prompt_key(
+            session_count, assistant_turns, min_sessions, min_turns
+        )
+        prompt_available = (
+            session_count >= min_sessions
+            and assistant_turns >= min_turns
+            and positive_sample
+            and state["prompted_key"] != prompt_key
+            and state["applied_key"] != prompt_key
+        )
+        if prompt_available:
+            state["prompted_key"] = prompt_key
+        state_text = "prompted_key={}\napplied_key={}\n".format(
+            state["prompted_key"], state["applied_key"]
+        )
+        if not _calibration_write_atomic(state_path, state_text):
+            return False
+        return prompt_available
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        try:
+            os.rmdir(lock_path)
+        except OSError:
+            pass
 
 
 def has_unsafe_text(text):
@@ -1114,7 +1371,27 @@ def top_rows(rows, limit):
     return rows[:limit]
 
 
-def build_report(args, scan, project_dirs, since, calibration=None, diagnostics=None):
+def append_calibration_prompt(lines):
+    lines.append(
+        "- キャリブレーションのサンプル条件を満たしました。内容を確認してから明示適用してください。"
+    )
+    lines.append(
+        "- `./{}/token-report.sh --calibrate`".format(TOKEN_SAVER_DIRNAME)
+    )
+    lines.append(
+        "- `./{}/token-calibrate.sh --apply`".format(TOKEN_SAVER_DIRNAME)
+    )
+
+
+def build_report(
+    args,
+    scan,
+    project_dirs,
+    since,
+    calibration=None,
+    diagnostics=None,
+    calibration_prompt=False,
+):
     lines = []
     add = lines.append
     window = f"直近 {args.days} 日" if since else "全期間"
@@ -1294,6 +1571,8 @@ def build_report(args, scan, project_dirs, since, calibration=None, diagnostics=
                 )
             if calibration["baseline_cache_read"] is None:
                 add("- 有効な正の cache_read サンプルがないため、推奨値は算出しない。")
+        if calibration.get("prompt_available"):
+            append_calibration_prompt(lines)
         add("")
 
     if diagnostics is not None:
@@ -1417,6 +1696,12 @@ def build_report(args, scan, project_dirs, since, calibration=None, diagnostics=
         )
         add("")
 
+    if calibration_prompt and calibration is None:
+        add("## キャリブレーション案内")
+        add("")
+        append_calibration_prompt(lines)
+        add("")
+
     add("## 共有時の境界")
     add("")
     add("- 含める: 集計値、モデル名、subagent_type、MCP サーバ名、repo 内の相対パス。")
@@ -1509,9 +1794,9 @@ def main():
     scan.fell_back = fell_back
     if fell_back:
         print(FALLBACK_WARNING, file=sys.stderr)
-    calibration = None
+    calibration_state = build_calibration(scan, args, since, main_paths, sub_paths)
+    calibration = calibration_state if args.calibrate else None
     if args.calibrate:
-        calibration = build_calibration(scan, args, since, main_paths, sub_paths)
         if not write_calibration_snapshot(calibration):
             print("キャリブレーション snapshot の保存に失敗しました", file=sys.stderr)
             return 1
@@ -1521,7 +1806,13 @@ def main():
         else None
     )
     report = build_report(
-        args, scan, [PROJECT_ROOT], since, calibration, diagnostics
+        args,
+        scan,
+        [PROJECT_ROOT],
+        since,
+        calibration,
+        diagnostics,
+        calibration_state.get("prompt_available", False),
     )
 
     if args.out:

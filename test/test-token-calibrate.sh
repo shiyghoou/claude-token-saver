@@ -126,6 +126,15 @@ test_適用は閾値以外のキーを保持する() {
   assert_eq "30000000" "$(_json_value calibration last_applied previous_initial)" "適用前メタデータ"
 }
 
+test_適用はprompt_keyをapplied_keyへ記録する() {
+  _fixture_with_latest
+  _run_calibrate_command --apply
+  state="$FIXTURE_REPO/.token-saver/calibration/state"
+  assert_eq "0" "$STATUS" "prompt key apply成功"
+  assert_file_exists "$state" "適用後のcalibration state"
+  assert_contains "$(cat "$state")" "applied_key=5-100-5-100" "適用済みprompt key"
+}
+
 test_現在設定がsnapshotと違えば拒否する() {
   _fixture_with_latest
   _set_initial 123
@@ -153,6 +162,25 @@ PYEOF
   _run_calibrate_command --apply
   assert_eq "1" "$STATUS" "不正snapshot拒否"
   assert_eq "$before" "$(cat "$CONFIG")" "不正snapshot時非変更"
+}
+
+test_不正な暦日のsnapshotを拒否する() {
+  _fixture_with_latest
+  python3 - "$LATEST" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    snapshot = json.load(handle)
+snapshot["generated_at"] = "2026-99-99T00:00:00.000000Z"
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(snapshot, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PYEOF
+  before="$(cat "$CONFIG")"
+  _run_calibrate_command --apply
+  assert_eq "1" "$STATUS" "不正な暦日のsnapshot拒否"
+  assert_eq "$before" "$(cat "$CONFIG")" "不正な暦日のsnapshot時非変更"
 }
 
 test_設定とsnapshotのsymlinkを追従しない() {

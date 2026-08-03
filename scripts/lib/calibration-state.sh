@@ -101,6 +101,7 @@ _cts_calibration_read_state() {
   local path="$1" name value
   CTS_CALIBRATION_PROMPTED_KEY=""
   CTS_CALIBRATION_APPLIED_KEY=""
+  [ ! -L "$path" ] || return 1
   if [ ! -e "$path" ]; then
     return 0
   fi
@@ -211,8 +212,10 @@ cts_calibration_record_session() {
     _cts_calibration_release_lock
     return 1
   fi
+  now="$(date +%s 2>/dev/null || printf 0)"
+  _cts_calibration_valid_integer "$now" || now=0
   if ! printf '%s\t%s\t%s\t%s\n' "$session_key" "$cache_read" "$assistant_turns" \
-    "$(date +%s 2>/dev/null || printf 0)" >>"$tmp"; then
+    "$now" >>"$tmp"; then
     rm -f "$tmp" 2>/dev/null || true
     _cts_calibration_release_lock
     return 1
@@ -247,12 +250,11 @@ cts_calibration_record_session() {
     return 1
   }
 
-  now="$(date +%s 2>/dev/null || printf 0)"
-  _cts_calibration_valid_integer "$now" || now=0
   if [ "$session_count" -ge "$min_sessions" ] 2>/dev/null &&
      [ "$turn_count" -ge "$min_turns" ] 2>/dev/null; then
     prompt_key="${session_count}-${turn_count}-${min_sessions}-${min_turns}"
-    if [ "$CTS_CALIBRATION_PROMPTED_KEY" != "$prompt_key" ]; then
+    if [ "$CTS_CALIBRATION_PROMPTED_KEY" != "$prompt_key" ] &&
+       [ "$CTS_CALIBRATION_APPLIED_KEY" != "$prompt_key" ]; then
       CTS_CALIBRATION_PROMPT=1
       CTS_CALIBRATION_PROMPTED_KEY="$prompt_key"
     fi

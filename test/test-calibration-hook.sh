@@ -74,6 +74,114 @@ _run_calibration_hook() {
   CALIBRATION_HOOK_RC="$?"
 }
 
+_report_sync_fixture() {
+  REPORT_FIXTURE_HOME="$TEST_TMP/report-sync-home"
+  REPORT_FIXTURE_ROOT="$TEST_TMP/report-sync-repo"
+  REPORT_PROJECT_DIR=""
+  REPORT_SESSION_COUNT=5
+  mkdir -p "$REPORT_FIXTURE_HOME/.claude/projects" "$REPORT_FIXTURE_ROOT/.git" \
+    "$REPORT_FIXTURE_ROOT/.claude"
+  python3 - "$REPORT_FIXTURE_HOME" "$REPORT_FIXTURE_ROOT" <<'PYEOF'
+import json
+import os
+import sys
+
+home, repo = sys.argv[1:]
+key = "".join(char if char.isascii() and char.isalnum() else "-" for char in repo)
+project = os.path.join(home, ".claude", "projects", key)
+os.makedirs(project)
+for session_index in range(5):
+    session_id = "sync-session-{}".format(session_index)
+    path = os.path.join(project, "{}.jsonl".format(session_id))
+    with open(path, "w", encoding="utf-8") as handle:
+        for turn_index in range(20):
+            row = {
+                "type": "assistant",
+                "sessionId": session_id,
+                "message": {
+                    "id": "{}-message-{}".format(session_id, turn_index),
+                    "usage": {
+                        "input_tokens": 1,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 10,
+                        "output_tokens": 1,
+                    },
+                    "content": [],
+                },
+            }
+            handle.write(json.dumps(row) + "\n")
+
+with open(os.path.join(repo, ".claude", "token-saver.json"), "w", encoding="utf-8") as handle:
+    json.dump({
+        "calibration": {"min_sessions": 5, "min_assistant_turns": 100},
+        "suggest_session_cut": {
+            "initial_cache_read": 30000000,
+            "increment_cache_read": 30000000,
+        },
+        "unrelated": "must remain untouched",
+    }, handle, indent=2)
+    handle.write("\n")
+PYEOF
+  REPORT_PROJECT_DIR="$(find "$REPORT_FIXTURE_HOME/.claude/projects" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+  REPORT_STATE_DIR="$REPORT_FIXTURE_ROOT/.token-saver/calibration"
+}
+
+_run_sync_report() {
+  local output="$1"
+  (
+    cd "$REPORT_FIXTURE_ROOT" &&
+      HOME="$REPORT_FIXTURE_HOME" CLAUDE_CONFIG_DIR="$REPORT_FIXTURE_HOME/.claude" \
+      CTS_TOKEN_REPORT_TARGET_ROOT="$REPORT_FIXTURE_ROOT" \
+      bash "$REPO_ROOT/scripts/token-report.sh" --calibrate --days 0 --out "$output"
+  ) >"$TEST_TMP/report-sync.stdout" 2>"$TEST_TMP/report-sync.stderr"
+  REPORT_SYNC_RC="$?"
+}
+
+_run_sync_hook() {
+  local session_index="$1" output="$2"
+  local transcript="$REPORT_PROJECT_DIR/sync-session-${session_index}.jsonl"
+  payload="$(printf '{"cwd":"%s","session_id":"sync-session-%s","transcript_path":"%s"}' \
+    "$REPORT_FIXTURE_ROOT" "$session_index" "$transcript")"
+  printf '%s\n' "$payload" | bash "$REPO_ROOT/scripts/suggest-session-cut.sh" \
+    >"$output" 2>"$output.err"
+  REPORT_SYNC_HOOK_RC="$?"
+}
+
+_seed_sync_hook_sessions() {
+  for session_index in 0 1 2 3 4; do
+    _run_sync_hook "$session_index" "$TEST_TMP/report-hook-$session_index.stdout"
+  done
+}
+
+_add_sync_session() {
+  local session_index="$1"
+  python3 - "$REPORT_PROJECT_DIR" "$session_index" <<'PYEOF'
+import json
+import os
+import sys
+
+project, session_index = sys.argv[1:]
+session_id = "sync-session-{}".format(session_index)
+path = os.path.join(project, "{}.jsonl".format(session_id))
+with open(path, "w", encoding="utf-8") as handle:
+    for turn_index in range(20):
+        handle.write(json.dumps({
+            "type": "assistant",
+            "sessionId": session_id,
+            "message": {
+                "id": "{}-message-{}".format(session_id, turn_index),
+                "usage": {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 10,
+                    "output_tokens": 1,
+                },
+                "content": [],
+            },
+        }) + "\n")
+PYEOF
+}
+
 test_calibration_config_numberは完全JSON検証後に正整数だけを返す() {
   _calibration_fixture_repo
   value="$(bash -c '. "$1"; cts_calibration_config_number "$2" min_sessions' _ \
@@ -199,4 +307,57 @@ test_並行Stopフックでもキャリブレーション案内は一度だけ�
   assert_eq "0" "$second_status" "並行2の終了コード"
   assert_count "1" "$combined" "キャリブレーションのサンプル条件を満たしました" "並行案内の回数"
   assert_empty "$(cat "$TEST_TMP/concurrent-1.stderr" "$TEST_TMP/concurrent-2.stderr")" "並行実行のstderr"
+}
+
+test_token_reportを2回実行しても案内は一度だけ出す() {
+  _report_sync_fixture
+  first_report="$TEST_TMP/report-sync-first.md"
+  second_report="$TEST_TMP/report-sync-second.md"
+  _run_sync_report "$first_report"
+  first_status="$REPORT_SYNC_RC"
+  _run_sync_report "$second_report"
+  second_status="$REPORT_SYNC_RC"
+  first_output="$(cat "$first_report")"
+  second_output="$(cat "$second_report")"
+  assert_eq "0" "$first_status" "初回token-report終了コード"
+  assert_eq "0" "$second_status" "2回目token-report終了コード"
+  assert_count "1" "$first_output$second_output" "キャリブレーションのサンプル条件を満たしました" \
+    "report間の案内回数"
+}
+
+test_Stop先行後のcalibrate_reportは再案内しない() {
+  _report_sync_fixture
+  _seed_sync_hook_sessions
+  _run_sync_report "$TEST_TMP/report-after-hook.md"
+  report_output="$(cat "$TEST_TMP/report-after-hook.md")"
+  hook_output="$(cat "$TEST_TMP/report-hook-"*.stdout)"
+  assert_count "1" "$hook_output" "キャリブレーションのサンプル条件を満たしました" "先行hookの案内"
+  assert_not_contains "$report_output" "キャリブレーションのサンプル条件を満たしました" \
+    "先行hook後のreport再案内"
+}
+
+test_calibrate_report先行後のStopは再案内しない() {
+  _report_sync_fixture
+  _run_sync_report "$TEST_TMP/report-before-hook.md"
+  for session_index in 0 1 2 3 4; do
+    _run_sync_hook "$session_index" "$TEST_TMP/report-before-hook-$session_index.stdout"
+  done
+  hook_output="$(cat "$TEST_TMP/report-before-hook-"*.stdout)"
+  assert_not_contains "$hook_output" "キャリブレーションのサンプル条件を満たしました" \
+    "先行report後のhook再案内"
+}
+
+test_新しいsessionを追加したreportだけが次周期を案内する() {
+  _report_sync_fixture
+  _run_sync_report "$TEST_TMP/report-cycle-first.md"
+  _run_sync_report "$TEST_TMP/report-cycle-same.md"
+  _add_sync_session 5
+  _run_sync_report "$TEST_TMP/report-cycle-new.md"
+  first_output="$(cat "$TEST_TMP/report-cycle-first.md")"
+  same_output="$(cat "$TEST_TMP/report-cycle-same.md")"
+  new_output="$(cat "$TEST_TMP/report-cycle-new.md")"
+  assert_count "1" "$first_output" "キャリブレーションのサンプル条件を満たしました" "初回周期の案内"
+  assert_not_contains "$same_output" "キャリブレーションのサンプル条件を満たしました" \
+    "同一周期の再案内"
+  assert_count "1" "$new_output" "キャリブレーションのサンプル条件を満たしました" "新周期の案内"
 }

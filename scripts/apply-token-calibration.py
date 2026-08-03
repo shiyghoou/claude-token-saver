@@ -21,10 +21,12 @@ import ledger
 
 
 DEFAULT_SESSION_CUT = 30000000
+TOKEN_SAVER_DIRNAME = ".token" + "-saver"
 CALIBRATION_DEFAULTS = {"min_sessions": 5, "min_assistant_turns": 100}
 CALIBRATION_SOURCE = "メインセッションの重複排除後 cache_read 中央値"
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$")
+PROMPT_KEY_RE = re.compile(r"^[0-9][0-9-]*[0-9]$")
 
 
 class CalibrationError(Exception):
@@ -73,6 +75,24 @@ def _validate_timestamp(value):
         raise CalibrationError("generated_atが不正")
 
 
+def calibration_prompt_key(snapshot):
+    expected = "{}-{}-{}-{}".format(
+        snapshot["session_count"],
+        snapshot["assistant_turns"],
+        snapshot["min_sessions"],
+        snapshot["min_assistant_turns"],
+    )
+    supplied = snapshot.get("prompt_key")
+    if supplied is not None:
+        if (
+            not isinstance(supplied, str)
+            or not PROMPT_KEY_RE.match(supplied)
+            or supplied != expected
+        ):
+            raise CalibrationError("snapshotのprompt keyが不正")
+    return expected
+
+
 def load_snapshot(path):
     """Return a validated eligible latest.json snapshot."""
     snapshot = _read_json(path)
@@ -111,6 +131,7 @@ def load_snapshot(path):
     baseline = snapshot["baseline_cache_read"]
     if levels != [baseline, baseline * 2, baseline * 3]:
         raise CalibrationError("snapshotの推奨値が不整合")
+    calibration_prompt_key(snapshot)
     return snapshot
 
 
@@ -191,6 +212,65 @@ def _last_applied(snapshot, current):
     }
 
 
+def _calibration_state_path(config_path):
+    root = os.path.dirname(os.path.dirname(os.path.abspath(config_path)))
+    _reject_symlink_components(root)
+    state_dir = os.path.join(root, TOKEN_SAVER_DIRNAME, "calibration")
+    _reject_symlink_components(state_dir)
+    if not os.path.isdir(state_dir) or os.path.islink(state_dir):
+        raise CalibrationError("calibration stateの親ディレクトリが不正")
+    return os.path.join(state_dir, "state"), os.path.join(state_dir, ".lock")
+
+
+def _read_calibration_state(path):
+    state = {"prompted_key": "", "applied_key": ""}
+    if not os.path.lexists(path):
+        return state
+    _regular_file(path)
+    seen = set()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.rstrip("\n").split("=", 1)
+                if (
+                    len(fields) != 2
+                    or fields[0] not in state
+                    or fields[0] in seen
+                    or not re.match(r"^[0-9-]*$", fields[1])
+                ):
+                    raise CalibrationError("calibration stateが不正")
+                state[fields[0]] = fields[1]
+                seen.add(fields[0])
+    except OSError:
+        raise CalibrationError("calibration stateを読めない")
+    return state
+
+
+def record_applied_key(config_path, snapshot):
+    state_path, lock_path = _calibration_state_path(config_path)
+    if os.path.lexists(lock_path):
+        raise CalibrationError("calibration stateがロックされている")
+    try:
+        os.mkdir(lock_path)
+    except OSError:
+        raise CalibrationError("calibration stateのロックを取得できない")
+    try:
+        state = _read_calibration_state(state_path)
+        state["applied_key"] = calibration_prompt_key(snapshot)
+        ledger.check_writable(state_path)
+        ledger.write_atomic(
+            state_path,
+            "prompted_key={}\napplied_key={}\n".format(
+                state["prompted_key"], state["applied_key"]
+            ),
+        )
+    finally:
+        try:
+            os.rmdir(lock_path)
+        except OSError:
+            pass
+
+
 def apply_snapshot(config_path, snapshot):
     """Apply a validated snapshot to config_path and return the new config."""
     _reject_symlink_components(config_path)
@@ -247,6 +327,7 @@ def main(argv):
             if not os.path.isdir(os.path.dirname(config_path)):
                 raise CalibrationError("configの親ディレクトリが通常ディレクトリではない")
         apply_snapshot(config_path, snapshot)
+        record_applied_key(config_path, snapshot)
     except (CalibrationError, OSError):
         sys.stderr.write("キャリブレーションを適用できません\n")
         return 1

@@ -147,6 +147,18 @@ elif mode == "session_stats":
     scan = module["scan_transcripts"]([sys.argv[3]], None)
     stats = scan.session_stats[sys.argv[4]]
     print("{},{}".format(stats.cache_read, stats.assistant_turns))
+elif mode == "prompt_key":
+    print(module["calibration_prompt_key"](*[int(value) for value in sys.argv[3:7]]))
+elif mode == "sync_state":
+    root = sys.argv[3]
+    stats = {}
+    for index in range(5):
+        session = module["SessionStats"]()
+        session.cache_read = 200
+        session.assistant_turns = 20
+        stats["sync-session-{}".format(index)] = session
+    result = module["sync_calibration_state"](root, stats, 5, 100, root)
+    print("1" if result else "0")
 else:
     raise SystemExit("unknown harness mode")
 PYEOF
@@ -184,6 +196,24 @@ test_session_statsは同一sessionの重複usageを一度だけ数える() {
   _fixture_with_duplicate_session_events
   output="$(_run_python_harness session_stats "$FIXTURE_TRANSCRIPT" session-duplicate)"
   assert_eq "30,2" "$output" "重複排除後のsession統計"
+}
+
+test_calibration_prompt_keyはshellと同じ形式を返す() {
+  output="$(_run_python_harness prompt_key 5 100 5 100)"
+  assert_eq "5-100-5-100" "$output" "Pythonとshellのprompt key"
+}
+
+test_sync_calibration_stateはsession_ledgerとstateを共有する() {
+  sync_root="$TEST_TMP/python-sync-root"
+  mkdir -p "$sync_root"
+  output="$(_run_python_harness sync_state "$sync_root")"
+  assert_eq "1" "$output" "Python側のprompt判定"
+  sessions="$sync_root/.token-saver/calibration/sessions.tsv"
+  state="$sync_root/.token-saver/calibration/state"
+  assert_file_exists "$sessions" "Python側session ledger"
+  assert_file_exists "$state" "Python側prompt state"
+  assert_count "5" "$(cat "$sessions")" $'\t20\t' "Python側assistant turns"
+  assert_contains "$(cat "$state")" "prompted_key=5-100-5-100" "Python側prompt key"
 }
 
 _fixture_with_calibration_data() {
