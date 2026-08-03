@@ -10,6 +10,8 @@ import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB_DIR = os.path.join(REPO_ROOT, "lib")
+ENGINE_PATH = os.path.join(REPO_ROOT, "scripts", "measure-token-usage.py")
+APPLY_PATH = os.path.join(REPO_ROOT, "scripts", "apply-token-calibration.py")
 
 
 def fail(message):
@@ -80,6 +82,136 @@ def check_lib_syntax():
     return len(names)
 
 
+def check_engine_syntax():
+    with open(ENGINE_PATH, encoding="utf-8") as stream:
+        source = stream.read()
+    compile(source, ENGINE_PATH, "exec")
+    forbidden = (".fromisoformat(", ".isascii(")
+    for marker in forbidden:
+        check(marker not in source, "Python 3.6非対応APIがengineに残っている: %s" % marker)
+
+
+def check_apply_syntax():
+    with open(APPLY_PATH, encoding="utf-8") as stream:
+        source = stream.read()
+    compile(source, APPLY_PATH, "exec")
+    check(".fromisoformat(" not in source, "Python 3.6非対応APIがupdaterに残っている")
+
+
+def check_calibration_cli(temp_root):
+    fixture_root = os.path.join(temp_root, "calibration-cli-repo")
+    config_root = os.path.join(temp_root, "calibration-cli-config")
+    project_dir = os.path.join(config_root, "projects", "fixture-project")
+    os.makedirs(os.path.join(fixture_root, ".git"))
+    os.makedirs(os.path.join(fixture_root, ".claude"))
+    os.makedirs(project_dir)
+
+    config_path = os.path.join(fixture_root, ".claude", "token-saver.json")
+    with open(config_path, "w", encoding="utf-8") as stream:
+        json.dump(
+            {
+                "calibration": {"min_sessions": 1, "min_assistant_turns": 1},
+                "suggest_session_cut": {
+                    "initial_cache_read": 30000000,
+                    "increment_cache_read": 30000000,
+                },
+                "unrelated": "CLI_CONFIG_SECRET",
+            },
+            stream,
+        )
+    config_before = open(config_path, "rb").read()
+
+    transcript_path = os.path.join(project_dir, "session.jsonl")
+    rows = [
+        {
+            "type": "user",
+            "sessionId": "cli-session",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "CLI_PROMPT_SECRET"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "sessionId": "cli-session",
+            "message": {
+                "id": "cli-assistant",
+                "model": "claude-sonnet-5",
+                "usage": {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 10,
+                    "output_tokens": 1,
+                },
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": "/outside/CLI_EXTERNAL_PATH_SECRET"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "sessionId": "cli-session",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "cli-assistant-tool",
+                        "content": "CLI_TOOL_RESULT_SECRET " + ("x" * 5000),
+                    }
+                ],
+            },
+        },
+    ]
+    with open(transcript_path, "w", encoding="utf-8") as stream:
+        for row in rows:
+            stream.write(json.dumps(row) + "\n")
+
+    report_path = os.path.join(fixture_root, "report.md")
+    environment = os.environ.copy()
+    environment["CLAUDE_CONFIG_DIR"] = config_root
+    environment["CLI_ENV_SECRET"] = "CLI_ENV_SECRET"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            ENGINE_PATH,
+            "--calibrate",
+            "--days",
+            "0",
+            "--out",
+            "report.md",
+        ],
+        cwd=fixture_root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    check(result.returncode == 0, "キャリブレーションCLIが失敗した: %s" % result.stderr)
+    check(os.path.isfile(report_path), "キャリブレーションCLIのreportが無い")
+    check(
+        os.path.isfile(os.path.join(fixture_root, ".token-saver", "calibration", "latest.json")),
+        "キャリブレーションCLIのsnapshotが無い",
+    )
+    report = open(report_path, encoding="utf-8").read()
+    for secret in (
+        "CLI_CONFIG_SECRET",
+        "CLI_PROMPT_SECRET",
+        "CLI_TOOL_RESULT_SECRET",
+        "CLI_EXTERNAL_PATH_SECRET",
+        "CLI_ENV_SECRET",
+    ):
+        check(secret not in report, "CLI出力へ秘密値が漏えいした: %s" % secret)
+    check(open(config_path, "rb").read() == config_before, "CLIが設定を変更した")
+    assert_no_bytecode(temp_root)
+    print("Python互換性キャリブレーションCLI: PASS")
+
+
 def check_ledger(temp_root):
     ledger = os.path.join(temp_root, "installed.json")
     script = os.path.join(LIB_DIR, "ledger.py")
@@ -90,6 +222,9 @@ def check_ledger(temp_root):
     run_command([sys.executable, script, "set-value", ledger, "token_report_source", "/src/report"])
     value = run_command([sys.executable, script, "get-value", ledger, "token_report_source"])
     check(value.stdout.strip() == "/src/report", "valueの読み出し結果が不正")
+    run_command([sys.executable, script, "set-value", ledger, "token_calibrate_source", "/src/calibrate"])
+    value = run_command([sys.executable, script, "get-value", ledger, "token_calibrate_source"])
+    check(value.stdout.strip() == "/src/calibrate", "token-calibrate valueの読み出し結果が不正")
     run_command([sys.executable, script, "set-flag", ledger, "gitignore_created", "1"])
     flag = run_command([sys.executable, script, "get-flag", ledger, "gitignore_created"])
     check(flag.stdout.strip() == "1", "flagの読み出し結果が不正")
@@ -170,7 +305,10 @@ def check_gitignore(temp_root):
 def main():
     lib_bytecode_before = bytecode_paths(LIB_DIR)
     lib_count = check_lib_syntax()
+    check_engine_syntax()
+    check_apply_syntax()
     with tempfile.TemporaryDirectory() as temp_root:
+        check_calibration_cli(temp_root)
         check_ledger(temp_root)
         check_settings_hooks(temp_root)
         check_gitignore(temp_root)
@@ -178,7 +316,7 @@ def main():
     # settings-hooks.py と gitignore-block.py は ledger.py を import する。
     # 実行前からあるbytecodeは利用者の状態であり、実行中に新規作成したものだけ拒否する。
     assert_no_new_bytecode(LIB_DIR, lib_bytecode_before)
-    print("Python互換性スモーク: lib %d本のcompileとCLI 3系統を検証" % lib_count)
+    print("Python互換性スモーク: engine/updaterとlib %d本のcompile、CLI 4系統を検証" % lib_count)
     return 0
 
 

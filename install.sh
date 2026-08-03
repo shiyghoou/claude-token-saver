@@ -69,6 +69,7 @@ GITIGNORE="$TARGET/.gitignore"
 # 記録が無いと、利用者が自分で張った同名のリンクまで巻き込んで消してしまう。
 LEDGER="$TARGET/$(cts_ledger_rel)"
 TOKEN_REPORT_ENTRYPOINT="$TARGET/$(cts_token_report_rel)"
+TOKEN_CALIBRATE_ENTRYPOINT="$TARGET/$(cts_token_calibrate_rel)"
 
 # ここまでに適用した作業。途中で失敗したときに、何が残っているかを伝える。
 applied=()
@@ -293,6 +294,70 @@ cts_install_token_report_entrypoint() {
 }
 
 cts_install_token_report_entrypoint
+
+# --- 1d. target-local token-calibrate entrypoint -----------------------------
+
+# shellcheck source=scripts/lib/token-calibrate-entrypoint.sh
+. "$CTS_HOME/scripts/lib/token-calibrate-entrypoint.sh" ||
+  die "scripts/lib/token-calibrate-entrypoint.sh を読めない（クローンが不完全である）"
+
+cts_install_token_calibrate_entrypoint() {
+  local source_launcher="$CTS_HOME/scripts/token-calibrate.sh"
+  local recorded_source entry_tmp expected_tmp
+  if [ ! -f "$source_launcher" ] ||
+     [ ! -f "$CTS_HOME/scripts/apply-token-calibration.py" ] ||
+     [ ! -f "$CTS_HOME/scripts/measure-token-usage.py" ]; then
+    warn "token-calibrate の実体が揃っていないため導入先 entrypoint を設置しない（クローンが不完全である）"
+    return 0
+  fi
+
+  recorded_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" token_calibrate_source)"
+  if [ -e "$TOKEN_CALIBRATE_ENTRYPOINT" ] || [ -L "$TOKEN_CALIBRATE_ENTRYPOINT" ]; then
+    if [ -z "$recorded_source" ] || [ -L "$TOKEN_CALIBRATE_ENTRYPOINT" ] ||
+       [ ! -f "$TOKEN_CALIBRATE_ENTRYPOINT" ]; then
+      warn "token-calibrate entrypoint は導入先の既存物なので触らない"
+      return 0
+    fi
+    expected_tmp="$(mktemp "${TMPDIR:-/tmp}/cts-token-calibrate-entrypoint.XXXXXX")" ||
+      die "token-calibrate entrypoint の所有権を検証する一時ファイルを作成できない"
+    cts_write_token_calibrate_entrypoint "$expected_tmp" "$recorded_source" || {
+      rm -f "$expected_tmp"
+      die "token-calibrate entrypoint の所有権を検証できない"
+    }
+    if ! cmp -s "$expected_tmp" "$TOKEN_CALIBRATE_ENTRYPOINT"; then
+      rm -f "$expected_tmp"
+      warn "token-calibrate entrypoint は導入後に差し替えられているので触らない"
+      return 0
+    fi
+    rm -f "$expected_tmp"
+  fi
+
+  entry_tmp="$(mktemp "$TARGET/$(cts_base_rel)/.token-calibrate-entrypoint.XXXXXX")" ||
+    die "導入先 token-calibrate entrypoint の一時ファイルを作成できない"
+  cts_write_token_calibrate_entrypoint "$entry_tmp" "$source_launcher" || {
+    rm -f "$entry_tmp"
+    die "導入先 token-calibrate entrypoint を生成できない"
+  }
+  chmod +x "$entry_tmp" || {
+    rm -f "$entry_tmp"
+    die "導入先 token-calibrate entrypoint に実行権限を付けられない"
+  }
+  if [ -f "$TOKEN_CALIBRATE_ENTRYPOINT" ] &&
+     cmp -s "$entry_tmp" "$TOKEN_CALIBRATE_ENTRYPOINT"; then
+    rm -f "$entry_tmp"
+  else
+    mv "$entry_tmp" "$TOKEN_CALIBRATE_ENTRYPOINT" || {
+      rm -f "$entry_tmp"
+      die "導入先 token-calibrate entrypoint を設置できない"
+    }
+    applied+=("token-calibrate の導入先 entrypoint を設置")
+    info "  token-calibrate の入口を設置した: $(cts_token_calibrate_rel)"
+  fi
+  python3 "$CTS_HOME/lib/ledger.py" set-value "$LEDGER" token_calibrate_source "$source_launcher" ||
+    die "token-calibrate entrypoint を台帳へ記録できない"
+}
+
+cts_install_token_calibrate_entrypoint
 
 # applied への記録は各ファイル・台帳を移した直後に済んでいる（die 時に漏れ
 # させないため）。ここでは締めくくりとして利用者向けに件数を要約するだけで、

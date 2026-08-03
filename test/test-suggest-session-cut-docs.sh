@@ -14,7 +14,7 @@ _skill() {
 }
 
 _design() {
-  sed -n '1,520p' "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md"
+  sed -n '1,560p' "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md"
 }
 
 _design_suggest_section() {
@@ -65,7 +65,7 @@ test_READMEがsuggest_session_cutを実装済みと案内する() {
   readme="$(_readme)"
   assert_contains "$readme" "| セッション切り提案（suggest-session-cut） | **実装済み** |" \
     "README 状態表"
-  assert_contains "$readme" "| キャリブレーションと診断（calibrate） | 未実装（段階4） |" \
+  assert_contains "$readme" "| キャリブレーションと診断（calibrate） | **実装済み** |" \
     "README 状態表"
   assert_not_contains "$readme" "| セッション切り提案（suggest-session-cut） | 未実装" \
     "README suggest-session-cut 未実装"
@@ -97,6 +97,10 @@ test_設計書がinstall契約と実装フェーズを現在状態へ追随さ�
     "設計書 install Stop"
   assert_contains "$design" "| 3 | 切り提案フック移植＋一般化＋繰り越し修正 | 自動提案が動く（既定値＝移植元の実測由来） |" \
     "設計書 段階3"
+  assert_contains "$design" "| 4 | キャリブレーションと診断 | 実測に合った閾値と改善提案が出る（段階2） |" \
+    "設計書 段階4"
+  assert_contains "$design" "段階1〜4は本リポジトリで実装済みであり、段階5の委譲ガイドは未実装である。" \
+    "設計書 実装状態"
   assert_not_contains "$design" "Stop フックは段階3の成果物であり、それまでは登録されない" \
     "設計書 future install wording"
   assert_contains "$design" "suggest-session-cut-json.awk" "設計書 payload JSON validator"
@@ -108,10 +112,13 @@ test_設計書がinstall契約と実装フェーズを現在状態へ追随さ�
   assert_contains "$design" "実在する数値ログ世代だけを列挙する" "設計書 bounded log generation enumeration"
 }
 
-test_READMEがtoken_report節でsuggest_session_cut未実装と書かない() {
+test_READMEがtoken_report節でcalibrateの安全境界を案内する() {
   local readme
   readme="$(_readme)"
-  assert_contains "$readme" "calibrate は未実装" "README token-report section"
-  assert_not_contains "$readme" "Stop フックによる切り時提案と calibrate は未実装" \
-    "README token-report stale wording"
+  assert_contains "$readme" "./.token-saver/token-report.sh --calibrate" \
+    "README token-report calibration command"
+  assert_contains "$readme" "./.token-saver/token-calibrate.sh --apply" \
+    "README token-report explicit apply command"
+  assert_contains "$readme" "明示的に" "README token-report apply boundary"
+  assert_not_contains "$readme" "calibrate は未実装" "README token-report stale wording"
 }

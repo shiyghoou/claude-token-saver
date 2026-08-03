@@ -85,6 +85,7 @@ BACKUP="$SETTINGS.cts-backup"
 GITIGNORE="$TARGET/.gitignore"
 LEDGER="$TARGET/$(cts_ledger_rel)"
 TOKEN_REPORT_ENTRYPOINT="$TARGET/$(cts_token_report_rel)"
+TOKEN_CALIBRATE_ENTRYPOINT="$TARGET/$(cts_token_calibrate_rel)"
 # 案内するパスは、実際に読んだ台帳のものでなければならない。旧パスへ
 # フォールバックしたときに新パスを案内すると、利用者が消す先を間違える。
 LEDGER_REL="$(cts_ledger_rel)"
@@ -147,12 +148,14 @@ have_skill_record=0
 python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" any && have_ledger=1
 python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" skills && have_skill_record=1
 token_report_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" token_report_source)"
+token_calibrate_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" token_calibrate_source)"
 
 # 外せなかった・触らなかった設置物が .claude/skills に残っているか。
 # 残っているなら .gitignore の除外を外してはならない（絶対パスのリンクが
 # 未追跡ファイルとして git に現れる）。
 skills_left=0
 token_report_left=0
+token_calibrate_left=0
 
 if [ "$do_personal" = 1 ]; then
 
@@ -186,6 +189,38 @@ if [ -n "$token_report_source" ]; then
 elif [ -e "$TOKEN_REPORT_ENTRYPOINT" ] || [ -L "$TOKEN_REPORT_ENTRYPOINT" ]; then
   warn "台帳に token-report entrypoint の記録が無いため触らない"
   token_report_left=1
+fi
+
+# --- 1c. target-local token-calibrate entrypoint -----------------------------
+
+# shellcheck source=scripts/lib/token-calibrate-entrypoint.sh
+. "$CTS_HOME/scripts/lib/token-calibrate-entrypoint.sh" ||
+  die "scripts/lib/token-calibrate-entrypoint.sh を読めない（クローンが不完全である）"
+
+if [ -n "$token_calibrate_source" ]; then
+  if [ -L "$TOKEN_CALIBRATE_ENTRYPOINT" ] ||
+     { [ -e "$TOKEN_CALIBRATE_ENTRYPOINT" ] && [ ! -f "$TOKEN_CALIBRATE_ENTRYPOINT" ]; }; then
+    warn "token-calibrate entrypoint は導入後に差し替えられているので残す"
+    token_calibrate_left=1
+  elif [ -f "$TOKEN_CALIBRATE_ENTRYPOINT" ]; then
+    expected_entrypoint="$(mktemp "${TMPDIR:-/tmp}/cts-token-calibrate-entrypoint.XXXXXX")" ||
+      die "token-calibrate entrypoint の所有権を検証する一時ファイルを作成できない"
+    cts_write_token_calibrate_entrypoint "$expected_entrypoint" "$token_calibrate_source" || {
+      rm -f "$expected_entrypoint"
+      die "token-calibrate entrypoint の所有権を検証できない"
+    }
+    if cmp -s "$expected_entrypoint" "$TOKEN_CALIBRATE_ENTRYPOINT"; then
+      rm -f "$TOKEN_CALIBRATE_ENTRYPOINT"
+      info "  token-calibrate の入口を外した"
+    else
+      warn "token-calibrate entrypoint は導入後に差し替えられているので残す"
+      token_calibrate_left=1
+    fi
+    rm -f "$expected_entrypoint"
+  fi
+elif [ -e "$TOKEN_CALIBRATE_ENTRYPOINT" ] || [ -L "$TOKEN_CALIBRATE_ENTRYPOINT" ]; then
+  warn "台帳に token-calibrate entrypoint の記録が無いため触らない"
+  token_calibrate_left=1
 fi
 
 # --- 1. フックの登録解除 -----------------------------------------------------
@@ -359,7 +394,8 @@ fi
 # 依存しない（推測ではない）。
 if [ "$do_shared" = 1 ]; then
   if { [ "$do_personal" = 1 ] &&
-       { [ "$skills_left" = 1 ] || [ "$token_report_left" = 1 ]; }; } ||
+       { [ "$skills_left" = 1 ] || [ "$token_report_left" = 1 ] ||
+         [ "$token_calibrate_left" = 1 ]; }; } ||
      { [ "$do_personal" = 0 ] && [ "$shared_left" = 1 ]; }; then
     warn "管理対象の設置物が残っているため .gitignore の除外を外していない"
   elif [ -f "$GITIGNORE" ]; then

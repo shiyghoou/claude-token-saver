@@ -1185,3 +1185,29 @@ test_差し替えられたtoken_report_entrypointは消さない() {
   assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "差し替え" "安全側の警告"
   assert_file_exists "$TARGET/.token-saver/installed.json" "取り残し台帳"
 }
+
+test_token_calibrateの導入先entrypointを安全かつ冪等に外す() {
+  _setup_target
+  _run_install
+  entrypoint="$TARGET/.token-saver/token-calibrate.sh"
+  assert_file_exists "$entrypoint" "導入先token-calibrate entrypoint"
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "token-calibrate uninstall終了コード"
+  assert_file_missing "$entrypoint" "取り外したtoken-calibrate entrypoint"
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "token-calibrate 2回目uninstall終了コード"
+  assert_file_missing "$entrypoint" "2回目も不在のtoken-calibrate entrypoint"
+}
+
+test_差し替えられたtoken_calibrate_entrypointは消さない() {
+  _setup_target
+  _run_install
+  entrypoint="$TARGET/.token-saver/token-calibrate.sh"
+  assert_file_exists "$entrypoint" "導入先token-calibrate entrypoint"
+  printf '#!/usr/bin/env bash\nprintf "利用者のcalibrate entrypoint\\n"\n' >"$entrypoint"
+  _run_uninstall
+  assert_file_exists "$entrypoint" "差し替えられたtoken-calibrate entrypoint"
+  assert_contains "$(cat "$entrypoint")" "利用者のcalibrate entrypoint" "差し替え内容"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "token-calibrate" "安全側の警告"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "取り残し台帳"
+}

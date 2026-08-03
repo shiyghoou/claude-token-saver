@@ -6,6 +6,18 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}" 2>/dev/null)" 2>/dev/null && pwd -P 2>/dev/null)" || SCRIPT_DIR=""
 
+CTS_CALIBRATION_STATE_AVAILABLE=0
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib/calibration-state.sh" ]; then
+  # shellcheck source=scripts/lib/calibration-state.sh
+  . "$SCRIPT_DIR/lib/calibration-state.sh" 2>/dev/null && CTS_CALIBRATION_STATE_AVAILABLE=1
+fi
+
+_cts_print_calibration_prompt() {
+  printf 'キャリブレーションのサンプル条件を満たしました。内容を確認してから明示適用してください。\n'
+  printf './%s/token-report.sh --calibrate\n' "$(cts_base_rel)"
+  printf './%s/token-calibrate.sh --apply\n' "$(cts_base_rel)"
+}
+
 _cts_valid_integer() {
   case "${1:-}" in
     '' | *[!0-9]*) return 1 ;;
@@ -440,6 +452,9 @@ _cts_main() {
   local total current_boundary marker_boundary marker_index boundary
   local cache_content marker_content now
   local payload_source log_entry log_entry_bytes lock_candidate
+  local calibration_state_fingerprint calibration_state_key
+  local summary assistant_turns calibration_min_sessions calibration_min_turns
+  local calibration_config_value calibration_prompt
   CTS_TMP_FILE=""
   CTS_LOCK_DIR=""
   CTS_STATE_PHYSICAL=""
@@ -484,6 +499,19 @@ _cts_main() {
   _cts_setting CTS_SESSION_CUT_LOG_BACKUPS log_backups 5 1 1000
   log_backups="$CTS_SETTING_VALUE"
 
+  calibration_min_sessions=5
+  calibration_min_turns=100
+  if [ "$CTS_CALIBRATION_STATE_AVAILABLE" = 1 ]; then
+    if calibration_config_value="$(cts_calibration_config_number \
+      "$CTS_ROOT/.claude/token-saver.json" min_sessions 2>/dev/null)"; then
+      calibration_min_sessions="$calibration_config_value"
+    fi
+    if calibration_config_value="$(cts_calibration_config_number \
+      "$CTS_ROOT/.claude/token-saver.json" min_assistant_turns 2>/dev/null)"; then
+      calibration_min_turns="$calibration_config_value"
+    fi
+  fi
+
   CTS_STATE_DIR=""
   _cts_prepare_state_dir || return 0
   _cts_enter_state_dir || return 0
@@ -495,16 +523,38 @@ _cts_main() {
 
   _cts_cleanup_state "$retention_days"
 
-  total="$(awk -f "$SCRIPT_DIR/lib/suggest-session-cut-usage.awk" "$transcript" 2>/dev/null)" || return 0
+  summary="$(awk -v summary=1 -f "$SCRIPT_DIR/lib/suggest-session-cut-usage.awk" "$transcript" 2>/dev/null)" || return 0
+  case "$summary" in
+    *$'\t'*)
+      total="${summary%%$'\t'*}"
+      assistant_turns="${summary#*$'\t'}"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
   _cts_valid_integer "$total" || return 0
+  _cts_valid_integer "$assistant_turns" || return 0
 
   state_fingerprint="$(printf '%s\037%s' "$session_id" "$transcript" | cksum 2>/dev/null)" || return 0
   state_key="$(printf '%s\n' "$state_fingerprint" | awk '{print $1 "-" $2}')" || return 0
   case "$state_key" in
     '' | *[!0-9-]*) return 0 ;;
   esac
+  calibration_state_fingerprint="$(printf '%s\037%s' "$session_id" "$CTS_ROOT" | cksum 2>/dev/null)" || return 0
+  calibration_state_key="$(printf '%s\n' "$calibration_state_fingerprint" | awk '{print $1 "-" $2}')" || return 0
+  case "$calibration_state_key" in
+    '' | *[!0-9-]*) return 0 ;;
+  esac
   cache="$CTS_STATE_DIR/$state_key.cache"
   marker="$CTS_STATE_DIR/$state_key.marker"
+  calibration_prompt=0
+  if [ "$CTS_CALIBRATION_STATE_AVAILABLE" = 1 ]; then
+    CTS_CALIBRATION_PROMPT=0
+    cts_calibration_record_session "$CTS_ROOT" "$calibration_state_key" "$total" "$assistant_turns" \
+      "$calibration_min_sessions" "$calibration_min_turns" >/dev/null 2>&1 || true
+    [ "${CTS_CALIBRATION_PROMPT:-0}" = 1 ] && calibration_prompt=1
+  fi
   _cts_plain_file_or_missing "$cache" || return 0
   _cts_plain_file_or_missing "$marker" || return 0
 
@@ -528,7 +578,10 @@ _cts_main() {
   current_boundary="$(awk -v total="$total" -v initial="$initial" -v increment="$increment" \
     'BEGIN { if (total < initial) print 0; else printf "%.0f", int((total - initial) / increment) + 1 }' 2>/dev/null)" || return 0
   _cts_valid_integer "$current_boundary" || return 0
-  [ "$current_boundary" -gt "$marker_index" ] || return 0
+  if [ "$current_boundary" -le "$marker_index" ]; then
+    [ "$calibration_prompt" = 1 ] && _cts_print_calibration_prompt
+    return 0
+  fi
 
   boundary="$(awk -v initial="$initial" -v increment="$increment" -v boundary_index="$current_boundary" \
     'BEGIN { printf "%.0f", initial + ((boundary_index - 1) * increment) }' 2>/dev/null)" || return 0
@@ -547,6 +600,7 @@ _cts_main() {
   _cts_rotate_log "$log_max_bytes" "$log_backups" "$log_entry_bytes" || return 0
   printf '%s\n' "$log_entry" >>"$CTS_LOG" 2>/dev/null || return 0
   printf '累積 cache_read が %s に達しました。引き継ぎを書いてから、手動で新しいセッションへ切り替えることを検討してください。/clear は自動実行しません。\n' "$boundary"
+  [ "$calibration_prompt" = 1 ] && _cts_print_calibration_prompt
   return 0
 }
 

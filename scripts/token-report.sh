@@ -49,6 +49,10 @@ default_output=0
 placement_tmp=""
 report_dir=""
 report_dir_created=0
+calibrate_requested=0
+snapshot_path=""
+snapshot_identity=""
+snapshot_had_regular=0
 
 cleanup() {
   rm -f "$marker"
@@ -57,6 +61,9 @@ cleanup() {
   fi
   if [ -n "$placement_tmp" ]; then
     rm -f "$placement_tmp"
+  fi
+  if [ -n "$snapshot_identity" ]; then
+    rm -f "$snapshot_identity"
   fi
   if [ "$report_dir_created" -eq 1 ] && [ -n "$report_dir" ]; then
     rmdir "$report_dir" 2>/dev/null || true
@@ -71,6 +78,9 @@ for arg in "$@"; do
     continue
   fi
   case "$arg" in
+    --calibrate)
+      calibrate_requested=1
+      ;;
     --out)
       explicit_out=1
       expect_out_value=1
@@ -108,10 +118,46 @@ else
   report_path="$out_path"
 fi
 
+if [ "$calibrate_requested" -eq 1 ]; then
+  snapshot_root="$REPO_ROOT/$(cts_base_rel)"
+  snapshot_dir="$snapshot_root/calibration"
+  snapshot_path="$snapshot_dir/latest.json"
+  if [ -L "$snapshot_root" ] || [ -L "$snapshot_dir" ] || [ -L "$snapshot_path" ]; then
+    printf 'キャリブレーション snapshot の保存先が symlink です: %s\n' "$snapshot_path" >&2
+    exit 1
+  fi
+  if [ -f "$snapshot_path" ]; then
+    snapshot_identity="$(mktemp "$snapshot_dir/.token-report-snapshot.XXXXXX")" || {
+      printf '既存 snapshot の更新識別子を作成できません: %s\n' "$snapshot_dir" >&2
+      exit 1
+    }
+    rm -f "$snapshot_identity"
+    ln "$snapshot_path" "$snapshot_identity" || {
+      printf '既存 snapshot の更新識別子を作成できません: %s\n' "$snapshot_path" >&2
+      exit 1
+    }
+    snapshot_had_regular=1
+  fi
+fi
+
 (cd "$REPO_ROOT" && python3 -B "$ENGINE" "$@" >/dev/null)
 status=$?
 if [ "$status" -ne 0 ]; then
   exit "$status"
+fi
+
+if [ "$calibrate_requested" -eq 1 ]; then
+  if [ -L "$snapshot_root" ] || [ -L "$snapshot_dir" ] || [ -L "$snapshot_path" ] || \
+    [ ! -f "$snapshot_path" ] || [ ! -s "$snapshot_path" ]; then
+    printf 'キャリブレーション snapshot が通常の非空ファイルではありません: %s\n' \
+      "$snapshot_path" >&2
+    exit 1
+  fi
+  if [ "$snapshot_had_regular" -eq 1 ] && [ "$snapshot_path" -ef "$snapshot_identity" ]; then
+    printf 'キャリブレーション snapshot がこの実行で置き換えられていません: %s\n' \
+      "$snapshot_path" >&2
+    exit 1
+  fi
 fi
 
 if [ -z "$report_path" ]; then

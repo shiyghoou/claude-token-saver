@@ -7,6 +7,7 @@
 
 BEGIN {
   total = 0
+  assistant_turns = 0
   invalid = 0
 }
 
@@ -221,9 +222,11 @@ function parse_array(path,    array_index, c) {
   if (seen[dedup_key]) next
   seen[dedup_key] = 1
   total += cache_value
+  assistant_turns += 1
 }
 
 END {
   if (invalid) exit 2
-  printf "%.0f\n", total
+  if (summary) printf "%.0f\t%.0f\n", total, assistant_turns
+  else printf "%.0f\n", total
 }

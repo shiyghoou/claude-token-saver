@@ -7,11 +7,14 @@ environment variables, or other secret-bearing content into the output.
 """
 
 import argparse
+import hashlib
 import html
 import json
 import os
 import re
 import sys
+import tempfile
+import time
 import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -36,6 +39,15 @@ FALLBACK_WARNING = (
     "警告: 現在のリポジトリに対応する記録を特定できないため、"
     "利用可能な全プロジェクトを集計した。"
 )
+CALIBRATION_DEFAULTS = {
+    "min_sessions": 5,
+    "min_assistant_turns": 100,
+}
+CALIBRATION_MAX = 1000000
+DEFAULT_SESSION_CUT = 30000000
+CALIBRATION_SOURCE = "メインセッションの重複排除後 cache_read 中央値"
+TOKEN_SAVER_DIRNAME = ".token" + "-saver"
+HEAVY_TOOL_RESULT_BYTES = 4096
 
 
 def fmt(value):
@@ -50,12 +62,217 @@ def read_json(path):
         return None
 
 
+def read_token_saver_config(config_path):
+    if os.path.islink(config_path) or os.path.islink(os.path.dirname(config_path)):
+        return None
+    data = read_json(config_path)
+    return data if isinstance(data, dict) else None
+
+
+def calibration_positive_int(value, default):
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= CALIBRATION_MAX
+    ):
+        return value
+    return default
+
+
+def load_calibration_settings(config_path):
+    settings = dict(CALIBRATION_DEFAULTS)
+    data = read_token_saver_config(config_path)
+    if not data:
+        return settings
+    calibration = data.get("calibration")
+    if not isinstance(calibration, dict):
+        return settings
+    for key, default in CALIBRATION_DEFAULTS.items():
+        settings[key] = calibration_positive_int(calibration.get(key), default)
+    return settings
+
+
+def load_session_cut_settings(config_path):
+    data = read_token_saver_config(config_path)
+    values = {
+        "initial_cache_read": DEFAULT_SESSION_CUT,
+        "increment_cache_read": DEFAULT_SESSION_CUT,
+    }
+    if not data:
+        return values
+    session_cut = data.get("suggest_session_cut")
+    if not isinstance(session_cut, dict):
+        return values
+    for key, default in values.items():
+        value = session_cut.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            values[key] = value
+        else:
+            values[key] = default
+    return values
+
+
+def calibration_fingerprint(
+    args, since, settings, main_paths, sub_paths, project_dirs=None, fell_back=False
+):
+    digest = hashlib.sha256()
+    period = "all" if since is None else "days:{}".format(args.days)
+    if args.all_projects:
+        selection = "all-projects"
+    elif fell_back:
+        selection = "fallback"
+    else:
+        selection = "current-project"
+    for value in (
+        period,
+        "min_sessions:{}".format(settings["min_sessions"]),
+        "min_assistant_turns:{}".format(settings["min_assistant_turns"]),
+        "selection:{}".format(selection),
+    ):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\0")
+    for directory in sorted(project_dirs or []):
+        digest.update(b"project:")
+        digest.update(directory.encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+    for path in sorted(main_paths + sub_paths):
+        try:
+            metadata = os.stat(path)
+        except OSError:
+            continue
+        digest.update(path.encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+        digest.update(str(metadata.st_size).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(int(metadata.st_mtime * 1000000000)).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def build_calibration(
+    scan, args, since, main_paths, sub_paths, project_dirs=None, fell_back=False
+):
+    config_path = project_path(".claude", "token-saver.json")
+    settings = load_calibration_settings(config_path)
+    current = load_session_cut_settings(config_path)
+    values = [stats.cache_read for stats in scan.session_stats.values()]
+    baseline = median_integer(values)
+    session_count = len(scan.session_stats)
+    assistant_turns = sum(stats.assistant_turns for stats in scan.session_stats.values())
+    eligible = (
+        session_count >= settings["min_sessions"]
+        and assistant_turns >= settings["min_assistant_turns"]
+        and baseline is not None
+        and baseline > 0
+    )
+    period = "全期間" if since is None else "直近 {} 日".format(args.days)
+    result = {
+        "eligible": eligible,
+        "period": period,
+        "min_sessions": settings["min_sessions"],
+        "min_assistant_turns": settings["min_assistant_turns"],
+        "session_count": session_count,
+        "assistant_turns": assistant_turns,
+        "baseline_cache_read": baseline,
+        "current_initial": current["initial_cache_read"],
+        "current_increment": current["increment_cache_read"],
+        "scan_days": args.days,
+        "all_projects": bool(args.all_projects),
+        "recommended_levels": [baseline, baseline * 2, baseline * 3] if eligible else [],
+        "prompt_key": calibration_prompt_key(
+            session_count,
+            assistant_turns,
+            settings["min_sessions"],
+            settings["min_assistant_turns"],
+        ),
+        "fingerprint": calibration_fingerprint(
+            args,
+            since,
+            settings,
+            main_paths,
+            sub_paths,
+            project_dirs,
+            fell_back,
+        ),
+        "source": CALIBRATION_SOURCE,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    result["prompt_available"] = False
+    if eligible:
+        result["prompt_available"] = sync_calibration_state(
+            PROJECT_ROOT,
+            scan.session_stats,
+            settings["min_sessions"],
+            settings["min_assistant_turns"],
+            PROJECT_ROOT,
+        )
+    return result
+
+
+def write_calibration_snapshot(snapshot):
+    state_root = project_path(TOKEN_SAVER_DIRNAME)
+    calibration_dir = os.path.join(state_root, "calibration")
+    for directory in (state_root, calibration_dir):
+        if os.path.lexists(directory):
+            if os.path.islink(directory) or not os.path.isdir(directory):
+                return False
+        else:
+            try:
+                os.mkdir(directory)
+            except OSError:
+                return False
+
+    target = os.path.join(calibration_dir, "latest.json")
+    if os.path.lexists(target) and os.path.islink(target):
+        return False
+    temp_path = None
+    try:
+        descriptor, temp_path = tempfile.mkstemp(
+            prefix=".latest.", suffix=".tmp", dir=calibration_dir
+        )
+        if os.path.islink(temp_path):
+            return False
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(snapshot, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, target)
+        temp_path = None
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
 def parse_ts(value):
     if not isinstance(value, str) or not value:
         return None
-    try:
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+0000"
+    elif len(text) >= 6 and text[-6] in ("+", "-") and text[-3] == ":":
+        text = text[:-3] + text[-2:]
+    formats = (
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+    )
+    stamp = None
+    for date_format in formats:
+        try:
+            stamp = datetime.strptime(text, date_format)
+            break
+        except ValueError:
+            continue
+    if stamp is None:
         return None
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
@@ -93,7 +310,7 @@ def _to_base36(value):
 def project_key(path):
     units = _utf16_units(path)
     sanitized = "".join(
-        unit if unit.isascii() and unit.isalnum() else "-"
+        unit if ord(unit) < 128 and unit.isalnum() else "-"
         for unit in units
     )
     if len(sanitized) <= 200:
@@ -129,6 +346,266 @@ def safe_int(value):
     if not is_token_count(value):
         return 0
     return value
+
+
+def median_integer(values):
+    ordered = sorted(value for value in values if isinstance(value, int) and value > 0)
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) // 2
+
+
+def median_non_negative_integer(values):
+    ordered = sorted(value for value in values if isinstance(value, int) and value >= 0)
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) // 2
+
+
+def calibration_prompt_key(session_count, assistant_turns, min_sessions, min_turns):
+    return "{}-{}-{}-{}".format(
+        session_count, assistant_turns, min_sessions, min_turns
+    )
+
+
+def _posix_cksum(value):
+    """Return the numeric key emitted by POSIX cksum for UTF-8 text."""
+    data = value.encode("utf-8", "surrogateescape")
+    table = []
+    for index in range(256):
+        crc = index << 24
+        for _bit in range(8):
+            if crc & 0x80000000:
+                crc = ((crc << 1) ^ 0x04C11DB7) & 0xFFFFFFFF
+            else:
+                crc = (crc << 1) & 0xFFFFFFFF
+        table.append(crc)
+
+    crc = 0
+    for byte in data:
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ table[((crc >> 24) ^ byte) & 0xFF]
+    length = len(data)
+    while length:
+        byte = length & 0xFF
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ table[((crc >> 24) ^ byte) & 0xFF]
+        length >>= 8
+    return "{}-{}".format((~crc) & 0xFFFFFFFF, len(data))
+
+
+def calibration_session_key(session_id, source_key):
+    return _posix_cksum("{}\037{}".format(session_id, source_key))
+
+
+def _calibration_state_paths(root):
+    if not isinstance(root, str) or not os.path.isabs(root):
+        return None
+    absolute = os.path.abspath(root)
+    current = os.path.sep
+    for component in absolute.split(os.path.sep):
+        if not component:
+            continue
+        current = os.path.join(current, component)
+        if os.path.islink(current):
+            return None
+    if not os.path.isdir(absolute) or os.path.islink(absolute):
+        return None
+    base = os.path.join(absolute, TOKEN_SAVER_DIRNAME)
+    calibration_dir = os.path.join(base, "calibration")
+    for directory in (base, calibration_dir):
+        if os.path.lexists(directory):
+            if os.path.islink(directory) or not os.path.isdir(directory):
+                return None
+        else:
+            try:
+                os.mkdir(directory)
+            except OSError:
+                return None
+    return (
+        calibration_dir,
+        os.path.join(calibration_dir, "sessions.tsv"),
+        os.path.join(calibration_dir, "state"),
+        os.path.join(calibration_dir, ".lock"),
+    )
+
+
+def _calibration_read_sessions(path):
+    if not os.path.lexists(path):
+        return {}
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    rows = {}
+    try:
+        with open(path, encoding="utf-8", newline="") as handle:
+            for line in handle:
+                fields = line.rstrip("\n").split("\t")
+                if (
+                    len(fields) != 4
+                    or not re.match(r"^[0-9][0-9-]*[0-9]$", fields[0])
+                    or not re.match(r"^[0-9]+$", fields[1])
+                    or not re.match(r"^[0-9]+$", fields[2])
+                    or not re.match(r"^[0-9]+$", fields[3])
+                ):
+                    return None
+                rows[fields[0]] = (int(fields[1]), int(fields[2]), int(fields[3]))
+    except (OSError, ValueError):
+        return None
+    return rows
+
+
+def _calibration_read_state(path):
+    state = {"prompted_key": "", "applied_key": ""}
+    if not os.path.lexists(path):
+        return state
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    seen = set()
+    try:
+        with open(path, encoding="utf-8", newline="") as handle:
+            for line in handle:
+                fields = line.rstrip("\n").split("=", 1)
+                if (
+                    len(fields) != 2
+                    or fields[0] not in state
+                    or fields[0] in seen
+                    or not re.match(r"^[0-9-]*$", fields[1])
+                ):
+                    return None
+                state[fields[0]] = fields[1]
+                seen.add(fields[0])
+    except OSError:
+        return None
+    return state
+
+
+def _calibration_write_atomic(path, text):
+    if os.path.lexists(path) and os.path.islink(path):
+        return False
+    descriptor = None
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".calibration-state.", suffix=".tmp", dir=os.path.dirname(path)
+        )
+        if os.path.islink(temporary):
+            os.close(descriptor)
+            descriptor = None
+            return False
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            descriptor = None
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        return True
+    except OSError:
+        return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def sync_calibration_state(root, session_stats, min_sessions, min_turns, source_key):
+    """Synchronize report session totals with the shell hook's state format."""
+    paths = _calibration_state_paths(root)
+    if paths is None:
+        return False
+    if (
+        not isinstance(session_stats, dict)
+        or not isinstance(source_key, str)
+        or not isinstance(min_sessions, int)
+        or isinstance(min_sessions, bool)
+        or min_sessions <= 0
+        or not isinstance(min_turns, int)
+        or isinstance(min_turns, bool)
+        or min_turns <= 0
+    ):
+        return False
+
+    _calibration_dir, sessions_path, state_path, lock_path = paths
+    if os.path.lexists(lock_path):
+        return False
+    try:
+        os.mkdir(lock_path)
+    except OSError:
+        return False
+
+    try:
+        rows = _calibration_read_sessions(sessions_path)
+        state = _calibration_read_state(state_path)
+        if rows is None or state is None:
+            return False
+        now = int(time.time())
+        positive_sample = False
+        for session_id in sorted(session_stats):
+            stats = session_stats[session_id]
+            cache_read = getattr(stats, "cache_read", None)
+            assistant_turns = getattr(stats, "assistant_turns", None)
+            if (
+                not isinstance(session_id, str)
+                or not isinstance(cache_read, int)
+                or isinstance(cache_read, bool)
+                or cache_read < 0
+                or not isinstance(assistant_turns, int)
+                or isinstance(assistant_turns, bool)
+                or assistant_turns < 0
+            ):
+                return False
+            key = calibration_session_key(session_id, source_key)
+            rows[key] = (cache_read, assistant_turns, now)
+            positive_sample = positive_sample or cache_read > 0
+
+        lines = []
+        for key in sorted(rows):
+            cache_read, assistant_turns, last_seen = rows[key]
+            lines.append("{}\t{}\t{}\t{}".format(
+                key, cache_read, assistant_turns, last_seen
+            ))
+        sessions_text = "\n".join(lines) + ("\n" if lines else "")
+        if not _calibration_write_atomic(sessions_path, sessions_text):
+            return False
+
+        session_count = len(rows)
+        assistant_turns = sum(row[1] for row in rows.values())
+        prompt_key = calibration_prompt_key(
+            session_count, assistant_turns, min_sessions, min_turns
+        )
+        prompt_available = (
+            session_count >= min_sessions
+            and assistant_turns >= min_turns
+            and positive_sample
+            and state["prompted_key"] != prompt_key
+            and state["applied_key"] != prompt_key
+        )
+        if prompt_available:
+            state["prompted_key"] = prompt_key
+        state_text = "prompted_key={}\napplied_key={}\n".format(
+            state["prompted_key"], state["applied_key"]
+        )
+        if not _calibration_write_atomic(state_path, state_text):
+            return False
+        return prompt_available
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        try:
+            os.rmdir(lock_path)
+        except OSError:
+            pass
 
 
 def has_unsafe_text(text):
@@ -249,11 +726,18 @@ class Usage:
         ]
 
 
+class SessionStats:
+    def __init__(self):
+        self.cache_read = 0
+        self.assistant_turns = 0
+
+
 class Scan:
     def __init__(self):
         self.files = 0
         self.lines = 0
         self.sessions = set()
+        self.session_stats = {}
         self.main = Usage()
         self.by_model = defaultdict(Usage)
         self.tool_calls = Counter()
@@ -267,6 +751,8 @@ class Scan:
         self.agent_usage_total = Usage()
         self.agent_max = defaultdict(int)
         self.agent_total = 0
+        self.main_tool_results = []
+        self.compact_events = []
         self.sub_files = 0
         self.sub_mcp_calls = Counter()
         self.scanned_dirs = []
@@ -277,6 +763,110 @@ class Scan:
         self.no_message_id = 0
         self.no_timestamp = 0
         self.no_timestamp_with_usage = 0
+        # These are metadata-only indexes used while scanning.  They never enter
+        # the report or snapshot, and do not retain prompt/tool-result bodies.
+        self._tool_names = {}
+        self._tool_result_session_keys = []
+        self._tool_result_request_ids = []
+        self._assistant_cache_reads = defaultdict(list)
+        self._pending_compacts = defaultdict(list)
+        self._compact_turns = defaultdict(int)
+
+
+def safe_session_identifier(session_key):
+    if not session_key:
+        return "(不明)"
+    digest = hashlib.sha256(str(session_key).encode("utf-8", "surrogateescape")).hexdigest()
+    return "session-{}".format(digest[:10])
+
+
+def safe_timestamp(value):
+    stamp = parse_ts(value)
+    if stamp is None:
+        return "(不明)"
+    return stamp.isoformat().replace("+00:00", "Z")
+
+
+def serialized_byte_count(value):
+    try:
+        return len(
+            json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def is_compact_message(message):
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if content == "/compact":
+        return True
+    for block in content_blocks(message):
+        if isinstance(block, dict) and block.get("type") == "text":
+            if block.get("text") == "/compact":
+                return True
+    return False
+
+
+def record_compact(scan, session_key, timestamp):
+    previous = scan._assistant_cache_reads.get(session_key, [])
+    event = {
+        "session": safe_session_identifier(session_key),
+        "timestamp": safe_timestamp(timestamp),
+        "pre_compact_baseline": median_non_negative_integer(previous[-3:]),
+        "post_compact_usage": None,
+        "recovery_turns": None,
+    }
+    scan.compact_events.append(event)
+    event_index = len(scan.compact_events) - 1
+    scan._pending_compacts[session_key].append(event_index)
+    scan._compact_turns[event_index] = 0
+
+
+def update_compact_events(scan, session_key, cache_read):
+    values = scan._assistant_cache_reads.setdefault(session_key, [])
+    values.append(cache_read)
+    for event_index in scan._pending_compacts.get(session_key, []):
+        event = scan.compact_events[event_index]
+        if event["post_compact_usage"] is None:
+            event["post_compact_usage"] = cache_read
+        if event["recovery_turns"] is None:
+            scan._compact_turns[event_index] += 1
+            baseline = event["pre_compact_baseline"]
+            if baseline is not None and cache_read * 10 >= baseline * 9:
+                event["recovery_turns"] = scan._compact_turns[event_index]
+
+
+def record_main_tool_results(scan, message, session_key, timestamp, request_id):
+    for block in content_blocks(message):
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        tool_use_id = block.get("tool_use_id")
+        tool_name = scan._tool_names.get((session_key, tool_use_id), "(不明)")
+        tool_name = sanitize_name(tool_name) or "(不明)"
+        scan.main_tool_results.append({
+            "tool": tool_name,
+            "session": safe_session_identifier(session_key),
+            "timestamp": safe_timestamp(timestamp),
+            "payload_bytes": serialized_byte_count(block.get("content")),
+            "usage_matched": False,
+        })
+        scan._tool_result_session_keys.append(session_key)
+        scan._tool_result_request_ids.append(request_id)
+
+
+def mark_matching_tool_results(scan, session_key, request_id):
+    if request_id is None:
+        return
+    for index, result_session in enumerate(scan._tool_result_session_keys):
+        if (
+            result_session == session_key
+            and scan._tool_result_request_ids[index] == request_id
+        ):
+            scan.main_tool_results[index]["usage_matched"] = True
 
 
 def scan_transcripts(paths, since):
@@ -314,10 +904,12 @@ def scan_transcripts(paths, since):
                         continue
 
                 session_id = entry.get("sessionId")
-                if session_id:
-                    scan.sessions.add(str(session_id))
+                session_key = str(session_id) if session_id else None
+                if session_key:
+                    scan.sessions.add(session_key)
 
                 message = entry.get("message")
+                accepted_main_usage = False
                 if entry.get("type") == "assistant" and isinstance(message, dict):
                     usage = message.get("usage")
                     if isinstance(usage, dict):
@@ -338,14 +930,25 @@ def scan_transcripts(paths, since):
                             one.add_raw(usage)
                             scan.main += one
                             scan.messages += 1
+                            if session_key:
+                                stats = scan.session_stats.setdefault(
+                                    session_key, SessionStats()
+                                )
+                                stats.cache_read += one.cache_read
+                                stats.assistant_turns += 1
+                                update_compact_events(scan, session_key, one.cache_read)
                             model = sanitize_model(message.get("model")) or "(不明)"
                             scan.by_model[model] += one
+                            accepted_main_usage = True
 
                     for block in content_blocks(message):
                         if not isinstance(block, dict) or block.get("type") != "tool_use":
                             continue
                         name = str(block.get("name") or "(不明)")
                         scan.tool_calls[name] += 1
+                        tool_use_id = block.get("id")
+                        if session_key and isinstance(tool_use_id, str) and tool_use_id:
+                            scan._tool_names[(session_key, tool_use_id)] = name
                         tool_input = block.get("input")
                         if not isinstance(tool_input, dict):
                             continue
@@ -362,6 +965,19 @@ def scan_transcripts(paths, since):
                                 scan.read_paths[target] += 1
                                 ext = os.path.splitext(target)[1].lower() or "(拡張子なし)"
                                 scan.read_ext[ext] += 1
+
+                if (
+                    entry.get("type") == "user"
+                    and session_key
+                    and is_compact_message(message)
+                ):
+                    record_compact(scan, session_key, entry.get("timestamp"))
+                request_id = dedup_scalar(entry.get("requestId"))
+                record_main_tool_results(
+                    scan, message, session_key, entry.get("timestamp"), request_id
+                )
+                if accepted_main_usage and session_key:
+                    mark_matching_tool_results(scan, session_key, request_id)
 
                 result = entry.get("toolUseResult")
                 if (
@@ -429,14 +1045,14 @@ def within(root, path):
     return path_real == root_real or path_real.startswith(root_real + os.sep)
 
 
-def read_mcp_server_names(plugin_root):
-    names = []
+def read_mcp_server_definitions(plugin_root):
+    definitions = []
     sources = [os.path.join(plugin_root, ".mcp.json")]
     manifest = read_json(os.path.join(plugin_root, ".claude-plugin", "plugin.json"))
     if isinstance(manifest, dict):
         declared = manifest.get("mcpServers")
         if isinstance(declared, dict):
-            names.extend(declared)
+            definitions.extend(declared.items())
         else:
             refs = [declared] if isinstance(declared, str) else declared
             if not isinstance(refs, list):
@@ -453,16 +1069,20 @@ def read_mcp_server_names(plugin_root):
             continue
         servers = data.get("mcpServers")
         if isinstance(servers, dict):
-            names.extend(servers)
+            definitions.extend(servers.items())
     out = []
-    for key in names:
+    for key, definition in definitions:
         name = sanitize_name(key) if isinstance(key, str) else None
         if name:
-            out.append(name)
+            out.append((name, definition))
     return out
 
 
-def plugin_mcp_servers():
+def read_mcp_server_names(plugin_root):
+    return [name for name, _definition in read_mcp_server_definitions(plugin_root)]
+
+
+def plugin_mcp_definitions():
     installed = read_json(os.path.join(CLAUDE_DIR, "plugins", "installed_plugins.json"))
     if not isinstance(installed, dict):
         return []
@@ -481,9 +1101,13 @@ def plugin_mcp_servers():
             root = entry.get("installPath")
             if not isinstance(root, str) or not os.path.isabs(root):
                 continue
-            for name in read_mcp_server_names(root):
-                rows.append((f"plugin:{plugin_name}", name))
+            for name, definition in read_mcp_server_definitions(root):
+                rows.append((f"plugin:{plugin_name}", name, definition))
     return rows
+
+
+def plugin_mcp_servers():
+    return [(scope, name) for scope, name, _definition in plugin_mcp_definitions()]
 
 
 def config_json_candidates():
@@ -526,6 +1150,77 @@ def mcp_summary():
         seen.add(item)
         unique.append(item)
     return unique
+
+
+def mcp_definition_rows():
+    sources = [("user", path) for path in config_json_candidates()]
+    sources.append(("project", project_path(".mcp.json")))
+    rows = []
+    seen = set()
+    for scope, source in sources:
+        data = read_json(source)
+        if not isinstance(data, dict):
+            continue
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            continue
+        for raw_name, definition in servers.items():
+            name = sanitize_name(raw_name)
+            if not name or (scope, name) in seen:
+                continue
+            seen.add((scope, name))
+            rows.append({
+                "scope": scope,
+                "name": name,
+                "definition_bytes": serialized_byte_count(definition),
+            })
+    for scope, name, definition in plugin_mcp_definitions():
+        if (scope, name) in seen:
+            continue
+        seen.add((scope, name))
+        rows.append({
+            "scope": scope,
+            "name": name,
+            "definition_bytes": serialized_byte_count(definition),
+        })
+    return rows
+
+
+def classify_unused_mcp(configured, used):
+    configured_names = []
+    for item in configured:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            item = item[1]
+        name = sanitize_name(item)
+        if name and name not in configured_names:
+            configured_names.append(name)
+
+    if hasattr(used, "keys"):
+        used_names = list(used.keys())
+    else:
+        used_names = list(used or [])
+    used_normalized = {
+        normalize_server_name(name)
+        for name in used_names
+        if isinstance(name, str) and normalize_server_name(name)
+    }
+    by_normalized = defaultdict(list)
+    for name in configured_names:
+        normalized = normalize_server_name(name)
+        if normalized:
+            by_normalized[normalized].append(name)
+
+    result = {"unused": [], "used": [], "unknown": []}
+    for name in configured_names:
+        normalized = normalize_server_name(name)
+        matches = by_normalized.get(normalized, [])
+        if len(matches) != 1:
+            result["unknown"].append(name)
+        elif normalized in used_normalized:
+            result["used"].append(name)
+        else:
+            result["unused"].append(name)
+    return result
 
 
 def mcp_tool_prefixes(tool_calls):
@@ -571,6 +1266,76 @@ def scan_mcp_tool_names(paths, since):
                     if isinstance(name, str) and name.startswith("mcp__"):
                         found[name] += 1
     return found
+
+
+def build_diagnostics(scan, calibration, main_paths, sub_paths):
+    recommended = calibration.get("recommended_levels", []) if calibration else []
+    level_two = recommended[1] if len(recommended) >= 2 else None
+    main_total = scan.main.total
+
+    heavy = [
+        dict(result)
+        for result in scan.main_tool_results
+        if result["payload_bytes"] >= HEAVY_TOOL_RESULT_BYTES
+    ]
+    heavy.sort(key=lambda result: -result["payload_bytes"])
+    sessions = []
+    if level_two is not None:
+        for session_key, stats in scan.session_stats.items():
+            if stats.cache_read < level_two:
+                continue
+            ratio = (stats.cache_read / float(main_total)) if main_total else 0.0
+            sessions.append({
+                "session": safe_session_identifier(session_key),
+                "cache_read": stats.cache_read,
+                "main_ratio": ratio,
+            })
+    sessions.sort(key=lambda row: (-row["cache_read"], row["session"]))
+
+    used = mcp_tool_prefixes(scan.tool_calls)
+    if scan.sub_mcp_calls:
+        used += mcp_tool_prefixes(scan.sub_mcp_calls)
+    mcp_rows = mcp_definition_rows()
+    configured = [row["name"] for row in mcp_rows]
+    mcp_classification = classify_unused_mcp(configured, used)
+
+    agent_ratio = (scan.agent_total / float(main_total)) if main_total else 0.0
+    compact_events = []
+    for event in scan.compact_events:
+        compact_events.append({
+            "session": event["session"],
+            "timestamp": event["timestamp"],
+            "pre_compact_baseline": event["pre_compact_baseline"],
+            "post_compact_usage": event["post_compact_usage"],
+            "recovery_turns": event["recovery_turns"],
+        })
+
+    return {
+        "measured": {
+            "main_total": main_total,
+            "heavy_tool_results": heavy,
+            "sessions_exceeding_level2": sessions,
+            "mcp": mcp_classification,
+            "agent_calls": sum(scan.agent_calls.values()),
+            "agent_results": sum(scan.agent_results.values()),
+            "agent_total_tokens": scan.agent_total,
+            "agent_main_ratio": agent_ratio,
+            "compact_events": compact_events,
+            "image_tokens": "未計測",
+        },
+        "estimated": {
+            "mcp_definitions": [
+                {
+                    "scope": row["scope"],
+                    "name": row["name"],
+                    "definition_bytes": row["definition_bytes"],
+                    "estimated_tokens": row["definition_bytes"] / 4.0,
+                }
+                for row in mcp_rows
+            ],
+            "method": "定義バイト数 ÷ 4 の概算。実測合計へ加算しない。",
+        },
+    }
 
 
 def normalize_server_name(name):
@@ -629,7 +1394,27 @@ def top_rows(rows, limit):
     return rows[:limit]
 
 
-def build_report(args, scan, project_dirs, since):
+def append_calibration_prompt(lines):
+    lines.append(
+        "- キャリブレーションのサンプル条件を満たしました。内容を確認してから明示適用してください。"
+    )
+    lines.append(
+        "- `./{}/token-report.sh --calibrate`".format(TOKEN_SAVER_DIRNAME)
+    )
+    lines.append(
+        "- `./{}/token-calibrate.sh --apply`".format(TOKEN_SAVER_DIRNAME)
+    )
+
+
+def build_report(
+    args,
+    scan,
+    project_dirs,
+    since,
+    calibration=None,
+    diagnostics=None,
+    calibration_prompt=False,
+):
     lines = []
     add = lines.append
     window = f"直近 {args.days} 日" if since else "全期間"
@@ -765,6 +1550,181 @@ def build_report(args, scan, project_dirs, since):
             )
         )
 
+    if calibration is not None:
+        add("## キャリブレーション")
+        add("")
+        add("- 対象期間: {}".format(calibration["period"]))
+        add(
+            "- 判定条件: セッション {} 件以上 / assistant ターン {} 件以上".format(
+                calibration["min_sessions"], calibration["min_assistant_turns"]
+            )
+        )
+        add(
+            "- 観測値: セッション {} 件 / assistant ターン {} 件".format(
+                calibration["session_count"], calibration["assistant_turns"]
+            )
+        )
+        if calibration["eligible"]:
+            baseline, level_two, level_three = calibration["recommended_levels"]
+            add("- 判定: **算出可能**")
+            add("- 算出日: {}".format(calibration["generated_at"]))
+            add("- 算出元: {}".format(calibration["source"]))
+            add("- 推奨段階1単位: **{}** cache_read".format(fmt(baseline)))
+            add("- 推奨段階2: {} cache_read".format(fmt(level_two)))
+            add("- 推奨段階3: {} cache_read".format(fmt(level_three)))
+            add(
+                "- 現在値: initial {} / increment {} cache_read".format(
+                    fmt(calibration["current_initial"]),
+                    fmt(calibration["current_increment"]),
+                )
+            )
+        else:
+            add("- 判定: **サンプル不足**")
+            if calibration["session_count"] < calibration["min_sessions"]:
+                add(
+                    "- 不足: セッション数 {} 件（必要 {} 件）".format(
+                        calibration["session_count"], calibration["min_sessions"]
+                    )
+                )
+            if calibration["assistant_turns"] < calibration["min_assistant_turns"]:
+                add(
+                    "- 不足: assistant ターン {} 件（必要 {} 件）".format(
+                        calibration["assistant_turns"], calibration["min_assistant_turns"]
+                    )
+                )
+            if calibration["baseline_cache_read"] is None:
+                add("- 有効な正の cache_read サンプルがないため、推奨値は算出しない。")
+        if calibration.get("prompt_available"):
+            append_calibration_prompt(lines)
+        add("")
+
+    if diagnostics is not None:
+        measured = diagnostics["measured"]
+        estimated = diagnostics["estimated"]
+        add("## 実測診断")
+        add("")
+        heavy = measured["heavy_tool_results"]
+        add(
+            "- 重い main tool_result: {} 件（payload {} bytes 以上）".format(
+                len(heavy), fmt(HEAVY_TOOL_RESULT_BYTES)
+            )
+        )
+        if heavy:
+            rows = []
+            for result in heavy[: args.top]:
+                rows.append([
+                    result["tool"],
+                    result["session"],
+                    result["timestamp"],
+                    fmt(result["payload_bytes"]),
+                    "usage対応あり" if result["usage_matched"] else "usage対応なし",
+                ])
+            lines.extend(
+                table(
+                    ["tool", "session", "時刻", "payload bytes", "usage"], rows
+                )
+            )
+        else:
+            add("（重い main tool_result はなし）")
+            add("")
+
+        sessions = measured["sessions_exceeding_level2"]
+        add("- 推奨段階2以上の超過セッション: {} 件".format(len(sessions)))
+        if sessions:
+            lines.extend(
+                table(
+                    ["超過セッション", "cache_read", "main消費比"],
+                    [
+                        [
+                            row["session"],
+                            fmt(row["cache_read"]),
+                            "{:.1%}".format(row["main_ratio"]),
+                        ]
+                        for row in sessions[: args.top]
+                    ],
+                )
+            )
+
+        compact_events = measured["compact_events"]
+        add("- /compact 発生: {} 件".format(len(compact_events)))
+        if compact_events:
+            lines.extend(
+                table(
+                    ["session", "時刻", "圧縮前基準", "圧縮直後usage", "回復ターン数"],
+                    [
+                        [
+                            event["session"],
+                            event["timestamp"],
+                            fmt(event["pre_compact_baseline"])
+                            if event["pre_compact_baseline"] is not None
+                            else "未算出",
+                            fmt(event["post_compact_usage"])
+                            if event["post_compact_usage"] is not None
+                            else "未取得",
+                            event["recovery_turns"]
+                            if event["recovery_turns"] is not None
+                            else "未回復",
+                        ]
+                        for event in compact_events[: args.top]
+                    ],
+                )
+            )
+            for event in compact_events[: args.top]:
+                recovery = (
+                    event["recovery_turns"]
+                    if event["recovery_turns"] is not None
+                    else "未回復"
+                )
+                add("- compact回復ターン数: {}".format(recovery))
+
+        mcp = measured["mcp"]
+        add("- MCP分類（実測呼び出しベース）:")
+        for category in ("unused", "used", "unknown"):
+            names = mcp.get(category, [])
+            add(
+                "  - {}: {}".format(
+                    {"unused": "未使用MCP", "used": "利用済みMCP", "unknown": "判定不能MCP"}[category],
+                    ", ".join(markdown_cell(name) for name in names) or "該当なし",
+                )
+            )
+        add(
+            "- Agent: 起動 {} 件 / 結果 {} 件 / totalTokens {} / main比 {:.1%}".format(
+                fmt(measured["agent_calls"]),
+                fmt(measured["agent_results"]),
+                fmt(measured["agent_total_tokens"]),
+                measured["agent_main_ratio"],
+            )
+        )
+        add("- 画像入力のトークン消費は未計測です（画像を数値推定していない）。")
+        add("")
+
+        add("## 概算診断")
+        add("")
+        add("- 概算値は実測合計・中央値・MCP未使用判定へ混ぜない。")
+        add("- 算出方法: {}".format(estimated["method"]))
+        definition_rows = [
+            [
+                row["scope"],
+                row["name"],
+                fmt(row["definition_bytes"]),
+                "{:.1f}".format(row["estimated_tokens"]),
+            ]
+            for row in estimated["mcp_definitions"]
+        ]
+        lines.extend(
+            table(
+                ["スコープ", "MCPサーバ名", "定義bytes", "推定tokens"],
+                definition_rows[: args.top],
+            )
+        )
+        add("")
+
+    if calibration_prompt and calibration is None:
+        add("## キャリブレーション案内")
+        add("")
+        append_calibration_prompt(lines)
+        add("")
+
     add("## 共有時の境界")
     add("")
     add("- 含める: 集計値、モデル名、subagent_type、MCP サーバ名、repo 内の相対パス。")
@@ -831,6 +1791,9 @@ def main():
         help="全プロジェクトを対象にする（既定は cwd の project key のみ）",
     )
     parser.add_argument("--paths", action="store_true", help="Read パスの要約も出す")
+    parser.add_argument(
+        "--calibrate", action="store_true", help="読み取り専用でキャリブレーションを算出する"
+    )
     args = parser.parse_args()
 
     if args.days < 0:
@@ -854,7 +1817,28 @@ def main():
     scan.fell_back = fell_back
     if fell_back:
         print(FALLBACK_WARNING, file=sys.stderr)
-    report = build_report(args, scan, [PROJECT_ROOT], since)
+    calibration_state = build_calibration(
+        scan, args, since, main_paths, sub_paths, project_dirs, fell_back
+    )
+    calibration = calibration_state if args.calibrate else None
+    if args.calibrate:
+        if not write_calibration_snapshot(calibration):
+            print("キャリブレーション snapshot の保存に失敗しました", file=sys.stderr)
+            return 1
+    diagnostics = (
+        build_diagnostics(scan, calibration, main_paths, sub_paths)
+        if args.calibrate
+        else None
+    )
+    report = build_report(
+        args,
+        scan,
+        [PROJECT_ROOT],
+        since,
+        calibration,
+        diagnostics,
+        calibration_state.get("prompt_available", False),
+    )
 
     if args.out:
         try:
