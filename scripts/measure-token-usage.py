@@ -112,15 +112,28 @@ def load_session_cut_settings(config_path):
     return values
 
 
-def calibration_fingerprint(args, since, settings, main_paths, sub_paths):
+def calibration_fingerprint(
+    args, since, settings, main_paths, sub_paths, project_dirs=None, fell_back=False
+):
     digest = hashlib.sha256()
     period = "all" if since is None else "days:{}".format(args.days)
+    if args.all_projects:
+        selection = "all-projects"
+    elif fell_back:
+        selection = "fallback"
+    else:
+        selection = "current-project"
     for value in (
         period,
         "min_sessions:{}".format(settings["min_sessions"]),
         "min_assistant_turns:{}".format(settings["min_assistant_turns"]),
+        "selection:{}".format(selection),
     ):
         digest.update(value.encode("utf-8"))
+        digest.update(b"\0")
+    for directory in sorted(project_dirs or []):
+        digest.update(b"project:")
+        digest.update(directory.encode("utf-8", "surrogateescape"))
         digest.update(b"\0")
     for path in sorted(main_paths + sub_paths):
         try:
@@ -136,7 +149,9 @@ def calibration_fingerprint(args, since, settings, main_paths, sub_paths):
     return digest.hexdigest()
 
 
-def build_calibration(scan, args, since, main_paths, sub_paths):
+def build_calibration(
+    scan, args, since, main_paths, sub_paths, project_dirs=None, fell_back=False
+):
     config_path = project_path(".claude", "token-saver.json")
     settings = load_calibration_settings(config_path)
     current = load_session_cut_settings(config_path)
@@ -161,6 +176,8 @@ def build_calibration(scan, args, since, main_paths, sub_paths):
         "baseline_cache_read": baseline,
         "current_initial": current["initial_cache_read"],
         "current_increment": current["increment_cache_read"],
+        "scan_days": args.days,
+        "all_projects": bool(args.all_projects),
         "recommended_levels": [baseline, baseline * 2, baseline * 3] if eligible else [],
         "prompt_key": calibration_prompt_key(
             session_count,
@@ -169,7 +186,13 @@ def build_calibration(scan, args, since, main_paths, sub_paths):
             settings["min_assistant_turns"],
         ),
         "fingerprint": calibration_fingerprint(
-            args, since, settings, main_paths, sub_paths
+            args,
+            since,
+            settings,
+            main_paths,
+            sub_paths,
+            project_dirs,
+            fell_back,
         ),
         "source": CALIBRATION_SOURCE,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1794,7 +1817,9 @@ def main():
     scan.fell_back = fell_back
     if fell_back:
         print(FALLBACK_WARNING, file=sys.stderr)
-    calibration_state = build_calibration(scan, args, since, main_paths, sub_paths)
+    calibration_state = build_calibration(
+        scan, args, since, main_paths, sub_paths, project_dirs, fell_back
+    )
     calibration = calibration_state if args.calibrate else None
     if args.calibrate:
         if not write_calibration_snapshot(calibration):

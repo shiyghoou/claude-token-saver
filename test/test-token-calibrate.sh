@@ -9,12 +9,17 @@ _fixture_with_latest() {
   LATEST="$FIXTURE_REPO/.token-saver/calibration/latest.json"
   OUTSIDE_CONFIG="$TEST_TMP/token-calibrate-outside.json"
   OUTSIDE_SNAPSHOT="$TEST_TMP/token-calibrate-outside-latest.json"
-  mkdir -p "$FIXTURE_REPO/.claude" "$FIXTURE_REPO/.token-saver/calibration"
-  python3 - "$CONFIG" "$LATEST" "$OUTSIDE_CONFIG" <<'PYEOF'
+  FIXTURE_CLAUDE_CONFIG_DIR="$TEST_TMP/token-calibrate-empty-home/.claude"
+  mkdir -p "$FIXTURE_REPO/.claude" "$FIXTURE_REPO/.token-saver/calibration" \
+    "$FIXTURE_CLAUDE_CONFIG_DIR/projects"
+  python3 - "$CONFIG" "$LATEST" "$OUTSIDE_CONFIG" "$REPO_ROOT" \
+    "$FIXTURE_CLAUDE_CONFIG_DIR" <<'PYEOF'
 import json
+import os
+import runpy
 import sys
 
-config_path, snapshot_path, outside_config = sys.argv[1:]
+config_path, snapshot_path, outside_config, repo_root, claude_dir = sys.argv[1:]
 config = {
     "calibration": {"private_note": "keep-calibration-key"},
     "suggest_session_cut": {
@@ -38,7 +43,29 @@ snapshot = {
     "fingerprint": "a" * 64,
     "source": "メインセッションの重複排除後 cache_read 中央値",
     "generated_at": "2026-08-04T00:00:00.000000Z",
+    "scan_days": 0,
+    "all_projects": False,
 }
+os.environ["CLAUDE_CONFIG_DIR"] = claude_dir
+fixture_root = os.path.dirname(os.path.dirname(config_path))
+previous_cwd = os.getcwd()
+os.chdir(fixture_root)
+engine = runpy.run_path(os.path.join(repo_root, "scripts", "measure-token-usage.py"))
+args = type("CalibrationArgs", (object,), {})()
+args.days = 0
+args.all_projects = False
+project_dirs, fell_back = engine["select_project_dirs"](args)
+main_paths, sub_paths = engine["transcript_paths"](project_dirs)
+snapshot["fingerprint"] = engine["calibration_fingerprint"](
+    args,
+    None,
+    {"min_sessions": 5, "min_assistant_turns": 100},
+    main_paths,
+    sub_paths,
+    project_dirs,
+    fell_back,
+)
+os.chdir(previous_cwd)
 for path, data in ((config_path, config), (snapshot_path, snapshot), (outside_config, config)):
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -47,10 +74,70 @@ PYEOF
 }
 
 _run_calibrate_command() {
-  CTS_TOKEN_CALIBRATE_TARGET_ROOT="$FIXTURE_REPO" \
-    "$BASH" "$REPO_ROOT/scripts/token-calibrate.sh" "$@" \
-    >"$TEST_TMP/token-calibrate.out" 2>"$TEST_TMP/token-calibrate.err"
+  if [ -n "${FIXTURE_CLAUDE_CONFIG_DIR:-}" ]; then
+    CLAUDE_CONFIG_DIR="$FIXTURE_CLAUDE_CONFIG_DIR" \
+      CTS_TOKEN_CALIBRATE_TARGET_ROOT="$FIXTURE_REPO" \
+      "$BASH" "$REPO_ROOT/scripts/token-calibrate.sh" "$@" \
+      >"$TEST_TMP/token-calibrate.out" 2>"$TEST_TMP/token-calibrate.err"
+  else
+    CTS_TOKEN_CALIBRATE_TARGET_ROOT="$FIXTURE_REPO" \
+      "$BASH" "$REPO_ROOT/scripts/token-calibrate.sh" "$@" \
+      >"$TEST_TMP/token-calibrate.out" 2>"$TEST_TMP/token-calibrate.err"
+  fi
   STATUS=$?
+}
+
+_fixture_with_measured_snapshot() {
+  FIXTURE_HOME="$TEST_TMP/token-calibrate-measured-home"
+  FIXTURE_REPO="$TEST_TMP/token-calibrate-measured-repo"
+  FIXTURE_CLAUDE_CONFIG_DIR="$FIXTURE_HOME/.claude"
+  CONFIG="$FIXTURE_REPO/.claude/token-saver.json"
+  TRANSCRIPT="$FIXTURE_HOME/.claude/projects/$(printf '%s' "$FIXTURE_REPO" | sed 's#/#-#g; s#_#-#g')/session.jsonl"
+  LATEST="$FIXTURE_REPO/.token-saver/calibration/latest.json"
+  mkdir -p "$(dirname "$TRANSCRIPT")" "$FIXTURE_REPO/.claude"
+  python3 - "$CONFIG" "$TRANSCRIPT" <<'PYEOF'
+import json
+import sys
+from datetime import datetime, timezone
+
+config_path, transcript_path = sys.argv[1:]
+config = {
+    "suggest_session_cut": {
+        "initial_cache_read": 30000000,
+        "increment_cache_read": 30000000,
+    }
+}
+with open(config_path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+with open(transcript_path, "w", encoding="utf-8") as handle:
+    for index in range(100):
+        row = {
+            "type": "assistant",
+            "timestamp": stamp,
+            "sessionId": "measured-session-{}".format(index % 5),
+            "message": {
+                "id": "measured-message-{}".format(index),
+                "usage": {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 200,
+                    "output_tokens": 1,
+                },
+                "content": [],
+            },
+        }
+        handle.write(json.dumps(row) + "\n")
+PYEOF
+  CLAUDE_CONFIG_DIR="$FIXTURE_CLAUDE_CONFIG_DIR" \
+    CTS_TOKEN_REPORT_TARGET_ROOT="$FIXTURE_REPO" \
+    "$BASH" "$REPO_ROOT/scripts/token-report.sh" --calibrate \
+    >"$TEST_TMP/token-calibrate-measured-report.out" \
+    2>"$TEST_TMP/token-calibrate-measured-report.err"
+  MEASURE_STATUS=$?
+  assert_eq "0" "$MEASURE_STATUS" "実測snapshot生成"
 }
 
 _config_value() {
@@ -135,6 +222,15 @@ test_適用はprompt_keyをapplied_keyへ記録する() {
   assert_contains "$(cat "$state")" "applied_key=5-100-5-100" "適用済みprompt key"
 }
 
+test_applyは現在値と推奨値を更新前に表示する() {
+  _fixture_with_latest
+  _run_calibrate_command --apply
+  assert_eq "0" "$STATUS" "preview付きapply成功"
+  output="$(cat "$TEST_TMP/token-calibrate.out")"
+  assert_contains "$output" "現在値: initial 30000000 / increment 30000000 cache_read" "apply previewの現在値"
+  assert_contains "$output" "推奨値: initial 18000000 / increment 18000000 cache_read" "apply previewの推奨値"
+}
+
 test_現在設定がsnapshotと違えば拒否する() {
   _fixture_with_latest
   _set_initial 123
@@ -142,6 +238,19 @@ test_現在設定がsnapshotと違えば拒否する() {
   _run_calibrate_command --apply
   assert_eq "1" "$STATUS" "競合拒否"
   assert_eq "$before" "$(cat "$CONFIG")" "競合時非変更"
+}
+
+test_state_lock競合時はconfigとstateを変更しない() {
+  _fixture_with_latest
+  state="$FIXTURE_REPO/.token-saver/calibration/state"
+  printf 'prompted_key=5-100-5-100\napplied_key=\n' >"$state"
+  before_config="$(cat "$CONFIG")"
+  before_state="$(cat "$state")"
+  mkdir "$FIXTURE_REPO/.token-saver/calibration/.lock"
+  _run_calibrate_command --apply
+  assert_eq "1" "$STATUS" "state lock競合拒否"
+  assert_eq "$before_config" "$(cat "$CONFIG")" "state lock競合時のconfig非変更"
+  assert_eq "$before_state" "$(cat "$state")" "state lock競合時のstate非変更"
 }
 
 test_不正snapshotを拒否する() {
@@ -222,4 +331,32 @@ test_configが無ければ既定値との一致を確認して作成する() {
   assert_eq "0" "$STATUS" "config新規apply"
   assert_eq "18000000" "$(_config_value initial_cache_read)" "新規initial"
   assert_eq "18000000" "$(_config_value increment_cache_read)" "新規increment"
+}
+
+test_入力トランスクリプトが変化したsnapshotを適用せず再計測後だけ適用する() {
+  _fixture_with_measured_snapshot
+  before="$(cat "$CONFIG")"
+  python3 - "$TRANSCRIPT" <<'PYEOF'
+import os
+import sys
+
+path = sys.argv[1]
+stat_result = os.stat(path)
+os.utime(path, (stat_result.st_atime, stat_result.st_mtime + 2))
+PYEOF
+
+  _run_calibrate_command --apply
+  assert_eq "1" "$STATUS" "入力変化snapshotの拒否"
+  assert_eq "$before" "$(cat "$CONFIG")" "入力変化時のconfig非変更"
+
+  CLAUDE_CONFIG_DIR="$FIXTURE_CLAUDE_CONFIG_DIR" \
+    CTS_TOKEN_REPORT_TARGET_ROOT="$FIXTURE_REPO" \
+    "$BASH" "$REPO_ROOT/scripts/token-report.sh" --calibrate \
+    >"$TEST_TMP/token-calibrate-recalibrate.out" \
+    2>"$TEST_TMP/token-calibrate-recalibrate.err"
+  assert_eq "0" "$?" "再計測snapshot生成"
+  _run_calibrate_command --apply
+  assert_eq "0" "$STATUS" "再計測後のapply成功"
+  assert_eq "4000" "$(_config_value initial_cache_read)" "再計測後の推奨値"
+  unset FIXTURE_CLAUDE_CONFIG_DIR
 }

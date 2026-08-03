@@ -27,12 +27,17 @@ _run_install_args() {
 _write_calibration_fixture() {
   CALIBRATION_CONFIG="$TARGET/.claude/token-saver.json"
   CALIBRATION_LATEST="$TARGET/.token-saver/calibration/latest.json"
-  mkdir -p "$TARGET/.claude" "$TARGET/.token-saver/calibration"
-  python3 - "$CALIBRATION_CONFIG" "$CALIBRATION_LATEST" <<'PYEOF'
+  CALIBRATION_CLAUDE_CONFIG_DIR="$TEST_TMP/token-calibrate-empty-home/.claude"
+  mkdir -p "$TARGET/.claude" "$TARGET/.token-saver/calibration" \
+    "$CALIBRATION_CLAUDE_CONFIG_DIR/projects"
+  python3 - "$CALIBRATION_CONFIG" "$CALIBRATION_LATEST" "$REPO_ROOT" \
+    "$CALIBRATION_CLAUDE_CONFIG_DIR" <<'PYEOF'
 import json
+import os
+import runpy
 import sys
 
-config_path, snapshot_path = sys.argv[1:]
+config_path, snapshot_path, repo_root, claude_dir = sys.argv[1:]
 config = {
     "suggest_session_cut": {
         "initial_cache_read": 30000000,
@@ -53,7 +58,29 @@ snapshot = {
     "fingerprint": "b" * 64,
     "source": "メインセッションの重複排除後 cache_read 中央値",
     "generated_at": "2026-08-04T00:00:00.000000Z",
+    "scan_days": 0,
+    "all_projects": False,
 }
+os.environ["CLAUDE_CONFIG_DIR"] = claude_dir
+fixture_root = os.path.dirname(os.path.dirname(config_path))
+previous_cwd = os.getcwd()
+os.chdir(fixture_root)
+engine = runpy.run_path(os.path.join(repo_root, "scripts", "measure-token-usage.py"))
+args = type("CalibrationArgs", (object,), {})()
+args.days = 0
+args.all_projects = False
+project_dirs, fell_back = engine["select_project_dirs"](args)
+main_paths, sub_paths = engine["transcript_paths"](project_dirs)
+snapshot["fingerprint"] = engine["calibration_fingerprint"](
+    args,
+    None,
+    {"min_sessions": 5, "min_assistant_turns": 100},
+    main_paths,
+    sub_paths,
+    project_dirs,
+    fell_back,
+)
+os.chdir(previous_cwd)
 for path, data in ((config_path, config), (snapshot_path, snapshot)):
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -1435,6 +1462,7 @@ test_token_calibrateの導入先entrypointが対象repoへ適用する() {
   assert_contains "$ledger_text" 'token_calibrate_source' "token-calibrate台帳キー"
   assert_contains "$ledger_text" "$REPO_ROOT/scripts/token-calibrate.sh" "token-calibrate台帳source"
   (
+    export CLAUDE_CONFIG_DIR="$CALIBRATION_CLAUDE_CONFIG_DIR"
     cd "$TEST_TMP" &&
     bash "$entrypoint" --apply
   ) >"$TEST_TMP/calibrate-install.out" 2>"$TEST_TMP/calibrate-install.err"

@@ -9,6 +9,7 @@ import datetime
 import json
 import os
 import re
+import runpy
 import sys
 
 
@@ -118,6 +119,14 @@ def load_snapshot(path):
     ):
         if not positive_integer(snapshot.get(key)):
             raise CalibrationError("snapshotの数値が不正")
+    if not isinstance(snapshot.get("all_projects"), bool):
+        raise CalibrationError("snapshotの対象選択が不正")
+    if (
+        not isinstance(snapshot.get("scan_days"), int)
+        or isinstance(snapshot["scan_days"], bool)
+        or snapshot["scan_days"] < 0
+    ):
+        raise CalibrationError("snapshotの対象期間が不正")
     if snapshot["session_count"] < snapshot["min_sessions"]:
         raise CalibrationError("snapshotのsession数が条件未達")
     if snapshot["assistant_turns"] < snapshot["min_assistant_turns"]:
@@ -133,6 +142,39 @@ def load_snapshot(path):
         raise CalibrationError("snapshotの推奨値が不整合")
     calibration_prompt_key(snapshot)
     return snapshot
+
+
+def validate_scan_identity(root, snapshot):
+    """Recompute the private scan identity without exposing input paths."""
+    previous_cwd = os.getcwd()
+    try:
+        os.chdir(root)
+        engine = runpy.run_path(os.path.join(ROOT_DIR, "scripts", "measure-token-usage.py"))
+        args = type("CalibrationArgs", (object,), {})()
+        args.days = snapshot["scan_days"]
+        args.all_projects = snapshot["all_projects"]
+        since = None if args.days == 0 else object()
+        settings = {
+            "min_sessions": snapshot["min_sessions"],
+            "min_assistant_turns": snapshot["min_assistant_turns"],
+        }
+        project_dirs, fell_back = engine["select_project_dirs"](args)
+        main_paths, sub_paths = engine["transcript_paths"](project_dirs)
+        current = engine["calibration_fingerprint"](
+            args,
+            since,
+            settings,
+            main_paths,
+            sub_paths,
+            project_dirs,
+            fell_back,
+        )
+    except (KeyError, OSError, TypeError, ValueError, ImportError):
+        raise CalibrationError("対象の識別情報を検証できない")
+    finally:
+        os.chdir(previous_cwd)
+    if current != snapshot["fingerprint"]:
+        raise CalibrationError("対象がsnapshot作成時から変化した")
 
 
 def _current_calibration_settings(config):
@@ -246,7 +288,16 @@ def _read_calibration_state(path):
     return state
 
 
-def record_applied_key(config_path, snapshot):
+def _read_bytes(path):
+    _regular_file(path)
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except OSError:
+        raise CalibrationError("ファイルを読み取れない")
+
+
+def _acquire_calibration_state(config_path, snapshot):
     state_path, lock_path = _calibration_state_path(config_path)
     if os.path.lexists(lock_path):
         raise CalibrationError("calibration stateがロックされている")
@@ -256,19 +307,66 @@ def record_applied_key(config_path, snapshot):
         raise CalibrationError("calibration stateのロックを取得できない")
     try:
         state = _read_calibration_state(state_path)
+        state_existed = os.path.lexists(state_path)
+        state_before = _read_bytes(state_path) if state_existed else None
         state["applied_key"] = calibration_prompt_key(snapshot)
         ledger.check_writable(state_path)
-        ledger.write_atomic(
-            state_path,
-            "prompted_key={}\napplied_key={}\n".format(
+        return {
+            "state_path": state_path,
+            "lock_path": lock_path,
+            "state_existed": state_existed,
+            "state_before": state_before,
+            "text": "prompted_key={}\napplied_key={}\n".format(
                 state["prompted_key"], state["applied_key"]
             ),
-        )
-    finally:
+        }
+    except Exception:
         try:
             os.rmdir(lock_path)
         except OSError:
             pass
+        raise
+
+
+def _write_calibration_state(context):
+    ledger.write_atomic(context["state_path"], context["text"])
+
+
+def _release_calibration_state(context):
+    try:
+        os.rmdir(context["lock_path"])
+    except OSError:
+        pass
+
+
+def record_applied_key(config_path, snapshot):
+    context = _acquire_calibration_state(config_path, snapshot)
+    try:
+        _write_calibration_state(context)
+    finally:
+        _release_calibration_state(context)
+
+
+def _restore_file(path, existed, content):
+    if existed:
+        ledger.write_atomic(path, content.decode("utf-8", "surrogateescape"))
+    elif os.path.lexists(path):
+        if os.path.islink(path):
+            raise CalibrationError("復元対象がsymlinkになった")
+        os.unlink(path)
+
+
+def _preview(current, snapshot):
+    print(
+        "現在値: initial {} / increment {} cache_read".format(
+            current["initial_cache_read"], current["increment_cache_read"]
+        )
+    )
+    print(
+        "推奨値: initial {} / increment {} cache_read".format(
+            snapshot["baseline_cache_read"], snapshot["baseline_cache_read"]
+        )
+    )
 
 
 def apply_snapshot(config_path, snapshot):
@@ -320,15 +418,35 @@ def main(argv):
     try:
         snapshot = load_snapshot(latest)
         config_path = _safe_config_path(root)
+        config_existed = os.path.lexists(config_path)
+        config_before = _read_bytes(config_path) if config_existed else None
         if os.path.lexists(config_path):
             config = _read_json(config_path)
-            validate_current_config(config, snapshot)
+            current = validate_current_config(config, snapshot)
         else:
             if not os.path.isdir(os.path.dirname(config_path)):
                 raise CalibrationError("configの親ディレクトリが通常ディレクトリではない")
-        apply_snapshot(config_path, snapshot)
-        record_applied_key(config_path, snapshot)
-    except (CalibrationError, OSError):
+            current = {
+                "initial_cache_read": snapshot["current_initial"],
+                "increment_cache_read": snapshot["current_increment"],
+            }
+        validate_scan_identity(root, snapshot)
+        state_context = _acquire_calibration_state(config_path, snapshot)
+        try:
+            _preview(current, snapshot)
+            apply_snapshot(config_path, snapshot)
+            _write_calibration_state(state_context)
+        except Exception:
+            _restore_file(config_path, config_existed, config_before)
+            _restore_file(
+                state_context["state_path"],
+                state_context["state_existed"],
+                state_context["state_before"],
+            )
+            raise
+        finally:
+            _release_calibration_state(state_context)
+    except (CalibrationError, OSError, TypeError, ValueError):
         sys.stderr.write("キャリブレーションを適用できません\n")
         return 1
     print("キャリブレーションを適用しました")
