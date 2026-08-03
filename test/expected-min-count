@@ -37,6 +37,7 @@ test-suggest-session-cut.sh 28
 test-uninstall.sh 80
 test-token-report.sh 19
 test-calibration.sh 19
+test-token-calibrate.sh 10
 test-token-report-launcher.sh 19
 test-token-report-docs.sh 7
 test-workflow.sh 3
