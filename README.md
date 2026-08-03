@@ -16,7 +16,7 @@ Claude Code のトークン消費を減らすヘルパー。任意のリポジ�
 | 引き継ぎ（session-handoff） | **実装済み** |
 | 計測（token-report） | **実装済み** |
 | セッション切り提案（suggest-session-cut） | **実装済み** |
-| キャリブレーションと診断（calibrate） | 未実装（段階4） |
+| キャリブレーションと診断（calibrate） | **実装済み** |
 | 委譲判断ガイド（delegation-policy） | 未実装（段階5） |
 
 設計は [`docs/specs/2026-07-31-claude-token-saver-design.md`](docs/specs/2026-07-31-claude-token-saver-design.md) にある。
@@ -42,7 +42,7 @@ cd <導入したいリポジトリ>
    `.cts-backup` がまだ無ければ書き換え前の内容を退避する（新規作成時は対象なし）
 4. `.gitignore` の `# claude-token-saver` ブロックを（再）生成する。中身は `.token-saver/`、
    および**実際に設置したスキル**のリンクパス
-5. 導入先から計測を実行する `.token-saver/token-report.sh` を設置する
+5. 導入先から計測と明示適用を実行する `.token-saver/token-report.sh` / `.token-saver/token-calibrate.sh` を設置する
 6. 設置したものを `.token-saver/installed.json`（台帳）へ記録する
 
 ### 個人設定と共有設定のスコープ
@@ -65,7 +65,9 @@ cd <導入したいリポジトリ>
       pending/           ← 未消費の引き継ぎ
       consumed/          ← 消費済みの引き継ぎ（記録として残る）
     token-report.sh      ← 導入先を計測 root に固定する entrypoint
+    token-calibrate.sh   ← 承認済み snapshot の明示適用 entrypoint
     token-reports/       ← 計測レポート（初回の計測成功時に作る）
+    calibration/         ← snapshot と report / Stop フックの共有 state
     session-cut/         ← Stop フックの状態（cache / marker / events.log）
     installed.json       ← 何を設置したかの台帳
   .claude/
@@ -137,7 +139,7 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 
 既定値は移植元の実測由来である。初回は `30,000,000`、以後は `30,000,000` ずつ増える。
 これは特定の移植元の条件に基づく参考値であり、他プロジェクトへ自動適合する保証はない。
-段階4の calibrate で実測に合わせる。
+実測に合わせるには、下記の calibrate を明示的に実行する。
 
 導入先ごとの設定は `.claude/token-saver.json` に置き、設定 JSON の親キーは `suggest_session_cut` とする。
 次の値は正の整数で、`log_backups` だけは `0` を許す。`log_backups` は 0 以上 1000 以下に制限し、
@@ -225,8 +227,32 @@ Stop payload と設定ファイルは末尾まで完全な JSON として検証�
 - `cache_read_input_tokens` は課金上の重みが不明なので、内訳のまま扱い、加重しない
 - 画像の消費は現在の計測エンジンでは未計測である
 - MCP サーバごとのトークン消費は実測できない。分かるのは設定済みか、呼ばれたか、何回かまでである
-- Stop フックによる切り時提案は実装済み。calibrate は未実装で、このコマンドが設定を書き換える段階ではない
+- Stop フックによる切り時提案と calibrate は実装済み。設定ファイルは自動変更せず、明示適用コマンドだけが閾値を更新する
 - 詳しい使い方は [`skills/token-report/SKILL.md`](skills/token-report/SKILL.md)
+
+## キャリブレーションと診断（calibrate）
+
+サンプルが十分に集まった導入先では、次の2段階で実測値を確認してから閾値を適用する。
+
+```bash
+./.token-saver/token-report.sh --calibrate
+./.token-saver/token-calibrate.sh --apply
+```
+
+`--calibrate` はトランスクリプトを読み取り、セッションごとの `cache_read` 中央値、サンプル数、算出日時、
+fingerprint を検証可能な `snapshot` として `.token-saver/calibration/latest.json` に保存する。
+サンプル条件の既定値はセッション5本以上かつ assistant ターン100以上で、`.claude/token-saver.json` の
+root 直下 `calibration.min_sessions` / `calibration.min_assistant_turns` で変更できる。条件未達なら推奨値を算出せず、
+同じサンプル周期の案内は report と Stop フックで一度だけにする。
+
+この計測コマンドは `.claude/token-saver.json`、フック、既存の `suggest_session_cut` を変更しない。
+`snapshot` を確認して利用者が明示的に `./.token-saver/token-calibrate.sh --apply` を実行したときだけ、
+`suggest_session_cut.initial_cache_read` / `increment_cache_read` と `calibration.last_applied` を更新する。
+それ以外の JSON キーは保持し、snapshot の条件・算出元・現在値が一致しない場合は適用しない。
+
+診断は境界を分けて表示する。`## 実測診断` には超過セッション、重い main tool_result、MCP の未使用 / 利用済み / 判定不能分類、
+Agent 利用、`/compact`、画像未計測を載せる。`## 概算診断` の MCP 定義サイズ（bytes ÷ 4）は実測合計・中央値・未使用判定へ混ぜない。
+prompt、tool-result 本文、環境変数、認証情報、repo 外の実パスは snapshot とレポートへ出力しない。
 
 ### 台帳に記録が無いときは何もしない（fail-closed）
 
@@ -293,7 +319,7 @@ Python 3.6.15、3.8.20、3.12.3 で `python -B test/python-compatibility.py` の
 バージョンに限るもので、Python 3.6 未満や未検証の将来版を保証しない。
 
 全体テストは実行環境 Python 3.12.3 で `CTS_NO_SKIP=1 bash test/run.sh` を実行し、
-成功 453 件 / 失敗 0 件 / スキップ 0 件、総 453 件・ファイル別 13 件分の実行件数下限を満たし、
+成功 509 件 / 失敗 0 件 / スキップ 0 件、総 509 件・ファイル別 16 件分の実行件数下限を満たし、
 終了コード 0 だった。これは互換性スモークとは別の全体テスト結果である。
 `python-compatibility` job は matrix の Python 3.6.15 / 3.8.20 で実行し、
 Docker イメージの取得・起動・スモークのいずれかが非 0 なら、その失敗を握り潰さず CI の失敗へ伝播させる。

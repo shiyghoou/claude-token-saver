@@ -19,6 +19,14 @@ _design_token_report_section() {
   ' "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md"
 }
 
+_design_calibration_section() {
+  awk '
+    /^### 5\.5 / { in_section=1 }
+    /^## 6\. / { in_section=0 }
+    in_section { print }
+  ' "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md"
+}
+
 _skill() {
   sed -n '1,260p' "$(_skill_path)"
 }
@@ -139,6 +147,24 @@ test_画像消費を現在未計測と全利用文書が明記する() {
   assert_contains "$wave5" "$expected" "Wave5設計 image semantics"
   assert_not_contains "$readme$skill$design$wave5" "画像の消費は寸法からの概算" \
     "未実装の画像概算を実装済みと誤認させない"
+}
+
+_assert_calibrate_contract() {
+  local body="$1" label="$2"
+  assert_contains "$body" "./.token-saver/token-report.sh --calibrate" "$label 計測導線"
+  assert_contains "$body" "./.token-saver/token-calibrate.sh --apply" "$label 明示適用導線"
+  assert_contains "$body" "snapshot" "$label snapshot"
+  assert_contains "$body" "実測" "$label measured"
+  assert_contains "$body" "概算" "$label estimated"
+  assert_contains "$body" "画像の消費は現在の計測エンジンでは未計測である" "$label image limit"
+  assert_contains "$body" ".claude/token-saver.json" "$label config path"
+  assert_contains "$body" "自動" "$label automatic boundary"
+}
+
+test_calibrateの導線と安全境界を全利用文書で一致させる() {
+  _assert_calibrate_contract "$(_readme)" "README"
+  _assert_calibrate_contract "$(_skill)" "SKILL"
+  _assert_calibrate_contract "$(_design_calibration_section)" "DESIGN"
 }
 
 test_token_reportの共有契約がREADME_SKILL_設計書で一致する() {
