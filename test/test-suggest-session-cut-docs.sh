@@ -25,7 +25,9 @@ _design_suggest_section() {
 
 _assert_config_contract() {
   local body="$1" label="$2"
+  assert_contains "$body" '`message.usage.cache_read_input_tokens`' "$label measurement key"
   assert_contains "$body" ".claude/token-saver.json" "$label config path"
+  assert_contains "$body" '"suggest_session_cut"' "$label config parent key"
   assert_contains "$body" "CTS_SESSION_CUT_INITIAL_CACHE_READ" "$label initial env"
   assert_contains "$body" "CTS_SESSION_CUT_INCREMENT_CACHE_READ" "$label increment env"
   assert_contains "$body" "CTS_SESSION_CUT_RETENTION_DAYS" "$label retention env"
@@ -42,6 +44,12 @@ _assert_config_contract() {
   assert_contains "$body" "events.log" "$label event log"
   assert_contains "$body" "移植元の実測由来" "$label imported defaults"
   assert_contains "$body" "他プロジェクトへ自動適合する保証はない" "$label no auto fit"
+  assert_contains "$body" \
+    "設定ファイルが無い、または読めない場合は各設定値を、個別値が不正な場合はその値だけを既定値へ戻す。" \
+    "$label config fallback"
+  assert_contains "$body" \
+    '入力・トランスクリプト・状態を判定できない、または読み書きに失敗した場合は fail-closed とし、無出力・標準エラー空・終了コード `0` で抜ける。' \
+    "$label fail-closed"
   assert_contains "$body" '`/clear` は自動実行しません' "$label manual clear"
   assert_contains "$body" "手動で新しいセッションへ切り替える" "$label manual session switch"
 }

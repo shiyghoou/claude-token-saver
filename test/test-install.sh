@@ -423,6 +423,21 @@ test_Stopフックを登録する() {
   assert_contains "$HOOK_COMMANDS" "suggest-session-cut.sh" "Stop のコマンド"
 }
 
+test_Stopフック実体を欠くクローンなら登録せず警告する() {
+  _setup_target
+  local clone="$TEST_TMP/missing-stop-hook" rc=0 out
+  _clone_repo "$clone"
+  rm -f "$clone/scripts/suggest-session-cut.sh"
+
+  bash "$clone/install.sh" "$TARGET" >"$TEST_TMP/.out" 2>&1 || rc=$?
+  out="$(cat "$TEST_TMP/.out")"
+  _load_hook_commands Stop
+
+  assert_eq "0" "$rc" "終了コード"
+  assert_not_contains "$HOOK_COMMANDS" "suggest-session-cut.sh" "Stop のコマンド"
+  assert_contains "$out" "クローンが不完全なため Stop フックを登録しない" "欠損警告"
+}
+
 test_二度実行しても_Stopフックが重複しない() {
   _setup_target
   _run_install

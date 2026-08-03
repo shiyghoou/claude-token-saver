@@ -127,16 +127,22 @@ test_導入先の他のStopフックは往復後も残す() {
   mkdir -p "$TARGET/.claude"
   cat >"$SETTINGS" <<'EOF'
 {
+  "permissions": {"allow": ["Bash(ls:*)"]},
   "hooks": {
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "echo 残すべき Stop フック" } ] }
+      { "hooks": [ { "type": "command", "command": "echo 利用者独自 Stop フック" } ] }
     ]
   }
 }
 EOF
   _run_install
   _run_uninstall
-  assert_contains "$(_hook_commands Stop)" "残すべき Stop フック" "Stop のコマンド"
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  _load_hook_commands Stop
+  assert_not_contains "$HOOK_COMMANDS" "suggest-session-cut.sh" "Stop のコマンド"
+  assert_count 1 "$HOOK_COMMANDS" "利用者独自 Stop フック" "利用者 Stop フックの登録数"
+  assert_contains "$(_settings_text)" '"permissions"' "settings.local.json"
+  assert_contains "$(_settings_text)" "Bash(ls:*)" "settings.local.json"
 }
 
 test_install_uninstall_install_でも_Stopフックは1件に戻る() {
@@ -153,10 +159,16 @@ test_install_uninstall_install_でも_Stopフックは1件に戻る() {
 EOF
   _run_install
   _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "最初のuninstall終了コード"
+  _load_hook_commands Stop
+  assert_not_contains "$HOOK_COMMANDS" "suggest-session-cut.sh" "最初のuninstall後の Stop コマンド"
   _run_install
   _load_hook_commands Stop
   assert_count 1 "$HOOK_COMMANDS" "suggest-session-cut.sh" "再導入後の Stop 登録数"
   assert_count 1 "$HOOK_COMMANDS" "利用者の Stop フック" "利用者 Stop フックの登録数"
+  local stop_count
+  stop_count="$(printf '%s\n' "$HOOK_COMMANDS" | sed '/^$/d' | wc -l | tr -d ' ')"
+  assert_eq "2" "$stop_count" "再導入後の Stop 総件数"
 }
 
 test_導入先の他の設定キーは残す() {

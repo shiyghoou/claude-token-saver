@@ -36,7 +36,8 @@ description: Use when the session is about to be cut or cleared, when the user a
 `message.usage.cache_read_input_tokens` を累積し、初回 `30,000,000`、以後 `30,000,000` ごとの境界で
 一度だけ提案する。既定値は移植元の実測由来であり、他プロジェクトへ自動適合する保証はない。
 
-設定は導入先の `.claude/token-saver.json` に置く。正の整数を指定し、`log_backups` だけは `0` を指定できる。
+設定は導入先の `.claude/token-saver.json` に置き、設定 JSON の親キーは `suggest_session_cut` とする。
+正の整数を指定し、`log_backups` だけは `0` を指定できる。
 
 ```json
 {
@@ -55,7 +56,8 @@ description: Use when the session is about to be cut or cleared, when the user a
 `CTS_SESSION_CUT_LOG_BACKUPS` は設定ファイルより優先する。状態は `.token-saver/session-cut/` の
 `.cache`、`.marker`、`events.log` に保存し、`.git/` へは書き込まない。
 
-入力・設定・状態の読み書きに失敗したときは fail-closed で無出力、標準エラー空、終了コード `0` となる。
+設定ファイルが無い、または読めない場合は各設定値を、個別値が不正な場合はその値だけを既定値へ戻す。
+入力・トランスクリプト・状態を判定できない、または読み書きに失敗した場合は fail-closed とし、無出力・標準エラー空・終了コード `0` で抜ける。
 `/clear` は自動実行しません。提案が出たら、引き継ぎを書いてから、手動で新しいセッションへ切り替える。
 
 ## 引き継ぎを書くとき

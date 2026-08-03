@@ -315,12 +315,10 @@ if [ -f "$CTS_HOME/scripts/handoff-check.sh" ]; then
 else
   warn "scripts/handoff-check.sh が無いため SessionStart フックを登録しない（クローンが不完全である）"
 fi
-# suggest-session-cut.sh は段階3の成果物である。まだ無いのが正常なので、
-# 取りこぼしの警告ではなく予定として伝える。
 if [ -f "$CTS_HOME/scripts/suggest-session-cut.sh" ]; then
   hook_specs+=("Stop:$CTS_HOME/scripts/suggest-session-cut.sh")
 else
-  info "  Stop フック（セッション区切りの提案）は段階3で登録される"
+  warn "クローンが不完全なため Stop フックを登録しない（scripts/suggest-session-cut.sh が無い）"
 fi
 
 if [ "${#hook_specs[@]}" -gt 0 ]; then
