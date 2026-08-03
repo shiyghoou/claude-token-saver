@@ -46,6 +46,7 @@ CALIBRATION_MAX = 1000000
 DEFAULT_SESSION_CUT = 30000000
 CALIBRATION_SOURCE = "メインセッションの重複排除後 cache_read 中央値"
 TOKEN_SAVER_DIRNAME = ".token" + "-saver"
+HEAVY_TOOL_RESULT_BYTES = 4096
 
 
 def fmt(value):
@@ -460,6 +461,8 @@ class Scan:
         self.agent_usage_total = Usage()
         self.agent_max = defaultdict(int)
         self.agent_total = 0
+        self.main_tool_results = []
+        self.compact_events = []
         self.sub_files = 0
         self.sub_mcp_calls = Counter()
         self.scanned_dirs = []
@@ -470,6 +473,110 @@ class Scan:
         self.no_message_id = 0
         self.no_timestamp = 0
         self.no_timestamp_with_usage = 0
+        # These are metadata-only indexes used while scanning.  They never enter
+        # the report or snapshot, and do not retain prompt/tool-result bodies.
+        self._tool_names = {}
+        self._tool_result_session_keys = []
+        self._tool_result_request_ids = []
+        self._assistant_cache_reads = defaultdict(list)
+        self._pending_compacts = defaultdict(list)
+        self._compact_turns = defaultdict(int)
+
+
+def safe_session_identifier(session_key):
+    if not session_key:
+        return "(不明)"
+    digest = hashlib.sha256(str(session_key).encode("utf-8", "surrogateescape")).hexdigest()
+    return "session-{}".format(digest[:10])
+
+
+def safe_timestamp(value):
+    stamp = parse_ts(value)
+    if stamp is None:
+        return "(不明)"
+    return stamp.isoformat().replace("+00:00", "Z")
+
+
+def serialized_byte_count(value):
+    try:
+        return len(
+            json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def is_compact_message(message):
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if content == "/compact":
+        return True
+    for block in content_blocks(message):
+        if isinstance(block, dict) and block.get("type") == "text":
+            if block.get("text") == "/compact":
+                return True
+    return False
+
+
+def record_compact(scan, session_key, timestamp):
+    previous = scan._assistant_cache_reads.get(session_key, [])
+    event = {
+        "session": safe_session_identifier(session_key),
+        "timestamp": safe_timestamp(timestamp),
+        "pre_compact_baseline": median_integer(previous[-3:]),
+        "post_compact_usage": None,
+        "recovery_turns": None,
+    }
+    scan.compact_events.append(event)
+    event_index = len(scan.compact_events) - 1
+    scan._pending_compacts[session_key].append(event_index)
+    scan._compact_turns[event_index] = 0
+
+
+def update_compact_events(scan, session_key, cache_read):
+    values = scan._assistant_cache_reads.setdefault(session_key, [])
+    values.append(cache_read)
+    for event_index in scan._pending_compacts.get(session_key, []):
+        event = scan.compact_events[event_index]
+        if event["post_compact_usage"] is None:
+            event["post_compact_usage"] = cache_read
+        if event["recovery_turns"] is None:
+            scan._compact_turns[event_index] += 1
+            baseline = event["pre_compact_baseline"]
+            if baseline is not None and cache_read * 10 >= baseline * 9:
+                event["recovery_turns"] = scan._compact_turns[event_index]
+
+
+def record_main_tool_results(scan, message, session_key, timestamp, request_id):
+    for block in content_blocks(message):
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        tool_use_id = block.get("tool_use_id")
+        tool_name = scan._tool_names.get((session_key, tool_use_id), "(不明)")
+        tool_name = sanitize_name(tool_name) or "(不明)"
+        scan.main_tool_results.append({
+            "tool": tool_name,
+            "session": safe_session_identifier(session_key),
+            "timestamp": safe_timestamp(timestamp),
+            "payload_bytes": serialized_byte_count(block.get("content")),
+            "usage_matched": False,
+        })
+        scan._tool_result_session_keys.append(session_key)
+        scan._tool_result_request_ids.append(request_id)
+
+
+def mark_matching_tool_results(scan, session_key, request_id):
+    if request_id is None:
+        return
+    for index, result_session in enumerate(scan._tool_result_session_keys):
+        if (
+            result_session == session_key
+            and scan._tool_result_request_ids[index] == request_id
+        ):
+            scan.main_tool_results[index]["usage_matched"] = True
 
 
 def scan_transcripts(paths, since):
@@ -538,6 +645,7 @@ def scan_transcripts(paths, since):
                                 )
                                 stats.cache_read += one.cache_read
                                 stats.assistant_turns += 1
+                                update_compact_events(scan, session_key, one.cache_read)
                             model = sanitize_model(message.get("model")) or "(不明)"
                             scan.by_model[model] += one
 
@@ -546,6 +654,9 @@ def scan_transcripts(paths, since):
                             continue
                         name = str(block.get("name") or "(不明)")
                         scan.tool_calls[name] += 1
+                        tool_use_id = block.get("id")
+                        if session_key and isinstance(tool_use_id, str) and tool_use_id:
+                            scan._tool_names[(session_key, tool_use_id)] = name
                         tool_input = block.get("input")
                         if not isinstance(tool_input, dict):
                             continue
@@ -562,6 +673,15 @@ def scan_transcripts(paths, since):
                                 scan.read_paths[target] += 1
                                 ext = os.path.splitext(target)[1].lower() or "(拡張子なし)"
                                 scan.read_ext[ext] += 1
+
+                if session_key and is_compact_message(message):
+                    record_compact(scan, session_key, entry.get("timestamp"))
+                request_id = dedup_scalar(entry.get("requestId"))
+                record_main_tool_results(
+                    scan, message, session_key, entry.get("timestamp"), request_id
+                )
+                if entry.get("type") == "assistant" and session_key:
+                    mark_matching_tool_results(scan, session_key, request_id)
 
                 result = entry.get("toolUseResult")
                 if (
@@ -728,6 +848,68 @@ def mcp_summary():
     return unique
 
 
+def mcp_definition_rows():
+    sources = [("user", path) for path in config_json_candidates()]
+    sources.append(("project", project_path(".mcp.json")))
+    rows = []
+    seen = set()
+    for scope, source in sources:
+        data = read_json(source)
+        if not isinstance(data, dict):
+            continue
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            continue
+        for raw_name, definition in servers.items():
+            name = sanitize_name(raw_name)
+            if not name or (scope, name) in seen:
+                continue
+            seen.add((scope, name))
+            rows.append({
+                "scope": scope,
+                "name": name,
+                "definition_bytes": serialized_byte_count(definition),
+            })
+    return rows
+
+
+def classify_unused_mcp(configured, used):
+    configured_names = []
+    for item in configured:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            item = item[1]
+        name = sanitize_name(item)
+        if name and name not in configured_names:
+            configured_names.append(name)
+
+    if hasattr(used, "keys"):
+        used_names = list(used.keys())
+    else:
+        used_names = list(used or [])
+    used_normalized = {
+        normalize_server_name(name)
+        for name in used_names
+        if isinstance(name, str) and normalize_server_name(name)
+    }
+    by_normalized = defaultdict(list)
+    for name in configured_names:
+        normalized = normalize_server_name(name)
+        if normalized:
+            by_normalized[normalized].append(name)
+
+    result = {"unused": [], "used": [], "unknown": []}
+    for name in configured_names:
+        normalized = normalize_server_name(name)
+        matches = by_normalized.get(normalized, [])
+        if len(matches) != 1:
+            result["unknown"].append(name)
+        elif normalized in used_normalized:
+            result["used"].append(name)
+        else:
+            result["unused"].append(name)
+    return result
+
+
 def mcp_tool_prefixes(tool_calls):
     found = Counter()
     for name, count in tool_calls.items():
@@ -771,6 +953,76 @@ def scan_mcp_tool_names(paths, since):
                     if isinstance(name, str) and name.startswith("mcp__"):
                         found[name] += 1
     return found
+
+
+def build_diagnostics(scan, calibration, main_paths, sub_paths):
+    recommended = calibration.get("recommended_levels", []) if calibration else []
+    level_two = recommended[1] if len(recommended) >= 2 else None
+    main_total = scan.main.total
+
+    heavy = [
+        dict(result)
+        for result in scan.main_tool_results
+        if result["payload_bytes"] >= HEAVY_TOOL_RESULT_BYTES
+    ]
+    heavy.sort(key=lambda result: -result["payload_bytes"])
+    sessions = []
+    if level_two is not None:
+        for session_key, stats in scan.session_stats.items():
+            if stats.cache_read < level_two:
+                continue
+            ratio = (stats.cache_read / float(main_total)) if main_total else 0.0
+            sessions.append({
+                "session": safe_session_identifier(session_key),
+                "cache_read": stats.cache_read,
+                "main_ratio": ratio,
+            })
+    sessions.sort(key=lambda row: (-row["cache_read"], row["session"]))
+
+    used = mcp_tool_prefixes(scan.tool_calls)
+    if scan.sub_mcp_calls:
+        used += mcp_tool_prefixes(scan.sub_mcp_calls)
+    mcp_rows = mcp_definition_rows()
+    configured = [row["name"] for row in mcp_rows]
+    mcp_classification = classify_unused_mcp(configured, used)
+
+    agent_ratio = (scan.agent_total / float(main_total)) if main_total else 0.0
+    compact_events = []
+    for event in scan.compact_events:
+        compact_events.append({
+            "session": event["session"],
+            "timestamp": event["timestamp"],
+            "pre_compact_baseline": event["pre_compact_baseline"],
+            "post_compact_usage": event["post_compact_usage"],
+            "recovery_turns": event["recovery_turns"],
+        })
+
+    return {
+        "measured": {
+            "main_total": main_total,
+            "heavy_tool_results": heavy,
+            "sessions_exceeding_level2": sessions,
+            "mcp": mcp_classification,
+            "agent_calls": sum(scan.agent_calls.values()),
+            "agent_results": sum(scan.agent_results.values()),
+            "agent_total_tokens": scan.agent_total,
+            "agent_main_ratio": agent_ratio,
+            "compact_events": compact_events,
+            "image_tokens": "未計測",
+        },
+        "estimated": {
+            "mcp_definitions": [
+                {
+                    "scope": row["scope"],
+                    "name": row["name"],
+                    "definition_bytes": row["definition_bytes"],
+                    "estimated_tokens": row["definition_bytes"] / 4.0,
+                }
+                for row in mcp_rows
+            ],
+            "method": "定義バイト数 ÷ 4 の概算。実測合計へ加算しない。",
+        },
+    }
 
 
 def normalize_server_name(name):
@@ -829,7 +1081,7 @@ def top_rows(rows, limit):
     return rows[:limit]
 
 
-def build_report(args, scan, project_dirs, since, calibration=None):
+def build_report(args, scan, project_dirs, since, calibration=None, diagnostics=None):
     lines = []
     add = lines.append
     window = f"直近 {args.days} 日" if since else "全期間"
@@ -1011,6 +1263,127 @@ def build_report(args, scan, project_dirs, since, calibration=None):
                 add("- 有効な正の cache_read サンプルがないため、推奨値は算出しない。")
         add("")
 
+    if diagnostics is not None:
+        measured = diagnostics["measured"]
+        estimated = diagnostics["estimated"]
+        add("## 実測診断")
+        add("")
+        heavy = measured["heavy_tool_results"]
+        add(
+            "- 重い main tool_result: {} 件（payload {} bytes 以上）".format(
+                len(heavy), fmt(HEAVY_TOOL_RESULT_BYTES)
+            )
+        )
+        if heavy:
+            rows = []
+            for result in heavy[: args.top]:
+                rows.append([
+                    result["tool"],
+                    result["session"],
+                    result["timestamp"],
+                    fmt(result["payload_bytes"]),
+                    "usage対応あり" if result["usage_matched"] else "usage対応なし",
+                ])
+            lines.extend(
+                table(
+                    ["tool", "session", "時刻", "payload bytes", "usage"], rows
+                )
+            )
+        else:
+            add("（重い main tool_result はなし）")
+            add("")
+
+        sessions = measured["sessions_exceeding_level2"]
+        add("- 推奨段階2以上の超過セッション: {} 件".format(len(sessions)))
+        if sessions:
+            lines.extend(
+                table(
+                    ["超過セッション", "cache_read", "main消費比"],
+                    [
+                        [
+                            row["session"],
+                            fmt(row["cache_read"]),
+                            "{:.1%}".format(row["main_ratio"]),
+                        ]
+                        for row in sessions[: args.top]
+                    ],
+                )
+            )
+
+        compact_events = measured["compact_events"]
+        add("- /compact 発生: {} 件".format(len(compact_events)))
+        if compact_events:
+            lines.extend(
+                table(
+                    ["session", "時刻", "圧縮前基準", "圧縮直後usage", "回復ターン数"],
+                    [
+                        [
+                            event["session"],
+                            event["timestamp"],
+                            fmt(event["pre_compact_baseline"])
+                            if event["pre_compact_baseline"] is not None
+                            else "未算出",
+                            fmt(event["post_compact_usage"])
+                            if event["post_compact_usage"] is not None
+                            else "未取得",
+                            event["recovery_turns"]
+                            if event["recovery_turns"] is not None
+                            else "未回復",
+                        ]
+                        for event in compact_events[: args.top]
+                    ],
+                )
+            )
+            for event in compact_events[: args.top]:
+                recovery = (
+                    event["recovery_turns"]
+                    if event["recovery_turns"] is not None
+                    else "未回復"
+                )
+                add("- compact回復ターン数: {}".format(recovery))
+
+        mcp = measured["mcp"]
+        add("- MCP分類（実測呼び出しベース）:")
+        for category in ("unused", "used", "unknown"):
+            names = mcp.get(category, [])
+            add(
+                "  - {}: {}".format(
+                    {"unused": "未使用MCP", "used": "利用済みMCP", "unknown": "判定不能MCP"}[category],
+                    ", ".join(markdown_cell(name) for name in names) or "該当なし",
+                )
+            )
+        add(
+            "- Agent: 起動 {} 件 / 結果 {} 件 / totalTokens {} / main比 {:.1%}".format(
+                fmt(measured["agent_calls"]),
+                fmt(measured["agent_results"]),
+                fmt(measured["agent_total_tokens"]),
+                measured["agent_main_ratio"],
+            )
+        )
+        add("- 画像入力のトークン消費は未計測です（画像を数値推定していない）。")
+        add("")
+
+        add("## 概算診断")
+        add("")
+        add("- 概算値は実測合計・中央値・MCP未使用判定へ混ぜない。")
+        add("- 算出方法: {}".format(estimated["method"]))
+        definition_rows = [
+            [
+                row["scope"],
+                row["name"],
+                fmt(row["definition_bytes"]),
+                "{:.1f}".format(row["estimated_tokens"]),
+            ]
+            for row in estimated["mcp_definitions"]
+        ]
+        lines.extend(
+            table(
+                ["スコープ", "MCPサーバ名", "定義bytes", "推定tokens"],
+                definition_rows[: args.top],
+            )
+        )
+        add("")
+
     add("## 共有時の境界")
     add("")
     add("- 含める: 集計値、モデル名、subagent_type、MCP サーバ名、repo 内の相対パス。")
@@ -1109,7 +1482,14 @@ def main():
         if not write_calibration_snapshot(calibration):
             print("キャリブレーション snapshot の保存に失敗しました", file=sys.stderr)
             return 1
-    report = build_report(args, scan, [PROJECT_ROOT], since, calibration)
+    diagnostics = (
+        build_diagnostics(scan, calibration, main_paths, sub_paths)
+        if args.calibrate
+        else None
+    )
+    report = build_report(
+        args, scan, [PROJECT_ROOT], since, calibration, diagnostics
+    )
 
     if args.out:
         try:

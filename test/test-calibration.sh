@@ -203,9 +203,178 @@ PYEOF
 _run_calibrate() {
   (
     cd "$FIXTURE_REPO" &&
-      CLAUDE_CONFIG_DIR="$FIXTURE_HOME/.claude" \
+      HOME="$FIXTURE_HOME" CLAUDE_CONFIG_DIR="$FIXTURE_HOME/.claude" \
       python3 -B "$REPO_ROOT/scripts/measure-token-usage.py" --calibrate --days 0 --out "$FIXTURE_REPORT"
   )
+}
+
+_fixture_with_diagnostics() {
+  FIXTURE_HOME="$TEST_TMP/diagnostics-home"
+  FIXTURE_REPO="$TEST_TMP/diagnostics-repo"
+  FIXTURE_REPORT="$TEST_TMP/diagnostics-report.md"
+  mkdir -p "$FIXTURE_HOME/.claude/projects" "$FIXTURE_REPO/.git" "$FIXTURE_REPO/.claude"
+
+  python3 - "$FIXTURE_HOME" "$FIXTURE_REPO" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+home, repo = sys.argv[1:]
+project = os.path.join(home, ".claude", "projects", "".join(
+    char if char.isascii() and char.isalnum() else "-" for char in repo
+))
+os.makedirs(project)
+now = datetime.now(timezone.utc)
+counter = [0]
+
+def stamp():
+    value = now + timedelta(seconds=counter[0])
+    counter[0] += 1
+    return value.isoformat().replace("+00:00", "Z")
+
+def usage(cache_read):
+    return {
+        "input_tokens": 1,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": cache_read,
+        "output_tokens": 1,
+    }
+
+def assistant(session, message_id, cache_read, content=None):
+    return {
+        "type": "assistant",
+        "timestamp": stamp(),
+        "sessionId": session,
+        "message": {
+            "id": message_id,
+            "model": "claude-sonnet-5",
+            "usage": usage(cache_read),
+            "content": content or [],
+        },
+    }
+
+rows = []
+for session, values in (
+    ("session-normal-a", [100, 100, 100]),
+    ("session-normal-b", [100, 100, 100]),
+    ("session-heavy", [600, 600, 600]),
+    ("session-normal-c", [100, 100, 100]),
+):
+    for index, cache_read in enumerate(values):
+        rows.append(assistant(session, "{}-{}".format(session, index), cache_read))
+
+# 直前3ターンの中央値は110。圧縮直後の50から、2ターン目の105で90%以上へ戻る。
+for index, cache_read in enumerate((100, 120, 110)):
+    rows.append(assistant("session-compact", "compact-before-{}".format(index), cache_read))
+rows.append({
+    "type": "user",
+    "timestamp": stamp(),
+    "sessionId": "session-compact",
+    "message": {"role": "user", "content": "/compact"},
+})
+rows.append(assistant("session-compact", "compact-after-0", 50))
+rows.append(assistant("session-compact", "compact-after-1", 105))
+rows.append({
+    "type": "user",
+    "timestamp": stamp(),
+    "sessionId": "session-compact",
+    "message": {"role": "user", "content": [{"type": "text", "text": "/compact"}]},
+})
+
+# 大きいmain tool_resultはtool_useと同じセッションの後続usageへ対応付ける。
+rows.append(assistant(
+    "session-normal-a", "heavy-tool-use", 100,
+    [{"type": "tool_use", "id": "heavy-tool", "name": "Read",
+      "input": {"file_path": repo + "/EXTERNAL_PATH_SENTINEL"}},
+     {"type": "tool_use", "id": "mcp-used", "name": "mcp__used_server__run",
+      "input": {"argument": "MCP_INPUT_SECRET"}},
+     {"type": "tool_use", "id": "mcp-unknown", "name": "mcp__unknown_server__run",
+      "input": {"argument": "MCP_UNKNOWN_INPUT_SECRET"}},
+     {"type": "tool_use", "id": "agent-call", "name": "Agent",
+      "input": {"subagent_type": "diagnostic-agent",
+                "prompt": "PROMPT_BODY_SENTINEL"}}],
+))
+rows.append({
+    "type": "user",
+    "timestamp": stamp(),
+    "sessionId": "session-normal-a",
+    "requestId": "request-heavy",
+    "message": {"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": "heavy-tool",
+        "content": [{"type": "text", "text": "秘密のtool result本文 " + "x" * 5000}],
+    }]},
+})
+heavy_follow_up = assistant("session-normal-a", "heavy-tool-follow-up", 100)
+heavy_follow_up["requestId"] = "request-heavy"
+rows.append(heavy_follow_up)
+rows.append({
+    "type": "user",
+    "timestamp": stamp(),
+    "sessionId": "session-normal-a",
+    "toolUseResult": {"agentType": "diagnostic-agent", "totalTokens": 120},
+    "message": {"role": "user", "content": "tool result detail"},
+})
+
+# usage対応のないtool_resultも記録し、実測値として誤って埋めない。
+rows.append({
+    "type": "user",
+    "timestamp": stamp(),
+    "sessionId": "session-unmatched",
+    "message": {"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": "unmatched-tool",
+        "content": [{"type": "text", "text": "未対応tool result本文 SENTINEL " + "y" * 5000}],
+    }]},
+})
+
+with open(os.path.join(project, "diagnostics.jsonl"), "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+with open(os.path.join(repo, ".claude", "token-saver.json"), "w", encoding="utf-8") as handle:
+    json.dump({
+        "calibration": {"min_sessions": 5, "min_assistant_turns": 17},
+        "suggest_session_cut": {"initial_cache_read": 111, "increment_cache_read": 222},
+    }, handle, ensure_ascii=False)
+
+with open(os.path.join(home, ".claude.json"), "w", encoding="utf-8") as handle:
+    json.dump({"mcpServers": {
+        "unused_server": {"command": "node", "args": ["MCP_UNUSED_INPUT_SECRET"],
+                           "env": {"MCP_UNUSED_ENV_SECRET": "hidden"}},
+        "used_server": {"command": "node", "args": ["MCP_USED_INPUT_SECRET"]},
+        "unknown-server": {"command": "node"},
+        "unknown_server": {"command": "node", "url": "/external/MCP_PATH_SECRET"},
+    }}, handle, ensure_ascii=False)
+PYEOF
+}
+
+test_実測診断と概算診断を分離する() {
+  _fixture_with_diagnostics
+  _run_calibrate >/dev/null
+  report="$(cat "$FIXTURE_REPORT")"
+  assert_contains "$report" "## 実測診断" "実測節"
+  assert_contains "$report" "## 概算診断" "概算節"
+  assert_contains "$report" "超過セッション" "超過session"
+  assert_contains "$report" "tool_result" "heavy tool_result"
+  assert_contains "$report" "usage対応あり" "対応usageあり"
+  assert_contains "$report" "usage対応なし" "対応usageなし"
+  assert_contains "$report" "compact" "compact診断"
+  assert_contains "$report" "/compact 発生: 2 件" "compact形式"
+  assert_contains "$report" "回復ターン数: 2" "compact回復"
+  assert_contains "$report" "未回復" "compact未回復"
+  assert_contains "$report" "unused_server" "未使用MCP"
+  assert_contains "$report" "used_server" "利用済みMCP"
+  assert_contains "$report" "unknown-server" "判定不能MCP"
+  assert_contains "$report" "diagnostic-agent" "Agent診断"
+  assert_contains "$report" "画像入力のトークン消費は未計測" "画像境界"
+  assert_contains "$report" "定義バイト数 ÷ 4 の概算" "MCP概算根拠"
+  assert_not_contains "$report" "PROMPT_BODY_SENTINEL" "prompt秘匿"
+  assert_not_contains "$report" "秘密のtool result本文" "tool result本文秘匿"
+  assert_not_contains "$report" "MCP_INPUT_SECRET" "MCP入力秘匿"
+  assert_not_contains "$report" "EXTERNAL_PATH_SENTINEL" "外部path秘匿"
+  assert_not_contains "$report" "MCP_PATH_SECRET" "MCP定義path秘匿"
+  measured="${report%%## 概算診断*}"
+  assert_not_contains "$measured" "概算トークン" "概算値の実測混入"
 }
 
 test_既定の5セッション100ターン未満は促さない() {
