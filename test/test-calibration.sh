@@ -252,6 +252,18 @@ EOF
 
 test_calibrateはtoken_saver_configを書き換えずsnapshotを保存する() {
   _fixture_with_calibration_data 5 100
+  python3 - "$FIXTURE_REPO/.claude/token-saver.json" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    config = json.load(handle)
+config["calibration"]["private_note"] = "SECRET_SENTINEL"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PYEOF
   before="$(cat "$FIXTURE_REPO/.claude/token-saver.json")"
   _run_calibrate >/dev/null
   snapshot="$FIXTURE_REPO/.token-saver/calibration/latest.json"
@@ -273,6 +285,26 @@ test_calibrateはtoken_saver_configを書き換えずsnapshotを保存する() {
   assert_contains "$snapshot_json" '"source":' "snapshot算出元"
   assert_contains "$snapshot_json" '"fingerprint":' "snapshot識別情報"
   assert_not_contains "$snapshot_json" "$FIXTURE_REPO" "snapshotのrepo実パス"
+  assert_not_contains "$snapshot_json" "SECRET_SENTINEL" "snapshotの秘密値"
+  snapshot_schema="$(python3 - "$snapshot" <<'PYEOF'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+assert data["period"] == "全期間"
+assert data["baseline_cache_read"] == 200
+assert data["current_initial"] == 111
+assert data["current_increment"] == 222
+assert data["recommended_levels"] == [200, 400, 600]
+assert data["source"] == "メインセッションの重複排除後 cache_read 中央値"
+assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$", data["generated_at"])
+assert re.match(r"^[0-9a-f]{64}$", data["fingerprint"])
+print("schema-ok")
+PYEOF
+)"
+  assert_eq "schema-ok" "$snapshot_schema" "snapshot値と形式"
 }
 
 test_cache_readの有効サンプルが無ければ推奨を出さない() {
