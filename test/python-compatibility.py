@@ -90,6 +90,120 @@ def check_engine_syntax():
         check(marker not in source, "Python 3.6非対応APIがengineに残っている: %s" % marker)
 
 
+def check_calibration_cli(temp_root):
+    fixture_root = os.path.join(temp_root, "calibration-cli-repo")
+    config_root = os.path.join(temp_root, "calibration-cli-config")
+    project_dir = os.path.join(config_root, "projects", "fixture-project")
+    os.makedirs(os.path.join(fixture_root, ".git"))
+    os.makedirs(os.path.join(fixture_root, ".claude"))
+    os.makedirs(project_dir)
+
+    config_path = os.path.join(fixture_root, ".claude", "token-saver.json")
+    with open(config_path, "w", encoding="utf-8") as stream:
+        json.dump(
+            {
+                "calibration": {"min_sessions": 1, "min_assistant_turns": 1},
+                "suggest_session_cut": {
+                    "initial_cache_read": 30000000,
+                    "increment_cache_read": 30000000,
+                },
+                "unrelated": "CLI_CONFIG_SECRET",
+            },
+            stream,
+        )
+    config_before = open(config_path, "rb").read()
+
+    transcript_path = os.path.join(project_dir, "session.jsonl")
+    rows = [
+        {
+            "type": "user",
+            "sessionId": "cli-session",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "CLI_PROMPT_SECRET"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "sessionId": "cli-session",
+            "message": {
+                "id": "cli-assistant",
+                "model": "claude-sonnet-5",
+                "usage": {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 10,
+                    "output_tokens": 1,
+                },
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": "/outside/CLI_EXTERNAL_PATH_SECRET"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "sessionId": "cli-session",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "cli-assistant-tool",
+                        "content": "CLI_TOOL_RESULT_SECRET " + ("x" * 5000),
+                    }
+                ],
+            },
+        },
+    ]
+    with open(transcript_path, "w", encoding="utf-8") as stream:
+        for row in rows:
+            stream.write(json.dumps(row) + "\n")
+
+    report_path = os.path.join(fixture_root, "report.md")
+    environment = os.environ.copy()
+    environment["CLAUDE_CONFIG_DIR"] = config_root
+    environment["CLI_ENV_SECRET"] = "CLI_ENV_SECRET"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            ENGINE_PATH,
+            "--calibrate",
+            "--days",
+            "0",
+            "--out",
+            "report.md",
+        ],
+        cwd=fixture_root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    check(result.returncode == 0, "キャリブレーションCLIが失敗した: %s" % result.stderr)
+    check(os.path.isfile(report_path), "キャリブレーションCLIのreportが無い")
+    check(
+        os.path.isfile(os.path.join(fixture_root, ".token-saver", "calibration", "latest.json")),
+        "キャリブレーションCLIのsnapshotが無い",
+    )
+    report = open(report_path, encoding="utf-8").read()
+    for secret in (
+        "CLI_CONFIG_SECRET",
+        "CLI_PROMPT_SECRET",
+        "CLI_TOOL_RESULT_SECRET",
+        "CLI_EXTERNAL_PATH_SECRET",
+        "CLI_ENV_SECRET",
+    ):
+        check(secret not in report, "CLI出力へ秘密値が漏えいした: %s" % secret)
+    check(open(config_path, "rb").read() == config_before, "CLIが設定を変更した")
+    assert_no_bytecode(temp_root)
+    print("Python互換性キャリブレーションCLI: PASS")
+
+
 def check_ledger(temp_root):
     ledger = os.path.join(temp_root, "installed.json")
     script = os.path.join(LIB_DIR, "ledger.py")
@@ -182,6 +296,7 @@ def main():
     lib_count = check_lib_syntax()
     check_engine_syntax()
     with tempfile.TemporaryDirectory() as temp_root:
+        check_calibration_cli(temp_root)
         check_ledger(temp_root)
         check_settings_hooks(temp_root)
         check_gitignore(temp_root)
