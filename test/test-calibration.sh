@@ -251,7 +251,7 @@ EOF
 }
 
 test_calibrateはtoken_saver_configを書き換えずsnapshotを保存する() {
-  _fixture_with_calibration_data 5 100
+  _fixture_with_calibration_data 5 100 5 100
   python3 - "$FIXTURE_REPO/.claude/token-saver.json" <<'PYEOF'
 import json
 import sys
@@ -264,6 +264,8 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(config, handle, ensure_ascii=False, indent=2)
     handle.write("\n")
 PYEOF
+  status=$?
+  assert_eq "0" "$status" "秘密fixtureの設定"
   before="$(cat "$FIXTURE_REPO/.claude/token-saver.json")"
   _run_calibrate >/dev/null
   snapshot="$FIXTURE_REPO/.token-saver/calibration/latest.json"
@@ -299,8 +301,8 @@ assert data["current_initial"] == 111
 assert data["current_increment"] == 222
 assert data["recommended_levels"] == [200, 400, 600]
 assert data["source"] == "メインセッションの重複排除後 cache_read 中央値"
-assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$", data["generated_at"])
-assert re.match(r"^[0-9a-f]{64}$", data["fingerprint"])
+assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z", data["generated_at"])
+assert re.fullmatch(r"[0-9a-f]{64}", data["fingerprint"])
 print("schema-ok")
 PYEOF
 )"
