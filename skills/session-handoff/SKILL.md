@@ -37,7 +37,8 @@ description: Use when the session is about to be cut or cleared, when the user a
 一度だけ提案する。既定値は移植元の実測由来であり、他プロジェクトへ自動適合する保証はない。
 
 設定は導入先の `.claude/token-saver.json` に置き、設定 JSON の親キーは `suggest_session_cut` とする。
-正の整数を指定し、`log_backups` だけは `0` を指定できる。
+正の整数を指定し、`log_backups` だけは `0` を指定できる。`log_backups` は 0 以上 1000 以下に制限し、
+上限を超えた値は既定値へ戻す。
 
 ```json
 {
@@ -57,6 +58,8 @@ description: Use when the session is about to be cut or cleared, when the user a
 `.cache`、`.marker`、`events.log` に保存し、linked worktree でも `.git/` へは書き込まない。
 状態は lock 内で同一ディレクトリの一時ファイルから rename し、symlink や rename 失敗時は
 旧状態を保持して fail-closed にする。
+検査済みの状態ディレクトリへ `cd -P` してから相対パスで操作し、差し替え後も外部へ追随しない。
+lock には owner PID を記録し、ライブPIDは尊重し、10分以上古い無効lockだけを回収する。
 
 設定ファイルが無い、または読めない場合は各設定値を、個別値が不正な場合はその値だけを既定値へ戻す。
 入力・トランスクリプト・状態を判定できない、または読み書きに失敗した場合は fail-closed とし、無出力・標準エラー空・終了コード `0` で抜ける。

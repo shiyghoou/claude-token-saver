@@ -4,13 +4,35 @@
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P 2>/dev/null)" || SCRIPT_DIR=""
 
 _cts_valid_integer() {
   case "${1:-}" in
     '' | *[!0-9]*) return 1 ;;
   esac
   return 0
+}
+
+_cts_normalize_integer() {
+  local value="${1:-}"
+  _cts_valid_integer "$value" || return 1
+  while [ "${value#0}" != "$value" ] && [ "${#value}" -gt 1 ]; do
+    value="${value#0}"
+  done
+  CTS_NORMALIZED_VALUE="$value"
+  return 0
+}
+
+_cts_decimal_at_most() {
+  local value="$1" limit="$2"
+  _cts_normalize_integer "$value" || return 1
+  value="$CTS_NORMALIZED_VALUE"
+  _cts_normalize_integer "$limit" || return 1
+  limit="$CTS_NORMALIZED_VALUE"
+  [ "${#value}" -lt "${#limit}" ] && return 0
+  [ "${#value}" -gt "${#limit}" ] && return 1
+  [ "$value" = "$limit" ] && return 0
+  [[ "$value" < "$limit" ]]
 }
 
 _cts_positive_integer() {
@@ -30,8 +52,8 @@ _cts_config_number() {
 }
 
 _cts_setting() {
-  # $1: 環境変数名、$2: config key、$3: 既定値、$4: zeroを許すか
-  local env_name="$1" key="$2" default="$3" allow_zero="$4"
+  # $1: 環境変数名、$2: config key、$3: 既定値、$4: zeroを許すか、$5: 上限
+  local env_name="$1" key="$2" default="$3" allow_zero="$4" max_value="${5:-}"
   local config="$CTS_ROOT/.claude/token-saver.json" value
 
   value="$default"
@@ -51,6 +73,12 @@ _cts_setting() {
   else
     _cts_positive_integer "$value" || value="$default"
   fi
+  if [ -n "$max_value" ] && ! _cts_decimal_at_most "$value" "$max_value"; then
+    value="$default"
+  fi
+  _cts_normalize_integer "$value" || value="$default"
+  _cts_normalize_integer "$value" || return 1
+  value="$CTS_NORMALIZED_VALUE"
   CTS_SETTING_VALUE="$value"
   return 0
 }
@@ -134,6 +162,19 @@ _cts_prepare_state_dir() {
   [ "$physical" = "$state" ] || return 1
 
   CTS_STATE_DIR="$state"
+  CTS_STATE_PHYSICAL="$physical"
+  return 0
+}
+
+_cts_enter_state_dir() {
+  local current
+  [ -n "${CTS_STATE_PHYSICAL:-}" ] || return 1
+  cd -P "$CTS_STATE_PHYSICAL" 2>/dev/null || return 1
+  current="$(pwd -P 2>/dev/null)" || return 1
+  [ "$current" = "$CTS_STATE_PHYSICAL" ] || return 1
+  # 以後は検査済みの物理ディレクトリをcwdとして、全て相対パスで操作する。
+  CTS_STATE_DIR="."
+  CTS_LOG="./events.log"
   return 0
 }
 
@@ -202,6 +243,82 @@ _cts_cleanup_state() {
   find "$CTS_STATE_DIR" -type f \( \
     -name '*.tmp' -o -name '.suggest-session-cut.*' \
   \) -mtime "+$retention_days" -exec rm -f {} \; 2>/dev/null || true
+}
+
+_cts_lock_is_old() {
+  local lock="$1" found
+  found="$(find "$lock" -prune -type d -mmin +10 -print 2>/dev/null)"
+  [ -n "$found" ]
+}
+
+_cts_lock_stale() {
+  local lock="$1" owner pid
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  owner="$lock/owner"
+  if [ -L "$owner" ] || { [ -e "$owner" ] && [ ! -f "$owner" ]; }; then
+    return 1
+  fi
+  if [ -f "$owner" ]; then
+    pid="$(awk -F= '$1 == "pid" { print $2; exit }' "$owner" 2>/dev/null)"
+    if _cts_valid_integer "$pid"; then
+      _cts_normalize_integer "$pid" || pid=""
+      pid="${CTS_NORMALIZED_VALUE:-}"
+      if [ -n "$pid" ] && [ "$pid" != 0 ] && kill -0 "$pid" 2>/dev/null; then
+        return 1
+      fi
+    fi
+  fi
+  # 死んだPID、無効PID、所有者情報の無いロックでも、十分に古い場合だけ回収する。
+  _cts_lock_is_old "$lock"
+}
+
+_cts_release_lock_dir() {
+  local lock="$1" owner="$1/owner"
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  if [ -e "$owner" ] || [ -L "$owner" ]; then
+    [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
+    rm -f "$owner" 2>/dev/null || return 1
+  fi
+  rmdir "$lock" 2>/dev/null
+}
+
+_cts_write_lock_owner() {
+  local lock="$1" owner="$1/owner"
+  [ ! -e "$owner" ] && [ ! -L "$owner" ] || return 1
+  ( set -C; umask 077; printf 'pid=%s\n' "$$" >"$owner" ) 2>/dev/null || return 1
+  [ -f "$owner" ] && [ ! -L "$owner" ]
+}
+
+_cts_acquire_lock() {
+  local lock="$1" owner
+  if mkdir "$lock" 2>/dev/null; then
+    CTS_LOCK_DIR="$lock"
+    if _cts_write_lock_owner "$lock"; then
+      return 0
+    fi
+    _cts_release_lock_dir "$lock" 2>/dev/null || true
+    CTS_LOCK_DIR=""
+    return 1
+  fi
+
+  _cts_lock_stale "$lock" || return 1
+  # stale判定直後にも同じ条件を確認し、競合中のownerを消さない。
+  _cts_lock_stale "$lock" || return 1
+  owner="$lock/owner"
+  if [ -e "$owner" ] || [ -L "$owner" ]; then
+    [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
+    rm -f "$owner" 2>/dev/null || return 1
+  fi
+  rmdir "$lock" 2>/dev/null || return 1
+
+  mkdir "$lock" 2>/dev/null || return 1
+  CTS_LOCK_DIR="$lock"
+  if _cts_write_lock_owner "$lock"; then
+    return 0
+  fi
+  _cts_release_lock_dir "$lock" 2>/dev/null || true
+  CTS_LOCK_DIR=""
+  return 1
 }
 
 _cts_rollback_log_rotation() {
@@ -313,7 +430,7 @@ _cts_exit_cleanup() {
     rm -f "$CTS_TMP_FILE" 2>/dev/null || true
   fi
   if [ -n "${CTS_LOCK_DIR:-}" ]; then
-    rmdir "$CTS_LOCK_DIR" 2>/dev/null || true
+    _cts_release_lock_dir "$CTS_LOCK_DIR" 2>/dev/null || true
   fi
 }
 
@@ -325,6 +442,7 @@ _cts_main() {
   local payload_source log_entry log_entry_bytes lock_candidate
   CTS_TMP_FILE=""
   CTS_LOCK_DIR=""
+  CTS_STATE_PHYSICAL=""
   trap '_cts_exit_cleanup' EXIT
 
   # common.shの標準入力読取・top-level JSON文字列抽出を共有する。
@@ -363,18 +481,17 @@ _cts_main() {
   retention_days="$CTS_SETTING_VALUE"
   _cts_setting CTS_SESSION_CUT_LOG_MAX_BYTES log_max_bytes 1048576 0
   log_max_bytes="$CTS_SETTING_VALUE"
-  _cts_setting CTS_SESSION_CUT_LOG_BACKUPS log_backups 5 1
+  _cts_setting CTS_SESSION_CUT_LOG_BACKUPS log_backups 5 1 1000
   log_backups="$CTS_SETTING_VALUE"
 
   CTS_STATE_DIR=""
   _cts_prepare_state_dir || return 0
-  CTS_LOG="$CTS_STATE_DIR/events.log"
+  _cts_enter_state_dir || return 0
   _cts_state_entries_safe || return 0
   _cts_log_symlinks_absent || return 0
 
-  lock_candidate="$CTS_STATE_DIR/.suggest-session-cut.lock"
-  mkdir "$lock_candidate" 2>/dev/null || return 0
-  CTS_LOCK_DIR="$lock_candidate"
+  lock_candidate="./.suggest-session-cut.lock"
+  _cts_acquire_lock "$lock_candidate" || return 0
 
   _cts_cleanup_state "$retention_days"
 

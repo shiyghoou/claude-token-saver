@@ -258,6 +258,8 @@ assistant message の完全な usage object だけを集計する。
 対応する環境変数は `CTS_SESSION_CUT_INITIAL_CACHE_READ`、`CTS_SESSION_CUT_INCREMENT_CACHE_READ`、
 `CTS_SESSION_CUT_RETENTION_DAYS`、`CTS_SESSION_CUT_LOG_MAX_BYTES`、`CTS_SESSION_CUT_LOG_BACKUPS` である。
 既定値は移植元の実測由来であり、他プロジェクトへ自動適合する保証はない。段階4の calibrate で実測に合わせる。
+値は正の整数で、`log_backups` だけは `0` を許す。`log_backups` は 0 以上 1000 以下に制限し、
+上限を超えた値は既定値へ戻す。
 
 状態は導入先の `.token-saver/session-cut/` に置く。
 
@@ -272,6 +274,8 @@ cache と marker は同じ管理ディレクトリ内の一時ファイルから
 rename に失敗した場合は旧状態を保持し、提案を出さない。状態の読み取り、掃除、cache/marker 更新、
 ログ更新と提案判定は state dir 内の排他的な lock を取得してから行い、同じ境界を二重提案しない。
 期限切れの `.cache`、`.marker`、一時ファイルは `retention_days` に従って掃除する。
+検査済みの状態ディレクトリへ `cd -P` してから相対パスで操作し、差し替え後も外部へ追随しない。
+lock には owner PID を記録し、ライブPIDは尊重し、10分以上古い無効lockだけを回収する。
 Git repository と linked worktree では `git rev-parse --show-toplevel` の root を使い、`.git/` と gitdir 配下には書き込まない。
 `.token-saver`、`session-cut`、cache、marker、`events.log`、数値ログ世代のいずれかが symlink なら追従せず fail-closed にする。
 

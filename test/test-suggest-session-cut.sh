@@ -447,7 +447,7 @@ EOF
   lock_release="$TEST_TMP/lock.release"
   cat >"$TEST_TMP/bin/mkdir" <<'EOF'
 #!/usr/bin/env bash
-if [ "$#" -eq 1 ] && [ "$1" = "$CTS_TEST_LOCK_DIR" ]; then
+if [ "$#" -eq 1 ] && [ "${1##*/}" = ".suggest-session-cut.lock" ]; then
   "$CTS_TEST_REAL_MKDIR" "$@" || exit 1
   : >"$CTS_TEST_LOCK_READY"
   while [ ! -e "$CTS_TEST_LOCK_RELEASE" ]; do
@@ -495,6 +495,73 @@ EOF
   assert_empty "$(cat "$first_err")" "先行同時実行の stderr"
   assert_empty "$(cat "$second_err")" "競合同時実行の stderr"
   assert_file_missing "$lock_dir" "正常終了時はlockを解放する"
+}
+
+test_ロック取得直前にstate_dirが差し替わっても外部へ書かない() {
+  _fixture_repo
+  mkdir -p "$FIXTURE_STATE_DIR" "$TEST_TMP/bin"
+  outside="$TEST_TMP/toctou-outside"
+  real_state="$TEST_TMP/toctou-state-real"
+  swap_done="$TEST_TMP/toctou-swap.done"
+  mkdir -p "$outside"
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"toctou-state","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-toctou-state" "$FIXTURE_TRANSCRIPT")"
+  real_mkdir="$(command -v mkdir)"
+  cat >"$TEST_TMP/bin/mkdir" <<'EOF'
+#!/usr/bin/env bash
+if [ "$#" -eq 1 ] && [ "${1##*/}" = ".suggest-session-cut.lock" ] &&
+    [ ! -e "$CTS_TEST_SWAP_DONE" ]; then
+  mv "$CTS_TEST_STATE_PATH" "$CTS_TEST_REAL_STATE" || exit 1
+  ln -s "$CTS_TEST_OUTSIDE" "$CTS_TEST_STATE_PATH" || exit 1
+  : >"$CTS_TEST_SWAP_DONE"
+fi
+exec "$CTS_TEST_REAL_MKDIR" "$@"
+EOF
+  chmod +x "$TEST_TMP/bin/mkdir"
+
+  _run_hook "$payload" "$FIXTURE_ROOT" env \
+    CTS_TEST_REAL_MKDIR="$real_mkdir" \
+    CTS_TEST_STATE_PATH="$FIXTURE_STATE_DIR" \
+    CTS_TEST_REAL_STATE="$real_state" \
+    CTS_TEST_OUTSIDE="$outside" \
+    CTS_TEST_SWAP_DONE="$swap_done"
+  assert_eq "0" "$HOOK_RC" "state_dir差し替え時の終了コード"
+  assert_empty "$HOOK_STDERR" "state_dir差し替え時の stderr"
+  assert_file_exists "$swap_done" "state_dir差し替え注入が実行される"
+  assert_empty "$(find "$outside" -mindepth 1 -print 2>/dev/null)" \
+    "state_dir差し替え後も外部ディレクトリへ書かない"
+  assert_file_missing "$real_state/.suggest-session-cut.lock" \
+    "state_dir差し替え後も物理state dirのlockを解放する"
+}
+
+test_ライブlockは尊重しstale_lockだけを回収する() {
+  _fixture_repo
+  mkdir -p "$FIXTURE_STATE_DIR"
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"stale-lock","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-stale-lock" "$FIXTURE_TRANSCRIPT")"
+  lock_dir="$FIXTURE_STATE_DIR/.suggest-session-cut.lock"
+
+  mkdir "$lock_dir"
+  printf 'pid=%s\n' "$$" >"$lock_dir/owner"
+  _run_hook "$payload" "$FIXTURE_ROOT" env
+  assert_eq "0" "$HOOK_RC" "ライブlock競合時の終了コード"
+  assert_empty "$HOOK_STDOUT" "ライブlock競合時は提案しない"
+  assert_file_exists "$lock_dir" "ライブlockを回収しない"
+  rm -f "$lock_dir/owner"
+  rmdir "$lock_dir"
+
+  mkdir "$lock_dir"
+  printf 'pid=999999999\n' >"$lock_dir/owner"
+  touch -t 200001010000 "$lock_dir"
+  _run_hook "$payload" "$FIXTURE_ROOT" env
+  assert_eq "0" "$HOOK_RC" "stale lock回収時の終了コード"
+  assert_contains "$HOOK_STDOUT" "$SUGGEST_SESSION_CUT_MESSAGE" \
+    "stale lock回収後に提案する"
+  assert_file_missing "$lock_dir" "stale lockを回収して正常終了する"
 }
 
 test_state_dir構成要素がsymlinkならroot外へ書かない() {
@@ -732,8 +799,8 @@ EOF
   mkdir -p "$TEST_TMP/bin"
   cat >"$TEST_TMP/bin/mv" <<'EOF'
 #!/usr/bin/env bash
-if [ "$#" -eq 2 ] && [ "$1" = "$CTS_TEST_FAIL_MV_SOURCE" ] && \
-    [ "$2" = "$CTS_TEST_FAIL_MV_DESTINATION" ]; then
+if [ "$#" -eq 2 ] && [ "${1##*/}" = "${CTS_TEST_FAIL_MV_SOURCE##*/}" ] && \
+    [ "${2##*/}" = "${CTS_TEST_FAIL_MV_DESTINATION##*/}" ]; then
   exit 1
 fi
 exec "$CTS_TEST_REAL_MV" "$@"
@@ -775,6 +842,7 @@ test_巨大log_backupsでも実在世代数に比例して速やかに完了す�
   _fixture_repo
   mkdir -p "$FIXTURE_STATE_DIR"
   printf 'rotation-source' >"$FIXTURE_STATE_DIR/events.log"
+  printf 'previous-generation' >"$FIXTURE_STATE_DIR/events.log.1"
   _write_transcript <<'EOF'
 {"type":"assistant","message":{"id":"huge-backups","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
 EOF
@@ -782,7 +850,7 @@ EOF
   bounded_out="$TEST_TMP/huge-backups.stdout"
   bounded_err="$TEST_TMP/huge-backups.stderr"
   printf '%s\n' "$payload" | env CTS_SESSION_CUT_LOG_MAX_BYTES=1 \
-    CTS_SESSION_CUT_LOG_BACKUPS=1000000000 \
+    CTS_SESSION_CUT_LOG_BACKUPS=1000000000000000000000000 \
     bash "$REPO_ROOT/scripts/suggest-session-cut.sh" >"$bounded_out" 2>"$bounded_err" &
   hook_pid=$!
   completed=0
@@ -805,6 +873,8 @@ EOF
     "巨大log_backupsでも提案を完了する"
   assert_empty "$(cat "$bounded_err")" "巨大log_backupsの stderr"
   assert_file_exists "$FIXTURE_STATE_DIR/events.log.1" "巨大log_backupsでも現行ログを退避する"
+  assert_eq "previous-generation" "$(cat "$FIXTURE_STATE_DIR/events.log.2")" \
+    "巨大log_backupsでも既存世代を失わない"
 }
 
 test_状態書き込み失敗時は提案せずclearも他状態も触らない() {
@@ -826,6 +896,10 @@ EOF
 
 test_cache更新がtmpからrenameされる() {
   implementation="$(cat "$REPO_ROOT/scripts/suggest-session-cut.sh")"
+  assert_contains "$implementation" 'dirname "${BASH_SOURCE[0]}"' \
+    "SCRIPT_DIRのsource path解決"
+  assert_contains "$implementation" '2>/dev/null && pwd -P 2>/dev/null' \
+    "SCRIPT_DIR解決失敗時のstderr抑止"
   assert_contains "$implementation" 'mktemp "$directory/.suggest-session-cut.XXXXXX"' \
     "cacheの一時ファイル"
   assert_contains "$implementation" 'mv "$tmp" "$destination"' \
@@ -855,7 +929,7 @@ EOF
   real_mv="$(command -v mv)"
   cat >"$TEST_TMP/bin/mv" <<'EOF'
 #!/usr/bin/env bash
-if [ "$#" -eq 2 ] && [ "$2" = "$CTS_TEST_FAIL_MV_DESTINATION" ]; then
+if [ "$#" -eq 2 ] && [ "${2##*/}" = "${CTS_TEST_FAIL_MV_DESTINATION##*/}" ]; then
   exit 1
 fi
 exec "$CTS_TEST_REAL_MV" "$@"

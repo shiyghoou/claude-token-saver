@@ -4,7 +4,7 @@
 
 **Goal:** Issue #23の段階3として、累積`cache_read`が閾値へ到達したときだけセッション切りを提案する、汎用的で失敗時にセッション終了を妨げないStopフックを導入する。
 
-**Architecture:** `scripts/suggest-session-cut.sh`がStopフックの入力・対象root・設定・状態を扱い、`scripts/lib/suggest-session-cut-usage.awk`がトランスクリプトJSONLを読み取り、assistant usageの重複を除いて`cache_read_input_tokens`を合計する。状態は導入先の`.token-saver/session-cut/`に置き、セッション別cache/markerを原子的に更新し、期限切れ状態を掃除する。既存の`install.sh`の「実体のあるStopフックだけ登録」経路を段階3の成果物として有効化する。
+**Architecture:** `scripts/suggest-session-cut.sh`がStopフックの入力・対象root・設定・状態を扱い、`scripts/lib/suggest-session-cut-json.awk`がStop payload全体を検証し、`scripts/lib/suggest-session-cut-usage.awk`がトランスクリプトJSONLを読み取り、assistant usageの重複を除いて`cache_read_input_tokens`を合計する。状態は導入先の`.token-saver/session-cut/`に置き、検査済みの物理state directoryをcwdとしてcache/marker/log/lockを相対パスで操作し、セッション別cache/markerを原子的に更新し、期限切れ状態を掃除する。既存の`install.sh`の「実体のあるStopフックだけ登録」経路を段階3の成果物として有効化する。
 
 **Tech Stack:** Bash 3.2互換シェル、POSIX awk、既存の`test/run.sh`、ShellCheck。
 
@@ -13,6 +13,7 @@
 - Issue #23の`issue-23-suggest-session-cut`ブランチだけで作業し、`main`へ直接編集しない。
 - 閾値の既定値は初回30,000,000、増分30,000,000とする。到達判定は累積値が初回閾値以上である場合に`floor((total-initial)/increment)+1`番目の境界へ達したものとする。
 - 設定ファイルは導入先`.claude/token-saver.json`の次の形を正とする。`suggest_session_cut.initial_cache_read`、`suggest_session_cut.increment_cache_read`、`suggest_session_cut.retention_days`、`suggest_session_cut.log_max_bytes`、`suggest_session_cut.log_backups`は正の整数（`log_backups`のみ0を許可）である。無効値は既定値へ倒す。
+- `log_backups`は0以上1000以下だけを受理し、上限超過値は既定値へ倒す。ロックにはowner PIDを記録し、ライブPIDを持つロックは尊重し、10分以上古い無効ロックだけを回収する。
 - 環境変数は設定ファイルより優先し、`CTS_SESSION_CUT_INITIAL_CACHE_READ`、`CTS_SESSION_CUT_INCREMENT_CACHE_READ`、`CTS_SESSION_CUT_RETENTION_DAYS`、`CTS_SESSION_CUT_LOG_MAX_BYTES`、`CTS_SESSION_CUT_LOG_BACKUPS`を使う。
 - `.git/`へ状態を書かない。git worktree（`.git`がファイル）と非gitディレクトリの両方で、状態は導入先rootの`.token-saver/`下へ置く。
 - Stopフックは`/clear`を実行しない。提案文にはユーザーが引き継ぎを書いてから手動で切ることを明示する。
@@ -30,6 +31,7 @@
 | `scripts/suggest-session-cut.sh` | Stopフック本体、入力・設定・状態・提案 | 新規 |
 | `scripts/lib/suggest-session-cut-usage.awk` | JSONLのusage抽出、message.id等の重複排除、合計 | 新規 |
 | `scripts/lib/suggest-session-cut-config.awk` | 設定JSONの安全な数値フィールド抽出 | 新規 |
+| `scripts/lib/suggest-session-cut-json.awk` | Stop payload全体のJSON検証 | 新規 |
 | `scripts/lib/paths.sh` | suggest-session-cut状態相対パスの単一情報源 | 変更 |
 | `test/test-suggest-session-cut.sh` | 閾値、入力、状態、ローテーション、掃除、worktree/non-git fixture | 新規 |
 | `test/test-suggest-session-cut-docs.sh` | README/SKILL/spec/installer導線の一致検査 | 新規 |

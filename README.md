@@ -140,7 +140,8 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 段階4の calibrate で実測に合わせる。
 
 導入先ごとの設定は `.claude/token-saver.json` に置き、設定 JSON の親キーは `suggest_session_cut` とする。
-次の値は正の整数で、`log_backups` だけは `0` を許す。
+次の値は正の整数で、`log_backups` だけは `0` を許す。`log_backups` は 0 以上 1000 以下に制限し、
+上限を超えた値は既定値へ戻す。
 
 ```json
 {
@@ -169,6 +170,8 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 `.git/` 配下には書き込まない。linked worktree でも worktree root を使い、状態ディレクトリ、
 cache、marker、ログとログ世代に symlink があれば fail-closed にする。状態更新は lock 内で行い、
 cache と marker は同じディレクトリの一時ファイルから rename する。rename に失敗した場合は旧状態を保持する。
+検査済みの状態ディレクトリへ `cd -P` してから相対パスで操作し、差し替え後も外部へ追随しない。
+lock には owner PID を記録し、ライブPIDは尊重し、10分以上古い無効lockだけを回収する。
 ログのローテーションは実在する数値世代だけを列挙するため、`log_backups` が大きくても設定値全体を走査しない。
 
 Stop payload と設定ファイルは末尾まで完全な JSON として検証してから値を読む。
