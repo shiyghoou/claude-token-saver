@@ -11,6 +11,7 @@ import tempfile
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB_DIR = os.path.join(REPO_ROOT, "lib")
 ENGINE_PATH = os.path.join(REPO_ROOT, "scripts", "measure-token-usage.py")
+APPLY_PATH = os.path.join(REPO_ROOT, "scripts", "apply-token-calibration.py")
 
 
 def fail(message):
@@ -88,6 +89,13 @@ def check_engine_syntax():
     forbidden = (".fromisoformat(", ".isascii(")
     for marker in forbidden:
         check(marker not in source, "Python 3.6非対応APIがengineに残っている: %s" % marker)
+
+
+def check_apply_syntax():
+    with open(APPLY_PATH, encoding="utf-8") as stream:
+        source = stream.read()
+    compile(source, APPLY_PATH, "exec")
+    check(".fromisoformat(" not in source, "Python 3.6非対応APIがupdaterに残っている")
 
 
 def check_calibration_cli(temp_root):
@@ -214,6 +222,9 @@ def check_ledger(temp_root):
     run_command([sys.executable, script, "set-value", ledger, "token_report_source", "/src/report"])
     value = run_command([sys.executable, script, "get-value", ledger, "token_report_source"])
     check(value.stdout.strip() == "/src/report", "valueの読み出し結果が不正")
+    run_command([sys.executable, script, "set-value", ledger, "token_calibrate_source", "/src/calibrate"])
+    value = run_command([sys.executable, script, "get-value", ledger, "token_calibrate_source"])
+    check(value.stdout.strip() == "/src/calibrate", "token-calibrate valueの読み出し結果が不正")
     run_command([sys.executable, script, "set-flag", ledger, "gitignore_created", "1"])
     flag = run_command([sys.executable, script, "get-flag", ledger, "gitignore_created"])
     check(flag.stdout.strip() == "1", "flagの読み出し結果が不正")
@@ -295,6 +306,7 @@ def main():
     lib_bytecode_before = bytecode_paths(LIB_DIR)
     lib_count = check_lib_syntax()
     check_engine_syntax()
+    check_apply_syntax()
     with tempfile.TemporaryDirectory() as temp_root:
         check_calibration_cli(temp_root)
         check_ledger(temp_root)
@@ -304,7 +316,7 @@ def main():
     # settings-hooks.py と gitignore-block.py は ledger.py を import する。
     # 実行前からあるbytecodeは利用者の状態であり、実行中に新規作成したものだけ拒否する。
     assert_no_new_bytecode(LIB_DIR, lib_bytecode_before)
-    print("Python互換性スモーク: engineとlib %d本のcompile、CLI 3系統を検証" % lib_count)
+    print("Python互換性スモーク: engine/updaterとlib %d本のcompile、CLI 4系統を検証" % lib_count)
     return 0
 
 

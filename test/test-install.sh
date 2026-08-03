@@ -24,6 +24,43 @@ _run_install_args() {
   INSTALL_ERR="$(cat "$TEST_TMP/.err")"
 }
 
+_write_calibration_fixture() {
+  CALIBRATION_CONFIG="$TARGET/.claude/token-saver.json"
+  CALIBRATION_LATEST="$TARGET/.token-saver/calibration/latest.json"
+  mkdir -p "$TARGET/.claude" "$TARGET/.token-saver/calibration"
+  python3 - "$CALIBRATION_CONFIG" "$CALIBRATION_LATEST" <<'PYEOF'
+import json
+import sys
+
+config_path, snapshot_path = sys.argv[1:]
+config = {
+    "suggest_session_cut": {
+        "initial_cache_read": 30000000,
+        "increment_cache_read": 30000000,
+    },
+}
+snapshot = {
+    "eligible": True,
+    "period": "全期間",
+    "min_sessions": 5,
+    "min_assistant_turns": 100,
+    "session_count": 5,
+    "assistant_turns": 100,
+    "baseline_cache_read": 18000000,
+    "current_initial": 30000000,
+    "current_increment": 30000000,
+    "recommended_levels": [18000000, 36000000, 54000000],
+    "fingerprint": "b" * 64,
+    "source": "メインセッションの重複排除後 cache_read 中央値",
+    "generated_at": "2026-08-04T00:00:00.000000Z",
+}
+for path, data in ((config_path, config), (snapshot_path, snapshot)):
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+PYEOF
+}
+
 # settings.local.json から指定フックのコマンド一覧を HOOK_COMMANDS へ読み込む。
 # 「登録が消えた」と「ファイルが読めなかった」を取り違えないため、
 # 不在は明示的な文言を返し、解析できないときはテストを失敗させる。
@@ -1372,6 +1409,56 @@ PYEOF
   assert_eq "$before_source_reports" "$after_source_reports" "helper clone側のレポート一覧"
   assert_eq "$before_source_status" "$after_source_status" "helper clone側のworktree状態"
   assert_count 1 "$(cat "$TEST_TMP/report.out")" "書き出しました:" "成功メッセージ"
+}
+
+test_token_calibrate_sourceを台帳へ保存する() {
+  _setup_target
+  mkdir -p "$TARGET/.token-saver"
+  ledger="$TARGET/.token-saver/installed.json"
+  rc=0
+  python3 "$REPO_ROOT/lib/ledger.py" set-value "$ledger" token_calibrate_source \
+    "$REPO_ROOT/scripts/token-calibrate.sh" >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "token_calibrate_source保存"
+  value="$(python3 "$REPO_ROOT/lib/ledger.py" get-value "$ledger" token_calibrate_source)"
+  assert_eq "$REPO_ROOT/scripts/token-calibrate.sh" "$value" "token_calibrate_source読出し"
+}
+
+test_token_calibrateの導入先entrypointが対象repoへ適用する() {
+  _setup_target
+  _write_calibration_fixture
+  _run_install
+  entrypoint="$TARGET/.token-saver/token-calibrate.sh"
+  assert_eq "0" "$INSTALL_STATUS" "token-calibrate install終了コード"
+  assert_file_exists "$entrypoint" "token-calibrate導入先entrypoint"
+  [ -x "$entrypoint" ] || _fail "token-calibrate entrypointに実行権限がない"
+  ledger_text="$(cat "$TARGET/.token-saver/installed.json")"
+  assert_contains "$ledger_text" 'token_calibrate_source' "token-calibrate台帳キー"
+  assert_contains "$ledger_text" "$REPO_ROOT/scripts/token-calibrate.sh" "token-calibrate台帳source"
+  (
+    cd "$TEST_TMP" &&
+    bash "$entrypoint" --apply
+  ) >"$TEST_TMP/calibrate-install.out" 2>"$TEST_TMP/calibrate-install.err"
+  apply_status=$?
+  applied_initial="$(python3 - "$CALIBRATION_CONFIG" <<'PYEOF'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle)["suggest_session_cut"]["initial_cache_read"])
+PYEOF
+)"
+  assert_eq "0" "$apply_status" "導入済みtoken-calibrate実行"
+  assert_eq "18000000" "$applied_initial" "導入済みentrypointの対象root"
+}
+
+test_token_calibrateの既存entrypointを差し替えない() {
+  _setup_target
+  mkdir -p "$TARGET/.token-saver"
+  entrypoint="$TARGET/.token-saver/token-calibrate.sh"
+  printf '#!/usr/bin/env bash\nprintf "利用者のentrypoint\\n"\n' >"$entrypoint"
+  _run_install
+  assert_file_exists "$entrypoint" "既存token-calibrate entrypoint"
+  assert_contains "$(cat "$entrypoint")" "利用者のentrypoint" "既存entrypoint内容"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "token-calibrate" "既存entrypoint警告"
 }
 
 test_混在改行の_gitignoreは往復で変更しない() {
