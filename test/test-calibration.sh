@@ -260,7 +260,18 @@ test_calibrateはtoken_saver_configを書き換えずsnapshotを保存する() {
   [ -s "$snapshot" ] || _fail "snapshot が空である"
   snapshot_json="$(cat "$snapshot")"
   assert_contains "$snapshot_json" '"eligible": true' "snapshot判定"
+  assert_contains "$snapshot_json" '"period": "全期間"' "snapshot対象期間"
+  assert_contains "$snapshot_json" '"generated_at":' "snapshot算出日時"
+  assert_contains "$snapshot_json" '"min_sessions": 5' "snapshot必要session数"
+  assert_contains "$snapshot_json" '"min_assistant_turns": 100' "snapshot必要turn数"
+  assert_contains "$snapshot_json" '"session_count": 5' "snapshotsession数"
+  assert_contains "$snapshot_json" '"assistant_turns": 100' "snapshotturn数"
   assert_contains "$snapshot_json" '"baseline_cache_read"' "snapshot推奨値"
+  assert_contains "$snapshot_json" '"current_initial": 111' "snapshot現在initial"
+  assert_contains "$snapshot_json" '"current_increment": 222' "snapshot現在increment"
+  assert_contains "$snapshot_json" '"recommended_levels": [200, 400, 600]' "snapshot推奨段階"
+  assert_contains "$snapshot_json" '"source":' "snapshot算出元"
+  assert_contains "$snapshot_json" '"fingerprint":' "snapshot識別情報"
   assert_not_contains "$snapshot_json" "$FIXTURE_REPO" "snapshotのrepo実パス"
 }
 

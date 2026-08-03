@@ -85,6 +85,9 @@ def check_engine_syntax():
     with open(ENGINE_PATH, encoding="utf-8") as stream:
         source = stream.read()
     compile(source, ENGINE_PATH, "exec")
+    forbidden = (".fromisoformat(", ".isascii(")
+    for marker in forbidden:
+        check(marker not in source, "Python 3.6非対応APIがengineに残っている: %s" % marker)
 
 
 def check_ledger(temp_root):
