@@ -61,6 +61,21 @@ def main():
             print(f"cannot write report: {exc}", file=sys.stderr)
             return 1
 
+    if "--calibrate" in argv and mode != "touchless":
+        snapshot_mode = os.environ.get("CTS_SNAPSHOT_MODE", "regular")
+        snapshot_dir = os.path.join(os.getcwd(), ".token-saver", "calibration")
+        snapshot_path = os.path.join(snapshot_dir, "latest.json")
+        if snapshot_mode != "missing":
+            os.makedirs(snapshot_dir, exist_ok=True)
+            if snapshot_mode == "symlink":
+                payload = os.path.join(snapshot_dir, "payload.json")
+                with open(payload, "w", encoding="utf-8") as handle:
+                    handle.write('{"fixture": true}')
+                os.symlink(payload, snapshot_path)
+            else:
+                with open(snapshot_path, "w", encoding="utf-8") as handle:
+                    handle.write("" if snapshot_mode == "empty" else '{"fixture": true}')
+
     exit_code = int(os.environ.get("CTS_ENGINE_EXIT", "0"))
     return exit_code
 
@@ -182,6 +197,46 @@ test_daysとall_projectsとpathsをengineへ渡す() {
 /tmp/cts-token-report-output." "既定 out 引数"
   assert_not_contains "$args" "$FIXTURE_REPO/.token-saver/token-reports/20260801-123456.md" \
     "既定 out は最終配置前の一時ファイル"
+}
+
+test_calibrateを渡し今回生成のsnapshotを検査する() {
+  _fixture
+  _run_launcher --calibrate >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  args="$(cat "$FIXTURE_LOG")"
+  snapshot="$FIXTURE_REPO/.token-saver/calibration/latest.json"
+  assert_eq "0" "$status" "calibrate の終了コード"
+  assert_contains "$args" "--calibrate" "calibrate 引数"
+  [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || _fail "calibrate snapshot が通常ファイルでない"
+  [ -s "$snapshot" ] || _fail "calibrate snapshot が空である"
+}
+
+test_calibrateでsnapshotが未生成なら既定レポートを残さず失敗する() {
+  _fixture
+  CTS_SNAPSHOT_MODE=missing _run_launcher --calibrate >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  assert_ne "0" "$status" "snapshot未生成の終了コード"
+  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "snapshot未生成時のレポート"
+}
+
+test_calibrateでsymlink_snapshotを拒否する() {
+  _fixture
+  CTS_SNAPSHOT_MODE=symlink _run_launcher --calibrate >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  assert_ne "0" "$status" "symlink snapshot の終了コード"
+  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "symlink snapshot時のレポート"
+}
+
+test_calibrateで前回snapshotだけなら既定レポートを残さず失敗する() {
+  _fixture
+  snapshot_dir="$FIXTURE_REPO/.token-saver/calibration"
+  mkdir -p "$snapshot_dir"
+  printf '{"fixture": "stale"}' >"$snapshot_dir/latest.json"
+  touch -t 200001010000 "$snapshot_dir/latest.json"
+  CTS_SNAPSHOT_MODE=missing _run_launcher --calibrate >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  assert_ne "0" "$status" "stale snapshot の終了コード"
+  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "stale snapshot時のレポート"
 }
 
 test_計測器が非ゼロならlauncherも非ゼロにする() {

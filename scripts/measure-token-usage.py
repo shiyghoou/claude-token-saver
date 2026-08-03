@@ -7,11 +7,13 @@ environment variables, or other secret-bearing content into the output.
 """
 
 import argparse
+import hashlib
 import html
 import json
 import os
 import re
 import sys
+import tempfile
 import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -36,6 +38,14 @@ FALLBACK_WARNING = (
     "警告: 現在のリポジトリに対応する記録を特定できないため、"
     "利用可能な全プロジェクトを集計した。"
 )
+CALIBRATION_DEFAULTS = {
+    "min_sessions": 5,
+    "min_assistant_turns": 100,
+}
+CALIBRATION_MAX = 1000000
+DEFAULT_SESSION_CUT = 30000000
+CALIBRATION_SOURCE = "メインセッションの重複排除後 cache_read 中央値"
+TOKEN_SAVER_DIRNAME = ".token" + "-saver"
 
 
 def fmt(value):
@@ -48,6 +58,155 @@ def read_json(path):
             return json.load(handle)
     except (OSError, ValueError):
         return None
+
+
+def read_token_saver_config(config_path):
+    if os.path.islink(config_path) or os.path.islink(os.path.dirname(config_path)):
+        return None
+    data = read_json(config_path)
+    return data if isinstance(data, dict) else None
+
+
+def calibration_positive_int(value, default):
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= CALIBRATION_MAX
+    ):
+        return value
+    return default
+
+
+def load_calibration_settings(config_path):
+    settings = dict(CALIBRATION_DEFAULTS)
+    data = read_token_saver_config(config_path)
+    if not data:
+        return settings
+    calibration = data.get("calibration")
+    if not isinstance(calibration, dict):
+        return settings
+    for key, default in CALIBRATION_DEFAULTS.items():
+        settings[key] = calibration_positive_int(calibration.get(key), default)
+    return settings
+
+
+def load_session_cut_settings(config_path):
+    data = read_token_saver_config(config_path)
+    values = {
+        "initial_cache_read": DEFAULT_SESSION_CUT,
+        "increment_cache_read": DEFAULT_SESSION_CUT,
+    }
+    if not data:
+        return values
+    session_cut = data.get("suggest_session_cut")
+    if not isinstance(session_cut, dict):
+        return values
+    for key, default in values.items():
+        value = session_cut.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            values[key] = value
+        else:
+            values[key] = default
+    return values
+
+
+def calibration_fingerprint(args, since, settings, main_paths, sub_paths):
+    digest = hashlib.sha256()
+    period = "all" if since is None else "days:{}".format(args.days)
+    for value in (
+        period,
+        "min_sessions:{}".format(settings["min_sessions"]),
+        "min_assistant_turns:{}".format(settings["min_assistant_turns"]),
+    ):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\0")
+    for path in sorted(main_paths + sub_paths):
+        try:
+            metadata = os.stat(path)
+        except OSError:
+            continue
+        digest.update(path.encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+        digest.update(str(metadata.st_size).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(int(metadata.st_mtime * 1000000000)).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def build_calibration(scan, args, since, main_paths, sub_paths):
+    config_path = project_path(".claude", "token-saver.json")
+    settings = load_calibration_settings(config_path)
+    current = load_session_cut_settings(config_path)
+    values = [stats.cache_read for stats in scan.session_stats.values()]
+    baseline = median_integer(values)
+    session_count = len(scan.session_stats)
+    assistant_turns = sum(stats.assistant_turns for stats in scan.session_stats.values())
+    eligible = (
+        session_count >= settings["min_sessions"]
+        and assistant_turns >= settings["min_assistant_turns"]
+        and baseline is not None
+        and baseline > 0
+    )
+    period = "全期間" if since is None else "直近 {} 日".format(args.days)
+    return {
+        "eligible": eligible,
+        "period": period,
+        "min_sessions": settings["min_sessions"],
+        "min_assistant_turns": settings["min_assistant_turns"],
+        "session_count": session_count,
+        "assistant_turns": assistant_turns,
+        "baseline_cache_read": baseline,
+        "current_initial": current["initial_cache_read"],
+        "current_increment": current["increment_cache_read"],
+        "recommended_levels": [baseline, baseline * 2, baseline * 3] if eligible else [],
+        "fingerprint": calibration_fingerprint(
+            args, since, settings, main_paths, sub_paths
+        ),
+        "source": CALIBRATION_SOURCE,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def write_calibration_snapshot(snapshot):
+    state_root = project_path(TOKEN_SAVER_DIRNAME)
+    calibration_dir = os.path.join(state_root, "calibration")
+    for directory in (state_root, calibration_dir):
+        if os.path.lexists(directory):
+            if os.path.islink(directory) or not os.path.isdir(directory):
+                return False
+        else:
+            try:
+                os.mkdir(directory)
+            except OSError:
+                return False
+
+    target = os.path.join(calibration_dir, "latest.json")
+    if os.path.lexists(target) and os.path.islink(target):
+        return False
+    temp_path = None
+    try:
+        descriptor, temp_path = tempfile.mkstemp(
+            prefix=".latest.", suffix=".tmp", dir=calibration_dir
+        )
+        if os.path.islink(temp_path):
+            return False
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(snapshot, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, target)
+        temp_path = None
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 def parse_ts(value):
@@ -653,7 +812,7 @@ def top_rows(rows, limit):
     return rows[:limit]
 
 
-def build_report(args, scan, project_dirs, since):
+def build_report(args, scan, project_dirs, since, calibration=None):
     lines = []
     add = lines.append
     window = f"直近 {args.days} 日" if since else "全期間"
@@ -789,6 +948,52 @@ def build_report(args, scan, project_dirs, since):
             )
         )
 
+    if calibration is not None:
+        add("## キャリブレーション")
+        add("")
+        add("- 対象期間: {}".format(calibration["period"]))
+        add(
+            "- 判定条件: セッション {} 件以上 / assistant ターン {} 件以上".format(
+                calibration["min_sessions"], calibration["min_assistant_turns"]
+            )
+        )
+        add(
+            "- 観測値: セッション {} 件 / assistant ターン {} 件".format(
+                calibration["session_count"], calibration["assistant_turns"]
+            )
+        )
+        if calibration["eligible"]:
+            baseline, level_two, level_three = calibration["recommended_levels"]
+            add("- 判定: **算出可能**")
+            add("- 算出日: {}".format(calibration["generated_at"]))
+            add("- 算出元: {}".format(calibration["source"]))
+            add("- 推奨段階1単位: **{}** cache_read".format(fmt(baseline)))
+            add("- 推奨段階2: {} cache_read".format(fmt(level_two)))
+            add("- 推奨段階3: {} cache_read".format(fmt(level_three)))
+            add(
+                "- 現在値: initial {} / increment {} cache_read".format(
+                    fmt(calibration["current_initial"]),
+                    fmt(calibration["current_increment"]),
+                )
+            )
+        else:
+            add("- 判定: **サンプル不足**")
+            if calibration["session_count"] < calibration["min_sessions"]:
+                add(
+                    "- 不足: セッション数 {} 件（必要 {} 件）".format(
+                        calibration["session_count"], calibration["min_sessions"]
+                    )
+                )
+            if calibration["assistant_turns"] < calibration["min_assistant_turns"]:
+                add(
+                    "- 不足: assistant ターン {} 件（必要 {} 件）".format(
+                        calibration["assistant_turns"], calibration["min_assistant_turns"]
+                    )
+                )
+            if calibration["baseline_cache_read"] is None:
+                add("- 有効な正の cache_read サンプルがないため、推奨値は算出しない。")
+        add("")
+
     add("## 共有時の境界")
     add("")
     add("- 含める: 集計値、モデル名、subagent_type、MCP サーバ名、repo 内の相対パス。")
@@ -855,6 +1060,9 @@ def main():
         help="全プロジェクトを対象にする（既定は cwd の project key のみ）",
     )
     parser.add_argument("--paths", action="store_true", help="Read パスの要約も出す")
+    parser.add_argument(
+        "--calibrate", action="store_true", help="読み取り専用でキャリブレーションを算出する"
+    )
     args = parser.parse_args()
 
     if args.days < 0:
@@ -878,7 +1086,13 @@ def main():
     scan.fell_back = fell_back
     if fell_back:
         print(FALLBACK_WARNING, file=sys.stderr)
-    report = build_report(args, scan, [PROJECT_ROOT], since)
+    calibration = None
+    if args.calibrate:
+        calibration = build_calibration(scan, args, since, main_paths, sub_paths)
+        if not write_calibration_snapshot(calibration):
+            print("キャリブレーション snapshot の保存に失敗しました", file=sys.stderr)
+            return 1
+    report = build_report(args, scan, [PROJECT_ROOT], since, calibration)
 
     if args.out:
         try:

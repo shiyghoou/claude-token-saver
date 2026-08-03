@@ -49,6 +49,8 @@ default_output=0
 placement_tmp=""
 report_dir=""
 report_dir_created=0
+calibrate_requested=0
+snapshot_path=""
 
 cleanup() {
   rm -f "$marker"
@@ -71,6 +73,9 @@ for arg in "$@"; do
     continue
   fi
   case "$arg" in
+    --calibrate)
+      calibrate_requested=1
+      ;;
     --out)
       explicit_out=1
       expect_out_value=1
@@ -112,6 +117,23 @@ fi
 status=$?
 if [ "$status" -ne 0 ]; then
   exit "$status"
+fi
+
+if [ "$calibrate_requested" -eq 1 ]; then
+  snapshot_root="$REPO_ROOT/$(cts_base_rel)"
+  snapshot_dir="$snapshot_root/calibration"
+  snapshot_path="$snapshot_dir/latest.json"
+  if [ -L "$snapshot_root" ] || [ -L "$snapshot_dir" ] || [ -L "$snapshot_path" ] || \
+    [ ! -f "$snapshot_path" ] || [ ! -s "$snapshot_path" ]; then
+    printf 'キャリブレーション snapshot が通常の非空ファイルではありません: %s\n' \
+      "$snapshot_path" >&2
+    exit 1
+  fi
+  if [ ! "$snapshot_path" -nt "$marker" ]; then
+    printf 'キャリブレーション snapshot がこの実行で更新されていません: %s\n' \
+      "$snapshot_path" >&2
+    exit 1
+  fi
 fi
 
 if [ -z "$report_path" ]; then
