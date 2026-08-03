@@ -239,6 +239,18 @@ test_calibrateで前回snapshotだけなら既定レポートを残さず失敗�
   assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "stale snapshot時のレポート"
 }
 
+test_calibrateで未来mtimeの既存snapshotを再利用しない() {
+  _fixture
+  snapshot_dir="$FIXTURE_REPO/.token-saver/calibration"
+  mkdir -p "$snapshot_dir"
+  printf '{"fixture": "future-stale"}' >"$snapshot_dir/latest.json"
+  touch -t 299912312359 "$snapshot_dir/latest.json"
+  CTS_SNAPSHOT_MODE=missing _run_launcher --calibrate >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  assert_ne "0" "$status" "未来mtime snapshotの終了コード"
+  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "未来mtime snapshot時のレポート"
+}
+
 test_計測器が非ゼロならlauncherも非ゼロにする() {
   _fixture
   CTS_ENGINE_MODE=touchless CTS_ENGINE_EXIT=17 \

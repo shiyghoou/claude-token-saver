@@ -10,6 +10,7 @@ import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB_DIR = os.path.join(REPO_ROOT, "lib")
+ENGINE_PATH = os.path.join(REPO_ROOT, "scripts", "measure-token-usage.py")
 
 
 def fail(message):
@@ -78,6 +79,12 @@ def check_lib_syntax():
             source = stream.read()
         compile(source, path, "exec")
     return len(names)
+
+
+def check_engine_syntax():
+    with open(ENGINE_PATH, encoding="utf-8") as stream:
+        source = stream.read()
+    compile(source, ENGINE_PATH, "exec")
 
 
 def check_ledger(temp_root):
@@ -170,6 +177,7 @@ def check_gitignore(temp_root):
 def main():
     lib_bytecode_before = bytecode_paths(LIB_DIR)
     lib_count = check_lib_syntax()
+    check_engine_syntax()
     with tempfile.TemporaryDirectory() as temp_root:
         check_ledger(temp_root)
         check_settings_hooks(temp_root)
@@ -178,7 +186,7 @@ def main():
     # settings-hooks.py と gitignore-block.py は ledger.py を import する。
     # 実行前からあるbytecodeは利用者の状態であり、実行中に新規作成したものだけ拒否する。
     assert_no_new_bytecode(LIB_DIR, lib_bytecode_before)
-    print("Python互換性スモーク: lib %d本のcompileとCLI 3系統を検証" % lib_count)
+    print("Python互換性スモーク: engineとlib %d本のcompile、CLI 3系統を検証" % lib_count)
     return 0
 
 

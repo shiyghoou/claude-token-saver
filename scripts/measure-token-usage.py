@@ -212,9 +212,26 @@ def write_calibration_snapshot(snapshot):
 def parse_ts(value):
     if not isinstance(value, str) or not value:
         return None
-    try:
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+0000"
+    elif len(text) >= 6 and text[-6] in ("+", "-") and text[-3] == ":":
+        text = text[:-3] + text[-2:]
+    formats = (
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+    )
+    stamp = None
+    for date_format in formats:
+        try:
+            stamp = datetime.strptime(text, date_format)
+            break
+        except ValueError:
+            continue
+    if stamp is None:
         return None
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
@@ -252,7 +269,7 @@ def _to_base36(value):
 def project_key(path):
     units = _utf16_units(path)
     sanitized = "".join(
-        unit if unit.isascii() and unit.isalnum() else "-"
+        unit if ord(unit) < 128 and unit.isalnum() else "-"
         for unit in units
     )
     if len(sanitized) <= 200:
