@@ -4,7 +4,7 @@
 
 **Goal:** Issue #23の段階3として、累積`cache_read`が閾値へ到達したときだけセッション切りを提案する、汎用的で失敗時にセッション終了を妨げないStopフックを導入する。
 
-**Architecture:** `scripts/suggest-session-cut.sh`がStopフックの入力・対象root・設定・状態を扱い、`scripts/lib/suggest-session-cut-usage.awk`がトランスクリプトJSONLを読み取り、assistant usageの重複を除いて`cache_read_input_tokens`を合計する。状態は導入先の`.token-saver/suggest-session-cut/`に置き、セッション別cache/markerを原子的に更新し、期限切れ状態を掃除する。既存の`install.sh`の「実体のあるStopフックだけ登録」経路を段階3の成果物として有効化する。
+**Architecture:** `scripts/suggest-session-cut.sh`がStopフックの入力・対象root・設定・状態を扱い、`scripts/lib/suggest-session-cut-usage.awk`がトランスクリプトJSONLを読み取り、assistant usageの重複を除いて`cache_read_input_tokens`を合計する。状態は導入先の`.token-saver/session-cut/`に置き、セッション別cache/markerを原子的に更新し、期限切れ状態を掃除する。既存の`install.sh`の「実体のあるStopフックだけ登録」経路を段階3の成果物として有効化する。
 
 **Tech Stack:** Bash 3.2互換シェル、POSIX awk、既存の`test/run.sh`、ShellCheck。
 
@@ -81,7 +81,7 @@
 
 - [ ] **Step 3: Bash 3.2互換の実装を追加する**
 
-  JSONLはawkの字句解析でキーと数値を認識し、JSON文字列中の似た文字列を拾わない。assistant messageの`message.id`を第一キー、id無しは`requestId`・timestamp・usage値の代替キーとして重複排除する。Stopフックは入力を読み切れない場合もfail-closedとし、本体をサブシェルで実行して親から無条件にrc=0を返す。
+  JSONLはawkの字句解析でキーと数値を認識し、JSON文字列中の似た文字列を拾わない。assistant messageの`message.id`を第一キー、id無しは`requestId`・usage値の代替キーとして重複排除する。Stopフックは入力を読み切れない場合もfail-closedとし、本体をサブシェルで実行して親から無条件にrc=0を返す。
 
   設定値を検証後、累積値と境界番号を比較する。提案前にcacheとmarkerを同一ディレクトリ内の一時ファイルへ書いてrenameし、ログは上限を超える前に世代交代する。期限切れのcache/marker/tempを限定された状態ディレクトリから除去する。
 

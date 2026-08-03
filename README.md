@@ -15,7 +15,7 @@ Claude Code のトークン消費を減らすヘルパー。任意のリポジ�
 | --- | --- |
 | 引き継ぎ（session-handoff） | **実装済み** |
 | 計測（token-report） | **実装済み** |
-| セッション切り提案（suggest-session-cut） | 未実装（段階3） |
+| セッション切り提案（suggest-session-cut） | **実装済み** |
 | キャリブレーションと診断（calibrate） | 未実装（段階4） |
 | 委譲判断ガイド（delegation-policy） | 未実装（段階5） |
 
@@ -37,6 +37,7 @@ cd <導入したいリポジトリ>
 2. `skills/` 配下を `.claude/skills/<name>` へシンボリックリンクする
 3. `.claude/settings.local.json` の `SessionStart` に `handoff-check.sh` を
    `matcher: "startup|clear"` 付きで登録する。
+   `Stop` には `suggest-session-cut.sh` を登録する。実体のあるフックだけを登録し、
    既存のユーザー独自フックは壊さない。既存の設定を初めて書き換える場合は、
    `.cts-backup` がまだ無ければ書き換え前の内容を退避する（新規作成時は対象なし）
 4. `.gitignore` の `# claude-token-saver` ブロックを（再）生成する。中身は `.token-saver/`、
@@ -65,6 +66,7 @@ cd <導入したいリポジトリ>
       consumed/          ← 消費済みの引き継ぎ（記録として残る）
     token-report.sh      ← 導入先を計測 root に固定する entrypoint
     token-reports/       ← 計測レポート（初回の計測成功時に作る）
+    session-cut/         ← Stop フックの状態（cache / marker / events.log）
     installed.json       ← 何を設置したかの台帳
   .claude/
     settings.local.json  ← フックの登録先。Claude Code がパスを決めるため動かせない
@@ -126,6 +128,47 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 
 `--guess` は台帳の無い旧環境を推測する個人側のオプションであり、`--shared --guess` は拒否される。
 
+## セッション切り提案（suggest-session-cut）
+
+`install.sh` は Claude Code の `Stop` フックへ `suggest-session-cut.sh` を登録する。
+フックはトランスクリプトの assistant message にある
+`message.usage.cache_read_input_tokens` をセッション単位で累積し、境界に初めて到達したときだけ
+固定の提案を出す。同じ message や同じ Stop の再実行は重複して数えない。
+
+既定値は移植元の実測由来である。初回は `30,000,000`、以後は `30,000,000` ずつ増える。
+これは特定の移植元の条件に基づく参考値であり、他プロジェクトへ自動適合する保証はない。
+段階4の calibrate で実測に合わせる。
+
+導入先ごとの設定は `.claude/token-saver.json` に置く。次の値は正の整数で、`log_backups` だけは `0` を許す。
+
+```json
+{
+  "suggest_session_cut": {
+    "initial_cache_read": 30000000,
+    "increment_cache_read": 30000000,
+    "retention_days": 7,
+    "log_max_bytes": 1048576,
+    "log_backups": 5
+  }
+}
+```
+
+設定ファイルより優先する環境変数は次のとおりである。
+
+- `CTS_SESSION_CUT_INITIAL_CACHE_READ`
+- `CTS_SESSION_CUT_INCREMENT_CACHE_READ`
+- `CTS_SESSION_CUT_RETENTION_DAYS`
+- `CTS_SESSION_CUT_LOG_MAX_BYTES`
+- `CTS_SESSION_CUT_LOG_BACKUPS`
+
+状態は導入先の `.token-saver/session-cut/` に置く。セッション別の `.cache` と `.marker`、
+発火記録の `events.log` を持ち、ログはローテーションし、期限切れの状態と一時ファイルを掃除する。
+`.git/` 配下には書き込まない。
+
+入力や設定を読めない、JSONL が壊れている、状態を書き込めないなどのときは fail-closed で無出力とし、
+標準エラーにも出さず、終了コード `0` で抜ける。`/clear` は自動実行しません。
+提案が出たら、モデルが引き継ぎを書き、ユーザーが手動で新しいセッションへ切り替える。
+
 ## 計測（token-report）
 
 導入後は launcher から回す。
@@ -173,7 +216,7 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 - `cache_read_input_tokens` は課金上の重みが不明なので、内訳のまま扱い、加重しない
 - 画像の消費は現在の計測エンジンでは未計測である
 - MCP サーバごとのトークン消費は実測できない。分かるのは設定済みか、呼ばれたか、何回かまでである
-- Stop フックによる切り時提案と calibrate は未実装で、このコマンドが設定を書き換える段階ではない
+- Stop フックによる切り時提案は実装済み。calibrate は未実装で、このコマンドが設定を書き換える段階ではない
 - 詳しい使い方は [`skills/token-report/SKILL.md`](skills/token-report/SKILL.md)
 
 ### 台帳に記録が無いときは何もしない（fail-closed）
@@ -241,7 +284,7 @@ Python 3.6.15、3.8.20、3.12.3 で `python -B test/python-compatibility.py` の
 バージョンに限るもので、Python 3.6 未満や未検証の将来版を保証しない。
 
 全体テストは実行環境 Python 3.12.3 で `CTS_NO_SKIP=1 bash test/run.sh` を実行し、
-成功 415 件 / 失敗 0 件 / スキップ 0 件、総 415 件・ファイル別 11 件分の実行件数下限を満たし、
+成功 435 件 / 失敗 0 件 / スキップ 0 件、総 435 件・ファイル別 13 件分の実行件数下限を満たし、
 終了コード 0 だった。これは互換性スモークとは別の全体テスト結果である。
 `python-compatibility` job は matrix の Python 3.6.15 / 3.8.20 で実行し、
 Docker イメージの取得・起動・スモークのいずれかが非 0 なら、その失敗を握り潰さず CI の失敗へ伝播させる。

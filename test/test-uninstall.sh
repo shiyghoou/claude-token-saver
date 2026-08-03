@@ -96,6 +96,15 @@ test_フックの登録を外す() {
   assert_not_contains "$HOOK_COMMANDS" "handoff-check.sh" "SessionStart のコマンド"
 }
 
+test_Stopフックの登録を外す() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  _load_hook_commands Stop
+  assert_not_contains "$HOOK_COMMANDS" "suggest-session-cut.sh" "Stop のコマンド"
+}
+
 test_導入先の他のフックは残す() {
   _setup_target
   mkdir -p "$TARGET/.claude"
@@ -111,6 +120,43 @@ EOF
   _run_install
   _run_uninstall
   assert_contains "$(_hook_commands SessionStart)" "残すべきフック" "SessionStart のコマンド"
+}
+
+test_導入先の他のStopフックは往復後も残す() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  cat >"$SETTINGS" <<'EOF'
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "echo 残すべき Stop フック" } ] }
+    ]
+  }
+}
+EOF
+  _run_install
+  _run_uninstall
+  assert_contains "$(_hook_commands Stop)" "残すべき Stop フック" "Stop のコマンド"
+}
+
+test_install_uninstall_install_でも_Stopフックは1件に戻る() {
+  _setup_target
+  mkdir -p "$TARGET/.claude"
+  cat >"$SETTINGS" <<'EOF'
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "echo 利用者の Stop フック" } ] }
+    ]
+  }
+}
+EOF
+  _run_install
+  _run_uninstall
+  _run_install
+  _load_hook_commands Stop
+  assert_count 1 "$HOOK_COMMANDS" "suggest-session-cut.sh" "再導入後の Stop 登録数"
+  assert_count 1 "$HOOK_COMMANDS" "利用者の Stop フック" "利用者 Stop フックの登録数"
 }
 
 test_導入先の他の設定キーは残す() {

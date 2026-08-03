@@ -414,21 +414,22 @@ test_非_git_ディレクトリでも失敗しない() {
   assert_file_exists "$SETTINGS"
 }
 
-test_存在しないフックスクリプトは登録しない() {
+test_Stopフックを登録する() {
   _setup_target
   _run_install
-  # 段階3で追加される Stop フックは、実体が無いうちは登録してはならない。
-  # 実体の無いコマンドを登録すると、導入先のセッションでフックが毎回失敗する。
-  # 実体が現れたら登録されることまで見る。条件付きスキップにすると、
-  # 段階3でファイルが増えた瞬間にテストが丸ごと空振りして恒久的に緑になる。
+  # Task 2 以降は Stop フックの実体が常に存在し、install が登録まで担う。
+  # 「実装済み」と文書に書きながら導入時に登録されない状態を防ぐ。
   _load_hook_commands Stop
-  if [ -f "$REPO_ROOT/scripts/suggest-session-cut.sh" ]; then
-    assert_contains "$HOOK_COMMANDS" "suggest-session-cut.sh" "Stop のコマンド"
-  else
-    assert_not_contains "$HOOK_COMMANDS" "suggest-session-cut.sh" "Stop のコマンド"
-    # 未実装であることは、取りこぼしの警告ではなく予定として伝える。
-    assert_contains "$INSTALL_OUT" "段階3" "出力"
-  fi
+  assert_contains "$HOOK_COMMANDS" "suggest-session-cut.sh" "Stop のコマンド"
+}
+
+test_二度実行しても_Stopフックが重複しない() {
+  _setup_target
+  _run_install
+  _run_install
+  _load_hook_commands Stop
+  assert_eq "0" "$INSTALL_STATUS" "2回目の終了コード"
+  assert_count 1 "$HOOK_COMMANDS" "suggest-session-cut.sh" "Stop の登録数"
 }
 
 test_登録されるコマンドは絶対パスである() {
