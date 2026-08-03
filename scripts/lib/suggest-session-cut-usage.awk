@@ -3,7 +3,7 @@
 # 1行をJSON値として字句解析する。単純な grep でキー名だけを探すと本文や
 # tool input の文字列をusageとして数えてしまうため、message/usage配下という
 # JSONのパスを追跡する。message.idを第一キーにし、id無し行はPython側の
-# token-reportと同じくrequestId・timestamp・usage値の代替キーで重複を抑える。
+# token-reportと同じくrequestId・usage値の代替キーで重複を抑える。
 
 BEGIN {
   total = 0
@@ -102,8 +102,7 @@ function record_scalar(path, kind, value) {
     request_kind = kind
     request_value = value
     has_request = 1
-  } else if (path == "/timestamp" && kind == "string") timestamp_value = value
-  else if (path == "/message/id" && (kind == "string" || kind == "number")) {
+  } else if (path == "/message/id" && (kind == "string" || kind == "number")) {
     if (kind == "string" && value != "") {
       message_id_kind = kind
       message_id_value = value
@@ -202,7 +201,6 @@ function parse_array(path,    array_index, c) {
   message_id_value = ""
   request_kind = ""
   request_value = ""
-  timestamp_value = ""
   input_value = "0"
   creation_value = "0"
   cache_value = "0"
@@ -217,8 +215,8 @@ function parse_array(path,    array_index, c) {
     dedup_key = "id\034" message_id_kind "\034" message_id_value
   } else {
     dedup_key = "fallback\034" (has_request ? request_kind : "none") "\034" \
-      (has_request ? request_value : "") "\034" timestamp_value "\034" \
-      input_value "\034" creation_value "\034" cache_value "\034" output_value
+      (has_request ? request_value : "") "\034" input_value "\034" \
+      creation_value "\034" cache_value "\034" output_value
   }
   if (seen[dedup_key]) next
   seen[dedup_key] = 1

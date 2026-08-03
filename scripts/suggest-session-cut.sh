@@ -112,16 +112,17 @@ _cts_cleanup_state() {
   # state_dir はこのフック自身が作った固定の管理ディレクトリである。
   # findの対象をここから広げない。
   find "$CTS_STATE_DIR" -type f \( \
-    -name '*.cache' -o -name '*.marker' -o -name '*.tmp' -o -name '.*.XXXXXX' \
+    -name '*.cache' -o -name '*.marker' -o -name '*.tmp' -o -name '.suggest-session-cut.*' \
   \) -mtime "+$retention_days" -exec rm -f {} \; 2>/dev/null || true
 }
 
 _cts_rotate_log() {
-  local max_bytes="$1" backups="$2" log="$CTS_LOG" size i next
+  local max_bytes="$1" backups="$2" incoming_bytes="${3:-0}" log="$CTS_LOG" size i next
   [ -f "$log" ] || return 0
   size="$(wc -c <"$log" 2>/dev/null | tr -d '[:space:]')" || return 0
   _cts_valid_integer "$size" || return 0
-  [ "$size" -gt "$max_bytes" ] || return 0
+  _cts_valid_integer "$incoming_bytes" || incoming_bytes=0
+  [ $((size + incoming_bytes)) -gt "$max_bytes" ] || return 0
 
   i="$backups"
   while [ "$i" -gt 0 ]; do
@@ -148,7 +149,7 @@ _cts_main() {
   local initial increment retention_days log_max_bytes log_backups
   local total current_boundary marker_boundary marker_index boundary
   local cache_content marker_content now
-  local payload_source
+  local payload_source log_entry log_entry_bytes
   CTS_TMP_FILE=""
   trap 'if [ -n "${CTS_TMP_FILE:-}" ]; then rm -f "$CTS_TMP_FILE"; fi' EXIT
 
@@ -233,8 +234,10 @@ _cts_main() {
     return 0
   fi
 
-  _cts_rotate_log "$log_max_bytes" "$log_backups"
-  printf '%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unknown) boundary=$boundary" >>"$CTS_LOG" 2>/dev/null || true
+  log_entry="$(printf '%s boundary=%s' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unknown)" "$boundary")"
+  log_entry_bytes="$(printf '%s\n' "$log_entry" | wc -c 2>/dev/null | tr -d '[:space:]')" || log_entry_bytes=0
+  _cts_rotate_log "$log_max_bytes" "$log_backups" "$log_entry_bytes"
+  printf '%s\n' "$log_entry" >>"$CTS_LOG" 2>/dev/null || true
   printf '累積 cache_read が %s に達しました。引き継ぎを書いてから、手動で新しいセッションへ切り替えることを検討してください。/clear は自動実行しません。\n' "$boundary"
   return 0
 }

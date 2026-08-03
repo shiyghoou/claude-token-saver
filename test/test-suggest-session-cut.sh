@@ -146,6 +146,22 @@ EOF
   assert_contains "$cache_text" "total=30000000" "重複排除後の合計"
 }
 
+test_id無しfallbackはtimestamp差だけでは重複集計しない() {
+  _fixture_repo
+  _write_transcript <<'EOF'
+{"type":"assistant","requestId":"req-same","timestamp":"2026-08-03T00:00:00Z","message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":15000000,"output_tokens":3},"content":[]}}
+{"type":"assistant","requestId":"req-same","timestamp":"2026-08-03T00:00:01Z","message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":15000000,"output_tokens":3},"content":[]}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-c-timestamp" "$FIXTURE_TRANSCRIPT")"
+  _run_hook "$payload" "$FIXTURE_ROOT" env
+  assert_eq "0" "$HOOK_RC" "timestamp差分重複排除の終了コード"
+  assert_empty "$HOOK_STDOUT" "timestamp差だけの重複では閾値に届かない"
+  assert_empty "$HOOK_STDERR" "timestamp差分重複排除の stderr"
+  _state_file_text ".cache"
+  cache_text="$CTS_STATE_FILE_TEXT"
+  assert_contains "$cache_text" "total=15000000" "timestampを除いたfallback keyで重複排除する"
+}
+
 test_欠落入力と壊れたJSONと読めないJSONLでは誤発火しない() {
   _fixture_repo
   _write_transcript <<'EOF'
@@ -284,8 +300,11 @@ test_ログローテーションと期限掃除と一時ファイル掃除を行
   printf 'updated_at=1\ntotal=1\n' >"$FIXTURE_STATE_DIR/old.cache"
   printf 'updated_at=1\nboundary=1\n' >"$FIXTURE_STATE_DIR/old.marker"
   printf 'stale\n' >"$FIXTURE_STATE_DIR/.old.cache.1.tmp"
+  stale_atomic_tmp="$(mktemp "$FIXTURE_STATE_DIR/.suggest-session-cut.XXXXXX")"
+  printf 'stale atomic\n' >"$stale_atomic_tmp"
   touch -t 200001010000 "$FIXTURE_STATE_DIR/old.cache" \
-    "$FIXTURE_STATE_DIR/old.marker" "$FIXTURE_STATE_DIR/.old.cache.1.tmp"
+    "$FIXTURE_STATE_DIR/old.marker" "$FIXTURE_STATE_DIR/.old.cache.1.tmp" \
+    "$stale_atomic_tmp"
   printf '0123456789abcdef0123456789abcdef0123456789abcdef' >"$FIXTURE_STATE_DIR/events.log"
   _write_transcript <<'EOF'
 {"type":"assistant","message":{"id":"gc-a","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
@@ -297,9 +316,38 @@ EOF
   assert_file_missing "$FIXTURE_STATE_DIR/old.cache" "古い cache を掃除する"
   assert_file_missing "$FIXTURE_STATE_DIR/old.marker" "古い marker を掃除する"
   assert_file_missing "$FIXTURE_STATE_DIR/.old.cache.1.tmp" "古い tmp を掃除する"
+  assert_file_missing "$stale_atomic_tmp" "古い mktemp 実名を掃除する"
   assert_file_exists "$FIXTURE_STATE_DIR/events.log.1" "ログローテーション"
   tmp_count="$(_count_tmp_files)"
   assert_eq "0" "$tmp_count" "cache 更新後に tmp を残さない"
+}
+
+test_ログ追記で上限を超える場合は追記前にローテーションする() {
+  for case_name in exact_max one_before_max; do
+    FIXTURE_ROOT="$TEST_TMP/rotation $case_name"
+    FIXTURE_TRANSCRIPT="$FIXTURE_ROOT/session.jsonl"
+    FIXTURE_STATE_DIR="$FIXTURE_ROOT/.token-saver/session-cut"
+    mkdir -p "$FIXTURE_STATE_DIR"
+    case "$case_name" in
+      exact_max) seed='0123456789' ;;
+      one_before_max) seed='012345678' ;;
+    esac
+    printf '%s' "$seed" >"$FIXTURE_STATE_DIR/events.log"
+    cat >"$FIXTURE_TRANSCRIPT" <<'EOF'
+{"type":"assistant","message":{"id":"rotate-a","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+    payload="$(_payload "$FIXTURE_ROOT" "session-rotation-$case_name" "$FIXTURE_TRANSCRIPT")"
+    _run_hook "$payload" "$FIXTURE_ROOT" env \
+      CTS_SESSION_CUT_LOG_MAX_BYTES=10 CTS_SESSION_CUT_LOG_BACKUPS=1
+    assert_eq "0" "$HOOK_RC" "追記前ローテーションの終了コード $case_name"
+    assert_contains "$HOOK_STDOUT" "$SUGGEST_SESSION_CUT_MESSAGE" "追記前ローテーションの提案 $case_name"
+    assert_file_exists "$FIXTURE_STATE_DIR/events.log.1" "追記前に既存ログを退避する $case_name"
+    rotated_text="$(cat "$FIXTURE_STATE_DIR/events.log.1")"
+    assert_eq "$seed" "$rotated_text" "退避ログは追記前の内容だけを持つ $case_name"
+    current_log="$(cat "$FIXTURE_STATE_DIR/events.log")"
+    assert_contains "$current_log" "boundary=30000000" "追記は新しいevents.logへ行う $case_name"
+    assert_not_contains "$current_log" "$seed" "追記後ログへ退避前内容を混ぜない $case_name"
+  done
 }
 
 test_状態書き込み失敗時は提案せずclearも他状態も触らない() {
