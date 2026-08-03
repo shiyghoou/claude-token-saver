@@ -190,6 +190,13 @@ EOF
   assert_empty "$HOOK_STDOUT" "壊れた payload では無出力"
   assert_empty "$HOOK_STDERR" "壊れた payload でも stderr 空"
 
+  trailing_broken="$(printf '{"cwd":"%s","session_id":"broken-tail","transcript_path":"%s",BROKEN' \
+    "$FIXTURE_ROOT" "$FIXTURE_TRANSCRIPT")"
+  _run_hook "$trailing_broken" "$FIXTURE_ROOT" env
+  assert_eq "0" "$HOOK_RC" "有効フィールド後に壊れた payload でも rc=0"
+  assert_empty "$HOOK_STDOUT" "payload全体が壊れていれば提案しない"
+  assert_empty "$HOOK_STDERR" "有効フィールド後に壊れた payload でも stderr 空"
+
   payload_missing_file="$(_payload "$FIXTURE_ROOT" "missing-file" "$FIXTURE_ROOT/missing.jsonl")"
   _run_hook "$payload_missing_file" "$FIXTURE_ROOT" env
   assert_eq "0" "$HOOK_RC" "存在しない JSONL でも rc=0"
@@ -336,6 +343,21 @@ EOF
   done
 }
 
+test_末尾が壊れた設定JSONは対象値を採用しない() {
+  _fixture_repo
+  mkdir -p "$FIXTURE_ROOT/.claude"
+  printf '%s\n' '{"suggest_session_cut":{"initial_cache_read":20}}BROKEN' \
+    >"$FIXTURE_ROOT/.claude/token-saver.json"
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"cfg-broken-tail","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":20,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-config-broken-tail" "$FIXTURE_TRANSCRIPT")"
+  _run_hook "$payload" "$FIXTURE_ROOT" env
+  assert_eq "0" "$HOOK_RC" "末尾が壊れた設定JSONの終了コード"
+  assert_empty "$HOOK_STDOUT" "末尾が壊れた設定値20を採用しない"
+  assert_empty "$HOOK_STDERR" "末尾が壊れた設定JSONの stderr"
+}
+
 test_状態パスはgit形状や空白に依らずtoken_saver配下を使う() {
   for kind in no_git git_dir git_file; do
     FIXTURE_ROOT="$TEST_TMP/root $kind"
@@ -355,6 +377,181 @@ EOF
     assert_contains "$HOOK_STDOUT" "$SUGGEST_SESSION_CUT_MESSAGE" "状態パスの提案 $kind"
     assert_file_exists "$FIXTURE_STATE_DIR" "state dir $kind"
     assert_file_missing "$FIXTURE_ROOT/.git/session-cut" "git 配下へ作らない $kind"
+  done
+}
+
+test_state_dirのlock競合時は状態も出力も変更しない() {
+  _fixture_repo
+  mkdir -p "$FIXTURE_STATE_DIR/.suggest-session-cut.lock"
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"locked-a","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-locked" "$FIXTURE_TRANSCRIPT")"
+  _run_hook "$payload" "$FIXTURE_ROOT" env
+  assert_eq "0" "$HOOK_RC" "lock競合時の終了コード"
+  assert_empty "$HOOK_STDOUT" "lock競合時は提案しない"
+  assert_empty "$HOOK_STDERR" "lock競合時の stderr"
+  _pick_state_file ".cache"
+  assert_empty "$CTS_PICKED_STATE_FILE" "lock競合時はcacheを書かない"
+  assert_file_missing "$FIXTURE_STATE_DIR/events.log" "lock競合時はlogを書かない"
+}
+
+test_同時実行でも同じ境界を二重提案しない() {
+  _fixture_repo
+  mkdir -p "$FIXTURE_STATE_DIR" "$TEST_TMP/bin"
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"concurrent-a","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-concurrent" "$FIXTURE_TRANSCRIPT")"
+  real_mkdir="$(command -v mkdir)"
+  lock_dir="$FIXTURE_STATE_DIR/.suggest-session-cut.lock"
+  lock_ready="$TEST_TMP/lock.ready"
+  lock_release="$TEST_TMP/lock.release"
+  cat >"$TEST_TMP/bin/mkdir" <<'EOF'
+#!/usr/bin/env bash
+if [ "$#" -eq 1 ] && [ "$1" = "$CTS_TEST_LOCK_DIR" ]; then
+  "$CTS_TEST_REAL_MKDIR" "$@" || exit 1
+  : >"$CTS_TEST_LOCK_READY"
+  while [ ! -e "$CTS_TEST_LOCK_RELEASE" ]; do
+    sleep 0.02
+  done
+  exit 0
+fi
+exec "$CTS_TEST_REAL_MKDIR" "$@"
+EOF
+  chmod +x "$TEST_TMP/bin/mkdir"
+
+  first_out="$TEST_TMP/concurrent-first.stdout"
+  first_err="$TEST_TMP/concurrent-first.stderr"
+  second_out="$TEST_TMP/concurrent-second.stdout"
+  second_err="$TEST_TMP/concurrent-second.stderr"
+  printf '%s\n' "$payload" | PATH="$TEST_TMP/bin:$PATH" \
+    CTS_TEST_LOCK_DIR="$lock_dir" CTS_TEST_LOCK_READY="$lock_ready" \
+    CTS_TEST_LOCK_RELEASE="$lock_release" CTS_TEST_REAL_MKDIR="$real_mkdir" \
+    bash "$REPO_ROOT/scripts/suggest-session-cut.sh" >"$first_out" 2>"$first_err" &
+  first_pid=$!
+  wait_count=0
+  while [ ! -e "$lock_ready" ] && kill -0 "$first_pid" 2>/dev/null && [ "$wait_count" -lt 100 ]; do
+    sleep 0.02
+    wait_count=$((wait_count + 1))
+  done
+  if [ ! -e "$lock_ready" ]; then
+    wait "$first_pid" 2>/dev/null || true
+    _fail "同時実行テストで先行プロセスがlockを取得しなかった"
+  fi
+
+  printf '%s\n' "$payload" | PATH="$TEST_TMP/bin:$PATH" \
+    CTS_TEST_LOCK_DIR="$lock_dir" CTS_TEST_LOCK_READY="$lock_ready" \
+    CTS_TEST_LOCK_RELEASE="$lock_release" CTS_TEST_REAL_MKDIR="$real_mkdir" \
+    bash "$REPO_ROOT/scripts/suggest-session-cut.sh" >"$second_out" 2>"$second_err"
+  second_rc=$?
+  : >"$lock_release"
+  wait "$first_pid"
+  first_rc=$?
+
+  assert_eq "0" "$first_rc" "先行同時実行の終了コード"
+  assert_eq "0" "$second_rc" "競合同時実行の終了コード"
+  combined_output="$(cat "$first_out" "$second_out")"
+  assert_count "1" "$combined_output" "$SUGGEST_SESSION_CUT_MESSAGE" \
+    "同じ境界の同時提案は1回だけ"
+  assert_empty "$(cat "$first_err")" "先行同時実行の stderr"
+  assert_empty "$(cat "$second_err")" "競合同時実行の stderr"
+  assert_file_missing "$lock_dir" "正常終了時はlockを解放する"
+}
+
+test_state_dir構成要素がsymlinkならroot外へ書かない() {
+  for link_kind in base state; do
+    FIXTURE_ROOT="$TEST_TMP/symlink-dir-$link_kind"
+    FIXTURE_TRANSCRIPT="$FIXTURE_ROOT/session.jsonl"
+    FIXTURE_STATE_DIR="$FIXTURE_ROOT/.token-saver/session-cut"
+    outside="$TEST_TMP/outside-dir-$link_kind"
+    mkdir -p "$FIXTURE_ROOT" "$outside"
+    if [ "$link_kind" = base ]; then
+      ln -s "$outside" "$FIXTURE_ROOT/.token-saver"
+    else
+      mkdir -p "$FIXTURE_ROOT/.token-saver"
+      ln -s "$outside" "$FIXTURE_STATE_DIR"
+    fi
+    cat >"$FIXTURE_TRANSCRIPT" <<'EOF'
+{"type":"assistant","message":{"id":"symlink-dir","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+    payload="$(_payload "$FIXTURE_ROOT" "session-symlink-dir-$link_kind" "$FIXTURE_TRANSCRIPT")"
+    _run_hook "$payload" "$FIXTURE_ROOT" env
+    assert_eq "0" "$HOOK_RC" "state dir symlink時の終了コード $link_kind"
+    assert_empty "$HOOK_STDOUT" "state dir symlink時は提案しない $link_kind"
+    assert_empty "$HOOK_STDERR" "state dir symlink時の stderr $link_kind"
+    assert_file_missing "$outside/events.log" "root外へlogを書かない $link_kind"
+    outside_files="$(find "$outside" -mindepth 1 -print 2>/dev/null)"
+    assert_empty "$outside_files" "root外へ状態を書かない $link_kind"
+  done
+}
+
+test_cacheとmarkerのsymlinkを置換せず提案しない() {
+  for state_kind in cache marker; do
+    FIXTURE_ROOT="$TEST_TMP/symlink-state-$state_kind"
+    FIXTURE_TRANSCRIPT="$FIXTURE_ROOT/session.jsonl"
+    FIXTURE_STATE_DIR="$FIXTURE_ROOT/.token-saver/session-cut"
+    mkdir -p "$FIXTURE_ROOT"
+    if [ "$state_kind" = cache ]; then
+      first_total=1
+    else
+      first_total=30000000
+    fi
+    printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"id\":\"symlink-state-first\",\"usage\":{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":$first_total,\"output_tokens\":0}}}" \
+      >"$FIXTURE_TRANSCRIPT"
+    payload="$(_payload "$FIXTURE_ROOT" "session-symlink-state-$state_kind" "$FIXTURE_TRANSCRIPT")"
+    _run_hook "$payload" "$FIXTURE_ROOT" env
+    _pick_state_file ".$state_kind"
+    state_path="$CTS_PICKED_STATE_FILE"
+    [ -n "$state_path" ] || _fail "symlink化する $state_kind が作成されなかった"
+    outside="$TEST_TMP/outside-$state_kind"
+    cp "$state_path" "$outside"
+    outside_before="$(cat "$outside")"
+    rm -f "$state_path"
+    ln -s "$outside" "$state_path"
+    printf '%s\n' '{"type":"assistant","message":{"id":"symlink-state-second","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":60000000,"output_tokens":0}}}' \
+      >"$FIXTURE_TRANSCRIPT"
+
+    _run_hook "$payload" "$FIXTURE_ROOT" env
+    assert_eq "0" "$HOOK_RC" "$state_kind symlink時の終了コード"
+    assert_empty "$HOOK_STDOUT" "$state_kind symlink時は提案しない"
+    assert_empty "$HOOK_STDERR" "$state_kind symlink時の stderr"
+    [ -L "$state_path" ] || _fail "$state_kind symlinkを置換してはいけない"
+    assert_eq "$outside_before" "$(cat "$outside")" "$state_kind symlink先を変更しない"
+  done
+}
+
+test_events_logとローテーション世代のsymlinkを追従しない() {
+  for log_kind in current generation; do
+    FIXTURE_ROOT="$TEST_TMP/symlink-log-$log_kind"
+    FIXTURE_TRANSCRIPT="$FIXTURE_ROOT/session.jsonl"
+    FIXTURE_STATE_DIR="$FIXTURE_ROOT/.token-saver/session-cut"
+    outside="$TEST_TMP/outside-log-$log_kind"
+    mkdir -p "$FIXTURE_STATE_DIR"
+    printf 'outside-safe' >"$outside"
+    if [ "$log_kind" = current ]; then
+      ln -s "$outside" "$FIXTURE_STATE_DIR/events.log"
+      log_max=1048576
+    else
+      printf 'rotation-source' >"$FIXTURE_STATE_DIR/events.log"
+      ln -s "$outside" "$FIXTURE_STATE_DIR/events.log.1"
+      log_max=1
+    fi
+    cat >"$FIXTURE_TRANSCRIPT" <<'EOF'
+{"type":"assistant","message":{"id":"symlink-log","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+    payload="$(_payload "$FIXTURE_ROOT" "session-symlink-log-$log_kind" "$FIXTURE_TRANSCRIPT")"
+    _run_hook "$payload" "$FIXTURE_ROOT" env \
+      CTS_SESSION_CUT_LOG_MAX_BYTES="$log_max" CTS_SESSION_CUT_LOG_BACKUPS=2
+    assert_eq "0" "$HOOK_RC" "$log_kind log symlink時の終了コード"
+    assert_empty "$HOOK_STDOUT" "$log_kind log symlink時は提案しない"
+    assert_empty "$HOOK_STDERR" "$log_kind log symlink時の stderr"
+    assert_eq "outside-safe" "$(cat "$outside")" "$log_kind log symlink先を変更しない"
+    if [ "$log_kind" = current ]; then
+      [ -L "$FIXTURE_STATE_DIR/events.log" ] || _fail "events.log symlinkを置換してはいけない"
+    else
+      [ -L "$FIXTURE_STATE_DIR/events.log.1" ] || _fail "events.log.1 symlinkを移動してはいけない"
+    fi
   done
 }
 
@@ -384,6 +581,25 @@ EOF
   assert_file_exists "$FIXTURE_STATE_DIR/events.log.1" "ログローテーション"
   tmp_count="$(_count_tmp_files)"
   assert_eq "0" "$tmp_count" "cache 更新後に tmp を残さない"
+}
+
+test_新しいcacheと対になる古いmarkerを削除せず再提案しない() {
+  _fixture_repo
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"marker-pair","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-marker-pair" "$FIXTURE_TRANSCRIPT")"
+  _run_hook "$payload" "$FIXTURE_ROOT" env CTS_SESSION_CUT_RETENTION_DAYS=1
+  assert_contains "$HOOK_STDOUT" "$SUGGEST_SESSION_CUT_MESSAGE" "初回境界を提案する"
+  _pick_state_file ".marker"
+  marker_path="$CTS_PICKED_STATE_FILE"
+  touch -t 200001010000 "$marker_path"
+
+  _run_hook "$payload" "$FIXTURE_ROOT" env CTS_SESSION_CUT_RETENTION_DAYS=1
+  assert_eq "0" "$HOOK_RC" "cacheが新しいときの古いmarker処理終了コード"
+  assert_empty "$HOOK_STDOUT" "古いmarkerだけを消して同じ境界を再提案しない"
+  assert_empty "$HOOK_STDERR" "cacheが新しいときの古いmarker処理 stderr"
+  assert_file_exists "$marker_path" "新しいcacheと対になるmarkerを保持する"
 }
 
 test_ログ追記で上限を超える場合は追記前にローテーションする() {
@@ -515,6 +731,42 @@ EOF
   assert_eq "0" "$HOOK_RC" "ローテーション途中失敗後の再実行終了コード"
   assert_empty "$HOOK_STDOUT" "ローテーション途中失敗後に即時再提案しない"
   assert_empty "$HOOK_STDERR" "ローテーション途中失敗後の再実行 stderr"
+}
+
+test_巨大log_backupsでも実在世代数に比例して速やかに完了する() {
+  _fixture_repo
+  mkdir -p "$FIXTURE_STATE_DIR"
+  printf 'rotation-source' >"$FIXTURE_STATE_DIR/events.log"
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"huge-backups","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-huge-backups" "$FIXTURE_TRANSCRIPT")"
+  bounded_out="$TEST_TMP/huge-backups.stdout"
+  bounded_err="$TEST_TMP/huge-backups.stderr"
+  printf '%s\n' "$payload" | env CTS_SESSION_CUT_LOG_MAX_BYTES=1 \
+    CTS_SESSION_CUT_LOG_BACKUPS=1000000000 \
+    bash "$REPO_ROOT/scripts/suggest-session-cut.sh" >"$bounded_out" 2>"$bounded_err" &
+  hook_pid=$!
+  completed=0
+  for wait_second in 1 2 3; do
+    sleep 1
+    if ! kill -0 "$hook_pid" 2>/dev/null; then
+      completed=1
+      break
+    fi
+  done
+  if [ "$completed" -eq 0 ]; then
+    kill "$hook_pid" 2>/dev/null || true
+    wait "$hook_pid" 2>/dev/null || true
+    _fail "巨大log_backupsの処理が3秒以内に完了しなかった"
+  fi
+  wait "$hook_pid"
+  hook_rc=$?
+  assert_eq "0" "$hook_rc" "巨大log_backupsの終了コード"
+  assert_contains "$(cat "$bounded_out")" "$SUGGEST_SESSION_CUT_MESSAGE" \
+    "巨大log_backupsでも提案を完了する"
+  assert_empty "$(cat "$bounded_err")" "巨大log_backupsの stderr"
+  assert_file_exists "$FIXTURE_STATE_DIR/events.log.1" "巨大log_backupsでも現行ログを退避する"
 }
 
 test_状態書き込み失敗時は提案せずclearも他状態も触らない() {
