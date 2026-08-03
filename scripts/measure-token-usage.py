@@ -318,6 +318,16 @@ def median_integer(values):
     return (ordered[middle - 1] + ordered[middle]) // 2
 
 
+def median_non_negative_integer(values):
+    ordered = sorted(value for value in values if isinstance(value, int) and value >= 0)
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) // 2
+
+
 def has_unsafe_text(text):
     return any(
         ord(ch) == 127 or unicodedata.category(ch) in ("Cc", "Cf", "Cs")
@@ -526,7 +536,7 @@ def record_compact(scan, session_key, timestamp):
     event = {
         "session": safe_session_identifier(session_key),
         "timestamp": safe_timestamp(timestamp),
-        "pre_compact_baseline": median_integer(previous[-3:]),
+        "pre_compact_baseline": median_non_negative_integer(previous[-3:]),
         "post_compact_usage": None,
         "recovery_turns": None,
     }
@@ -619,6 +629,7 @@ def scan_transcripts(paths, since):
                     scan.sessions.add(session_key)
 
                 message = entry.get("message")
+                accepted_main_usage = False
                 if entry.get("type") == "assistant" and isinstance(message, dict):
                     usage = message.get("usage")
                     if isinstance(usage, dict):
@@ -648,6 +659,7 @@ def scan_transcripts(paths, since):
                                 update_compact_events(scan, session_key, one.cache_read)
                             model = sanitize_model(message.get("model")) or "(不明)"
                             scan.by_model[model] += one
+                            accepted_main_usage = True
 
                     for block in content_blocks(message):
                         if not isinstance(block, dict) or block.get("type") != "tool_use":
@@ -674,13 +686,17 @@ def scan_transcripts(paths, since):
                                 ext = os.path.splitext(target)[1].lower() or "(拡張子なし)"
                                 scan.read_ext[ext] += 1
 
-                if session_key and is_compact_message(message):
+                if (
+                    entry.get("type") == "user"
+                    and session_key
+                    and is_compact_message(message)
+                ):
                     record_compact(scan, session_key, entry.get("timestamp"))
                 request_id = dedup_scalar(entry.get("requestId"))
                 record_main_tool_results(
                     scan, message, session_key, entry.get("timestamp"), request_id
                 )
-                if entry.get("type") == "assistant" and session_key:
+                if accepted_main_usage and session_key:
                     mark_matching_tool_results(scan, session_key, request_id)
 
                 result = entry.get("toolUseResult")
@@ -749,14 +765,14 @@ def within(root, path):
     return path_real == root_real or path_real.startswith(root_real + os.sep)
 
 
-def read_mcp_server_names(plugin_root):
-    names = []
+def read_mcp_server_definitions(plugin_root):
+    definitions = []
     sources = [os.path.join(plugin_root, ".mcp.json")]
     manifest = read_json(os.path.join(plugin_root, ".claude-plugin", "plugin.json"))
     if isinstance(manifest, dict):
         declared = manifest.get("mcpServers")
         if isinstance(declared, dict):
-            names.extend(declared)
+            definitions.extend(declared.items())
         else:
             refs = [declared] if isinstance(declared, str) else declared
             if not isinstance(refs, list):
@@ -773,16 +789,20 @@ def read_mcp_server_names(plugin_root):
             continue
         servers = data.get("mcpServers")
         if isinstance(servers, dict):
-            names.extend(servers)
+            definitions.extend(servers.items())
     out = []
-    for key in names:
+    for key, definition in definitions:
         name = sanitize_name(key) if isinstance(key, str) else None
         if name:
-            out.append(name)
+            out.append((name, definition))
     return out
 
 
-def plugin_mcp_servers():
+def read_mcp_server_names(plugin_root):
+    return [name for name, _definition in read_mcp_server_definitions(plugin_root)]
+
+
+def plugin_mcp_definitions():
     installed = read_json(os.path.join(CLAUDE_DIR, "plugins", "installed_plugins.json"))
     if not isinstance(installed, dict):
         return []
@@ -801,9 +821,13 @@ def plugin_mcp_servers():
             root = entry.get("installPath")
             if not isinstance(root, str) or not os.path.isabs(root):
                 continue
-            for name in read_mcp_server_names(root):
-                rows.append((f"plugin:{plugin_name}", name))
+            for name, definition in read_mcp_server_definitions(root):
+                rows.append((f"plugin:{plugin_name}", name, definition))
     return rows
+
+
+def plugin_mcp_servers():
+    return [(scope, name) for scope, name, _definition in plugin_mcp_definitions()]
 
 
 def config_json_candidates():
@@ -870,6 +894,15 @@ def mcp_definition_rows():
                 "name": name,
                 "definition_bytes": serialized_byte_count(definition),
             })
+    for scope, name, definition in plugin_mcp_definitions():
+        if (scope, name) in seen:
+            continue
+        seen.add((scope, name))
+        rows.append({
+            "scope": scope,
+            "name": name,
+            "definition_bytes": serialized_byte_count(definition),
+        })
     return rows
 
 

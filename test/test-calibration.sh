@@ -84,6 +84,42 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 PYEOF
 }
 
+_fixture_with_zero_compact_baseline() {
+  FIXTURE_TRANSCRIPT="$TEST_TMP/zero-compact.jsonl"
+  python3 - "$FIXTURE_TRANSCRIPT" <<'PYEOF'
+import json
+import sys
+
+def assistant(message_id, cache_read):
+    return {
+        "type": "assistant",
+        "sessionId": "session-zero-compact",
+        "message": {
+            "id": message_id,
+            "usage": {
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": cache_read,
+                "output_tokens": 1,
+            },
+            "content": [],
+        },
+    }
+
+rows = [assistant("before-0", 0), assistant("before-1", 0), assistant("before-2", 100)]
+rows.append({
+    "type": "user",
+    "sessionId": "session-zero-compact",
+    "message": {"role": "user", "content": "/compact"},
+})
+rows.append(assistant("after-0", 0))
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
+PYEOF
+}
+
 _run_python_harness() {
   mode="$1"
   shift
@@ -96,6 +132,14 @@ module = runpy.run_path(engine_path)
 if mode == "median":
     values = [int(value) for value in sys.argv[3:]]
     print(module["median_integer"](values))
+elif mode == "compact":
+    scan = module["scan_transcripts"]([sys.argv[3]], None)
+    event = scan.compact_events[0]
+    print("{},{},{}".format(
+        event["pre_compact_baseline"],
+        event["post_compact_usage"],
+        event["recovery_turns"],
+    ))
 elif mode == "session_count":
     scan = module["scan_transcripts"]([sys.argv[3]], None)
     print(len(scan.session_stats))
@@ -116,6 +160,12 @@ test_外れ値を中央値から除外する() {
 test_偶数サンプルは中央二値の整数平均を切り捨てる() {
   output="$(_run_python_harness median 10 20 40 1000)"
   assert_eq "30" "$output" "偶数中央値"
+}
+
+test_ゼロを含むcompact基準とゼロ回復を記録する() {
+  _fixture_with_zero_compact_baseline
+  output="$(_run_python_harness compact "$FIXTURE_TRANSCRIPT")"
+  assert_eq "0,0,1" "$output" "zero compact基準と回復"
 }
 
 test_sessionIdが無いusageをサンプル数へ入れない() {
@@ -275,12 +325,11 @@ rows.append({
 })
 rows.append(assistant("session-compact", "compact-after-0", 50))
 rows.append(assistant("session-compact", "compact-after-1", 105))
-rows.append({
-    "type": "user",
-    "timestamp": stamp(),
-    "sessionId": "session-compact",
-    "message": {"role": "user", "content": [{"type": "text", "text": "/compact"}]},
-})
+# assistant message内の/compactはイベントではない。
+rows.append(assistant(
+    "session-compact", "assistant-compact-text", 100,
+    [{"type": "text", "text": "/compact"}],
+))
 
 # 大きいmain tool_resultはtool_useと同じセッションの後続usageへ対応付ける。
 rows.append(assistant(
@@ -325,6 +374,59 @@ rows.append({
         "type": "tool_result", "tool_use_id": "unmatched-tool",
         "content": [{"type": "text", "text": "未対応tool result本文 SENTINEL " + "y" * 5000}],
     }]},
+})
+
+# requestId/sessionが一致しても、usageなしassistantは対応付けない。
+rows.append({
+    "type": "user",
+    "timestamp": stamp(),
+    "sessionId": "session-unmatched",
+    "requestId": "request-without-usage",
+    "message": {"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": "unmatched-tool-with-request",
+        "content": [{"type": "text", "text": "未対応tool result本文2 SENTINEL " + "z" * 5000}],
+    }]},
+})
+rows.append({
+    "type": "assistant",
+    "timestamp": stamp(),
+    "sessionId": "session-unmatched",
+    "requestId": "request-without-usage",
+    "message": {
+        "id": "assistant-without-usage",
+        "model": "claude-sonnet-5",
+        "content": [],
+    },
+})
+
+plugin_root = os.path.join(home, "enabled-plugin")
+os.makedirs(os.path.join(plugin_root, ".claude-plugin"))
+with open(os.path.join(plugin_root, ".claude-plugin", "plugin.json"), "w", encoding="utf-8") as handle:
+    json.dump({"mcpServers": ".mcp.json"}, handle)
+with open(os.path.join(plugin_root, ".mcp.json"), "w", encoding="utf-8") as handle:
+    json.dump({"mcpServers": {
+        "plugin_server": {
+            "command": "node",
+            "args": ["PLUGIN_DEFINITION_SENTINEL"],
+        },
+    }}, handle)
+os.makedirs(os.path.join(home, ".claude", "plugins"))
+with open(os.path.join(home, ".claude", "plugins", "installed_plugins.json"), "w", encoding="utf-8") as handle:
+    json.dump({"plugins": {
+        "demo-plugin@1.0.0": [{
+            "scope": "user",
+            "installPath": plugin_root,
+            "installedAt": "2026-08-04T00:00:00Z",
+        }],
+    }}, handle)
+with open(os.path.join(home, ".claude", "settings.json"), "w", encoding="utf-8") as handle:
+    json.dump({"enabledPlugins": {"demo-plugin@1.0.0": True}}, handle)
+
+rows.append({
+    "type": "user",
+    "timestamp": stamp(),
+    "sessionId": "session-compact",
+    "message": {"role": "user", "content": [{"type": "text", "text": "/compact"}]},
 })
 
 with open(os.path.join(project, "diagnostics.jsonl"), "w", encoding="utf-8") as handle:
@@ -375,6 +477,32 @@ test_実測診断と概算診断を分離する() {
   assert_not_contains "$report" "MCP_PATH_SECRET" "MCP定義path秘匿"
   measured="${report%%## 概算診断*}"
   assert_not_contains "$measured" "概算トークン" "概算値の実測混入"
+}
+
+test_assistantのcompact本文は発生数に含めない() {
+  _fixture_with_diagnostics
+  _run_calibrate >/dev/null
+  assert_contains "$(cat "$FIXTURE_REPORT")" "/compact 発生: 2 件" \
+    "assistant本文のcompact除外"
+}
+
+test_usageなしassistantはtool_result対応付けをしない() {
+  _fixture_with_diagnostics
+  _run_calibrate >/dev/null
+  report="$(cat "$FIXTURE_REPORT")"
+  assert_count 1 "$report" "usage対応あり" "usage受理済みのみ対応"
+  assert_count 2 "$report" "usage対応なし" "usageなしassistantの未対応"
+}
+
+test_enabled_pluginのMCPを分類と概算へ含める() {
+  _fixture_with_diagnostics
+  _run_calibrate >/dev/null
+  report="$(cat "$FIXTURE_REPORT")"
+  measured="${report%%## 概算診断*}"
+  estimated="${report#*## 概算診断}"
+  assert_contains "$measured" "未使用MCP: unused_server, plugin_server" "plugin MCP分類"
+  assert_contains "$estimated" "| plugin:demo-plugin | plugin_server |" "plugin MCP概算行"
+  assert_not_contains "$report" "PLUGIN_DEFINITION_SENTINEL" "plugin定義内容の秘匿"
 }
 
 test_既定の5セッション100ターン未満は促さない() {
