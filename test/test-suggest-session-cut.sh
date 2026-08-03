@@ -380,6 +380,44 @@ EOF
   done
 }
 
+test_実Git_worktreeではworktree_rootへ状態を書きgitdir配下へ書かない() {
+  local source_repo gitdir_path git_state_hits
+  source_repo="$TEST_TMP/source repo"
+  FIXTURE_ROOT="$TEST_TMP/linked worktree"
+  FIXTURE_TRANSCRIPT="$FIXTURE_ROOT/session.jsonl"
+  FIXTURE_STATE_DIR="$FIXTURE_ROOT/.token-saver/session-cut"
+
+  git init -q "$source_repo"
+  git -C "$source_repo" config user.name "claude-token-saver test"
+  git -C "$source_repo" config user.email "test@example.invalid"
+  printf 'seed\n' >"$source_repo/seed.txt"
+  git -C "$source_repo" add seed.txt
+  git -C "$source_repo" commit -q -m seed
+  git -C "$source_repo" worktree add -q -b fixture-linked-worktree "$FIXTURE_ROOT"
+  [ -f "$FIXTURE_ROOT/.git" ] || _fail "linked worktree の .git がファイルではない"
+  assert_contains "$(cat "$FIXTURE_ROOT/.git")" "gitdir:" "linked worktree の gitdir 指定"
+  gitdir_path="$(git -C "$FIXTURE_ROOT" rev-parse --git-dir)"
+  [ -d "$gitdir_path" ] || _fail "linked worktree の gitdir が有効ではない: $gitdir_path"
+
+  mkdir -p "$FIXTURE_ROOT/nested dir"
+  cat >"$FIXTURE_TRANSCRIPT" <<'EOF'
+{"type":"assistant","message":{"id":"real-worktree","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT/nested dir" "session-real-worktree" "$FIXTURE_TRANSCRIPT")"
+  _run_hook "$payload" "$FIXTURE_ROOT/nested dir" env
+  assert_eq "0" "$HOOK_RC" "実worktreeの終了コード"
+  assert_contains "$HOOK_STDOUT" "$SUGGEST_SESSION_CUT_MESSAGE" "実worktreeの提案"
+  assert_empty "$HOOK_STDERR" "実worktreeの stderr"
+  assert_file_exists "$FIXTURE_STATE_DIR" "worktree root の state dir"
+  _pick_state_file ".cache"
+  assert_file_exists "$CTS_PICKED_STATE_FILE" "worktree root の cache"
+  _pick_state_file ".marker"
+  assert_file_exists "$CTS_PICKED_STATE_FILE" "worktree root の marker"
+  git_state_hits="$(find "$source_repo/.git" -path '*session-cut*' -print 2>/dev/null)"
+  assert_empty "$git_state_hits" "gitdir/.git配下へsession-cut状態を書かない"
+  assert_file_missing "$gitdir_path/.token-saver" "worktree gitdir配下へ状態を書かない"
+}
+
 test_state_dirのlock競合時は状態も出力も変更しない() {
   _fixture_repo
   mkdir -p "$FIXTURE_STATE_DIR/.suggest-session-cut.lock"
@@ -794,4 +832,43 @@ test_cache更新がtmpからrenameされる() {
     "cacheの原子的なrename"
   assert_contains "$implementation" "_cts_cleanup_state" "session状態の掃除"
   assert_contains "$implementation" "_cts_rotate_log" "発火ログのローテーション"
+}
+
+test_cacheのrename失敗時は旧状態を保持して提案しない() {
+  local payload cache_path cache_before real_mv
+  _fixture_repo
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"rename-cache-old","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":1,"output_tokens":0}}}
+EOF
+  payload="$(_payload "$FIXTURE_ROOT" "session-cache-rename-fail" "$FIXTURE_TRANSCRIPT")"
+  _run_hook "$payload" "$FIXTURE_ROOT" env
+  assert_eq "0" "$HOOK_RC" "rename失敗注入前の終了コード"
+  assert_empty "$HOOK_STDOUT" "rename失敗注入前は境界未満"
+  _pick_state_file ".cache"
+  cache_path="$CTS_PICKED_STATE_FILE"
+  [ -n "$cache_path" ] || _fail "rename失敗注入前の cache が無い"
+  cache_before="$(cat "$cache_path")"
+
+  _write_transcript <<'EOF'
+{"type":"assistant","message":{"id":"rename-cache-new","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":30000000,"output_tokens":0}}}
+EOF
+  real_mv="$(command -v mv)"
+  cat >"$TEST_TMP/bin/mv" <<'EOF'
+#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "$2" = "$CTS_TEST_FAIL_MV_DESTINATION" ]; then
+  exit 1
+fi
+exec "$CTS_TEST_REAL_MV" "$@"
+EOF
+  chmod +x "$TEST_TMP/bin/mv"
+  _run_hook "$payload" "$FIXTURE_ROOT" env \
+    CTS_TEST_REAL_MV="$real_mv" CTS_TEST_FAIL_MV_DESTINATION="$cache_path"
+  assert_eq "0" "$HOOK_RC" "cache rename失敗時の終了コード"
+  assert_empty "$HOOK_STDOUT" "cache rename失敗時は提案しない"
+  assert_empty "$HOOK_STDERR" "cache rename失敗時の stderr"
+  assert_eq "$cache_before" "$(cat "$cache_path")" "cache rename失敗時は旧状態を保持する"
+  _pick_state_file ".marker"
+  assert_empty "$CTS_PICKED_STATE_FILE" "cache rename失敗時はmarkerを作らない"
+  assert_eq "0" "$(_count_tmp_files)" "cache rename失敗時はtmpを残さない"
+  assert_file_missing "$CTS_CLEAR_CALLED" "cache rename失敗時もclearを呼ばない"
 }

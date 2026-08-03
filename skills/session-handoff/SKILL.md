@@ -54,11 +54,13 @@ description: Use when the session is about to be cut or cleared, when the user a
 環境変数 `CTS_SESSION_CUT_INITIAL_CACHE_READ`、`CTS_SESSION_CUT_INCREMENT_CACHE_READ`、
 `CTS_SESSION_CUT_RETENTION_DAYS`、`CTS_SESSION_CUT_LOG_MAX_BYTES`、
 `CTS_SESSION_CUT_LOG_BACKUPS` は設定ファイルより優先する。状態は `.token-saver/session-cut/` の
-`.cache`、`.marker`、`events.log` に保存し、`.git/` へは書き込まない。
+`.cache`、`.marker`、`events.log` に保存し、linked worktree でも `.git/` へは書き込まない。
+状態は lock 内で同一ディレクトリの一時ファイルから rename し、symlink や rename 失敗時は
+旧状態を保持して fail-closed にする。
 
 設定ファイルが無い、または読めない場合は各設定値を、個別値が不正な場合はその値だけを既定値へ戻す。
 入力・トランスクリプト・状態を判定できない、または読み書きに失敗した場合は fail-closed とし、無出力・標準エラー空・終了コード `0` で抜ける。
-`/clear` は自動実行しません。提案が出たら、引き継ぎを書いてから、手動で新しいセッションへ切り替える。
+`/clear` は自動実行しません。提案が出たら、引き継ぎを書いてから、手動で新しいセッションへ切り替えることを検討してください。
 
 ## 引き継ぎを書くとき
 

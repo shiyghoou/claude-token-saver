@@ -3,6 +3,8 @@
 
 set -u
 
+SUGGEST_SESSION_CUT_GUIDANCE="引き継ぎを書いてから、手動で新しいセッションへ切り替えることを検討してください。"
+
 _readme() {
   sed -n '1,320p' "$REPO_ROOT/README.md"
 }
@@ -51,7 +53,7 @@ _assert_config_contract() {
     '入力・トランスクリプト・状態を判定できない、または読み書きに失敗した場合は fail-closed とし、無出力・標準エラー空・終了コード `0` で抜ける。' \
     "$label fail-closed"
   assert_contains "$body" '`/clear` は自動実行しません' "$label manual clear"
-  assert_contains "$body" "手動で新しいセッションへ切り替える" "$label manual session switch"
+  assert_contains "$body" "$SUGGEST_SESSION_CUT_GUIDANCE" "$label exact manual session switch"
 }
 
 test_READMEがsuggest_session_cutを実装済みと案内する() {
@@ -75,7 +77,7 @@ test_session_handoff_SKILLが提案後の手動切替手順を案内する() {
   skill="$(_skill)"
   assert_contains "$skill" "Stop フックが「セッションを切ることを推奨します」と出した" \
     "SKILL Stop trigger"
-  assert_contains "$skill" "引き継ぎを書いてから、手動で新しいセッションへ切り替える" \
+  assert_contains "$skill" "$SUGGEST_SESSION_CUT_GUIDANCE" \
     "SKILL manual switch"
   assert_contains "$skill" "書いたら、切ることをユーザーへ提案する。" \
     "SKILL propose switching"
@@ -93,6 +95,13 @@ test_設計書がinstall契約と実装フェーズを現在状態へ追随さ�
     "設計書 段階3"
   assert_not_contains "$design" "Stop フックは段階3の成果物であり、それまでは登録されない" \
     "設計書 future install wording"
+  assert_contains "$design" "suggest-session-cut-json.awk" "設計書 payload JSON validator"
+  assert_contains "$design" "suggest-session-cut-config.awk" "設計書 config JSON validator"
+  assert_contains "$design" "Stop payload 全体を末尾まで完全な JSON として検証する" \
+    "設計書 payload complete JSON validation"
+  assert_contains "$design" "lock" "設計書 state lock"
+  assert_contains "$design" "symlink" "設計書 symlink fail-closed"
+  assert_contains "$design" "実在する数値ログ世代だけを列挙する" "設計書 bounded log generation enumeration"
 }
 
 test_READMEがtoken_report節でsuggest_session_cut未実装と書かない() {

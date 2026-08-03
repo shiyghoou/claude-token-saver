@@ -72,7 +72,13 @@ claude-token-saver/
 │   ├── suggest-session-cut.sh         Stop フック（移植）
 │   ├── handoff-check.sh               SessionStart フック（新規）
 │   ├── handoff-consume.sh             pending → consumed（新規）
-│   └── lib/                           フック実行時の共通処理（外部コマンドに依存しない）
+│   └── lib/                           フック実行時の共通処理
+│       ├── common.sh                  payload 読み取り・JSON文字列抽出・handoff共通処理
+│       ├── paths.sh                   状態パスの単一情報源
+│       ├── token-report-entrypoint.sh token-report launcher 共通処理
+│       ├── suggest-session-cut-json.awk    Stop payload の完全JSON validator
+│       ├── suggest-session-cut-config.awk  設定JSONのスコープ付きvalidator
+│       └── suggest-session-cut-usage.awk   assistant JSONL usage集計
 ├── test/
 │   ├── run.sh                         依存ゼロの bash テストランナー
 │   └── ...
@@ -229,9 +235,13 @@ launcher は engine の `--days` / `--all-projects` / `--paths` / `--top` / `--o
 `message.usage.cache_read_input_tokens` をセッション単位で累積し、閾値に達したらセッションを切ることを提案する。
 発火は境界ごとに一度だけであり、同じ `message.id` を重複して数えず、id が無い行は `requestId` と usage 値を
 代替キーにして重複を抑える。文字列本文中の同名キーは集計対象にしない。
+`suggest-session-cut-json.awk` で Stop payload 全体を末尾まで完全な JSON として検証する前に、
+`cwd`、`session_id`、`transcript_path` を採用してはならない。トランスクリプトも各行を完全な JSON として検証し、
+assistant message の完全な usage object だけを集計する。
 
 設定は導入先の `.claude/token-saver.json` から読み、設定 JSON の親キーは `suggest_session_cut` とする。
 環境変数が設定ファイルより優先する。設定ファイルが無い、または読めない場合は各設定値を、個別値が不正な場合はその値だけを既定値へ戻す。
+`suggest-session-cut-config.awk` は設定全体を末尾まで検証し、root 直下の `suggest_session_cut` 直下にある数値だけを採用する。
 
 ```json
 {
@@ -259,10 +269,17 @@ launcher は engine の `--days` / `--all-projects` / `--paths` / `--top` / `--o
 ```
 
 cache と marker は同じ管理ディレクトリ内の一時ファイルから rename して原子的に更新する。
-期限切れの `.cache`、`.marker`、一時ファイルは `retention_days` に従って掃除する。`.git/` 配下には書き込まない。
+rename に失敗した場合は旧状態を保持し、提案を出さない。状態の読み取り、掃除、cache/marker 更新、
+ログ更新と提案判定は state dir 内の排他的な lock を取得してから行い、同じ境界を二重提案しない。
+期限切れの `.cache`、`.marker`、一時ファイルは `retention_days` に従って掃除する。
+Git repository と linked worktree では `git rev-parse --show-toplevel` の root を使い、`.git/` と gitdir 配下には書き込まない。
+`.token-saver`、`session-cut`、cache、marker、`events.log`、数値ログ世代のいずれかが symlink なら追従せず fail-closed にする。
+
+ログのローテーションは実在する数値ログ世代だけを列挙する。`1..log_backups` の全範囲は走査せず、
+実在世代を降順に移動する。途中の rename に失敗した場合は退避済み世代を元へ戻し、元ログと全世代を保持して提案を出さない。
 
 入力・トランスクリプト・状態を判定できない、または読み書きに失敗した場合は fail-closed とし、無出力・標準エラー空・終了コード `0` で抜ける。外部の `jq`、Python、`timeout` には依存しない。
-`/clear` は自動実行しません。提案後はモデルが引き継ぎを書き、ユーザーが手動で新しいセッションへ切り替える。
+`/clear` は自動実行しません。提案後は、引き継ぎを書いてから、手動で新しいセッションへ切り替えることを検討してください。
 
 移植時に解消した繰り越し課題は、発火ログのローテーション、期限切れ状態と一時ファイルの掃除、
 cache/marker の tmp → rename による原子的な更新である。
