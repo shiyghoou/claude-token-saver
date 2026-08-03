@@ -58,10 +58,67 @@ _python_compatibility_job() {
   ' "$REPO_ROOT/.github/workflows/test.yml"
 }
 
+_python_compatibility_run_block() {
+  awk '
+    /^  python-compatibility:$/ { inside = 1 }
+    inside && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  python-compatibility:" { exit }
+    inside && $0 ~ /^        run: \|[[:space:]]*$/ { run = 1; next }
+    run && $0 ~ /^          / { sub(/^          /, ""); print; next }
+    run { exit }
+  ' "$REPO_ROOT/.github/workflows/test.yml"
+}
+
+_python_compatibility_run_commands() {
+  _python_compatibility_run_block | awk '!/^[[:space:]]*#/'
+}
+
+_run_python_compatibility_smoke_with_fake_docker() {
+  local run_block fixture fake_bin script docker_log status docker_args
+  if ! run_block="$(_python_compatibility_run_block)"; then
+    _fail "python-compatibility run blockの抽出に失敗した"
+  fi
+
+  fixture="$TEST_TMP/python-compatibility-workflow"
+  fake_bin="$fixture/bin"
+  script="$fixture/run.sh"
+  docker_log="$fixture/docker.args"
+  mkdir -p "$fake_bin"
+  if ! printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\\n" "$*" >"$FAKE_DOCKER_LOG"' \
+    'exit 73' >"$fake_bin/docker"; then
+    _fail "fake dockerの作成に失敗した"
+  fi
+  chmod +x "$fake_bin/docker"
+
+  if ! printf '%s\n' "$run_block" |
+    sed -e 's@${{ github.workspace }}@${TEST_WORKSPACE}@g' \
+        -e 's@${{ matrix.image }}@fake-image@g' >"$script"; then
+    _fail "GitHub式を実行用fixtureへ置換できない"
+  fi
+
+  if PATH="$fake_bin:$PATH" TEST_WORKSPACE="$fixture" FAKE_DOCKER_LOG="$docker_log" \
+    bash "$script" >"$fixture/stdout" 2>"$fixture/stderr"; then
+    _fail "fake dockerの失敗がrun blockから伝播しなかった"
+  else
+    status=$?
+  fi
+  assert_file_exists "$docker_log" "fake dockerが呼ばれた記録"
+  docker_args="$(cat "$docker_log")"
+  assert_contains "$docker_args" "run --rm" "実run blockがfake dockerを呼ぶ"
+  PYTHON_COMPATIBILITY_FAKE_DOCKER_STATUS="$status"
+}
+
 test_Python互換性CIがjob内で固定イメージの読み取り専用スモークを実行する() {
-  local job
+  local job run_block run_commands
   if ! job="$(_python_compatibility_job)"; then
     _fail "python-compatibility jobの抽出に失敗した"
+  fi
+  if ! run_block="$(_python_compatibility_run_block)"; then
+    _fail "python-compatibility run blockの抽出に失敗した"
+  fi
+  if ! run_commands="$(_python_compatibility_run_commands)"; then
+    _fail "python-compatibility run blockのコメント除去に失敗した"
   fi
 
   assert_contains "$job" "python-compatibility:" \
@@ -70,25 +127,27 @@ test_Python互換性CIがjob内で固定イメージの読み取り専用スモ�
     "Python 3.6の固定公式イメージ"
   assert_contains "$job" "python:3.8.20-slim-bookworm" \
     "Python 3.8の固定公式イメージ"
-  assert_contains "$job" "target=/work,readonly" \
-    "リポジトリの読み取り専用マウント"
-  assert_contains "$job" "--workdir /work" \
+  assert_contains "$run_commands" \
+    '--mount "type=bind,source=${{ github.workspace }},target=/work,readonly"' \
+    "実run blockの読み取り専用マウント"
+  assert_contains "$run_commands" "--workdir /work" \
     "コンテナの作業ディレクトリ"
-  assert_contains "$job" "docker run --rm" \
+  assert_contains "$run_commands" "docker run --rm" \
     "使い捨てコンテナの実行"
-  assert_contains "$job" "python -B test/python-compatibility.py" \
+  assert_contains "$run_commands" "python -B test/python-compatibility.py" \
     "Python互換性スモークの実行"
-  assert_not_contains "$job" "|| true" \
-    "docker失敗をtrueで握り潰さない"
-  assert_not_contains "$job" "|| :" \
-    "docker失敗をno-opで握り潰さない"
-  assert_not_contains "$job" "|| exit 0" \
-    "docker失敗を成功終了へ変えない"
-  assert_not_contains "$job" "; true" \
+  assert_not_contains "$run_commands" "||" \
+    "実run blockでdocker失敗を握り潰さない"
+  assert_not_contains "$run_commands" "; true" \
     "docker失敗の直後に成功終了へ変えない"
-  assert_not_contains "$job" "set +e" \
+  assert_not_contains "$run_commands" "set +e" \
     "docker失敗をerrexit無効化で握り潰さない"
-  if printf '%s\n' "$job" | grep -Eq "^[[:space:]]*continue-on-error:[[:space:]]*[\"']?true[\"']?([[:space:]]*(#.*)?)?$"; then
-    _fail "python-compatibility jobでcontinue-on-error: trueを許可しない"
-  fi
+  assert_not_contains "$job" "continue-on-error" \
+    "python-compatibility jobでcontinue-on-errorを許可しない"
+}
+
+test_Python互換性CIのdocker失敗がrun_blockから伝播する() {
+  _run_python_compatibility_smoke_with_fake_docker
+  assert_eq "73" "$PYTHON_COMPATIBILITY_FAKE_DOCKER_STATUS" \
+    "fake docker失敗の伝播終了コード"
 }

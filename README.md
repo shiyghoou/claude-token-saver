@@ -224,7 +224,15 @@ fail-closed により利用者のフックが残ったまま外せなくなる�
 
 #### Python 互換性の検証範囲
 
-`lib/*.py` を検証対象とし、依存は標準ライブラリと同ディレクトリの `ledger` のみである。
+`lib/*.py` は列挙して全ファイルを検証対象とする。production の依存/API監査は次のとおりである。
+
+- `lib/gitignore-block.py`: `os`、`sys`、同ディレクトリの `ledger`
+- `lib/ledger.py`: `json`、`errno`、`os`、`sys`、`tempfile`
+- `lib/settings-hooks.py`: `json`、`os`、`shlex`、`sys`、同ディレクトリの `ledger`
+
+いずれも標準ライブラリと同ディレクトリの `ledger` だけを使い、`pathlib`、`typing`、
+`subprocess`、外部パッケージは本体に使わない。`subprocess` は検証harness
+`test/python-compatibility.py` のCLIスモークだけで使い、Python 3.6互換の引数に限る。
 Python 3.6.15、3.8.20、3.12.3 で `python -B test/python-compatibility.py` の成功を確認した。
 
 ローカルでは `python3 -B test/python-compatibility.py` を実行する。CI の
@@ -233,7 +241,7 @@ Python 3.6.15、3.8.20、3.12.3 で `python -B test/python-compatibility.py` の
 バージョンに限るもので、Python 3.6 未満や未検証の将来版を保証しない。
 
 全体テストは実行環境 Python 3.12.3 で `CTS_NO_SKIP=1 bash test/run.sh` を実行し、
-成功 414 件 / 失敗 0 件 / スキップ 0 件、総 414 件・ファイル別 11 件分の実行件数下限を満たし、
+成功 415 件 / 失敗 0 件 / スキップ 0 件、総 415 件・ファイル別 11 件分の実行件数下限を満たし、
 終了コード 0 だった。これは互換性スモークとは別の全体テスト結果である。
 `python-compatibility` job は matrix の Python 3.6.15 / 3.8.20 で実行し、
 Docker イメージの取得・起動・スモークのいずれかが非 0 なら、その失敗を握り潰さず CI の失敗へ伝播させる。

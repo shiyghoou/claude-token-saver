@@ -50,12 +50,34 @@ def assert_no_bytecode(root):
             check(not name.endswith(".pyc"), "一時領域にpycが作られた: %s" % name)
 
 
+def bytecode_paths(root):
+    paths = set()
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            if name.endswith(".pyc"):
+                paths.add(os.path.relpath(os.path.join(base, name), root))
+    return paths
+
+
+def assert_no_new_bytecode(root, before):
+    created = sorted(bytecode_paths(root) - before)
+    check(not created, "libに新規pycが作られた: %s" % ", ".join(created))
+
+
 def check_lib_syntax():
-    for name in ("ledger.py", "settings-hooks.py", "gitignore-block.py"):
+    names = []
+    for name in os.listdir(LIB_DIR):
+        path = os.path.join(LIB_DIR, name)
+        if name.endswith(".py") and os.path.isfile(path):
+            names.append(name)
+    names.sort()
+    check(names, "lib/*.py が1本も無い")
+    for name in names:
         path = os.path.join(LIB_DIR, name)
         with open(path, encoding="utf-8") as stream:
             source = stream.read()
         compile(source, path, "exec")
+    return len(names)
 
 
 def check_ledger(temp_root):
@@ -146,16 +168,17 @@ def check_gitignore(temp_root):
 
 
 def main():
-    check_lib_syntax()
+    lib_bytecode_before = bytecode_paths(LIB_DIR)
+    lib_count = check_lib_syntax()
     with tempfile.TemporaryDirectory() as temp_root:
         check_ledger(temp_root)
         check_settings_hooks(temp_root)
         check_gitignore(temp_root)
         assert_no_bytecode(temp_root)
     # settings-hooks.py と gitignore-block.py は ledger.py を import する。
-    # 実行先の lib/ に pycache を残さないことも、CLI を実行した後で確認する。
-    assert_no_bytecode(LIB_DIR)
-    print("Python互換性スモーク: lib 3本のcompileとCLI 3系統を検証")
+    # 実行前からあるbytecodeは利用者の状態であり、実行中に新規作成したものだけ拒否する。
+    assert_no_new_bytecode(LIB_DIR, lib_bytecode_before)
+    print("Python互換性スモーク: lib %d本のcompileとCLI 3系統を検証" % lib_count)
     return 0
 
 
