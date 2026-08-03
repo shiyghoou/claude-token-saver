@@ -158,11 +158,6 @@ if [ "$calibrate_requested" -eq 1 ]; then
       "$snapshot_path" >&2
     exit 1
   fi
-  if [ "$snapshot_had_regular" -eq 0 ] && [ ! "$snapshot_path" -nt "$marker" ]; then
-    printf 'キャリブレーション snapshot がこの実行で更新されていません: %s\n' \
-      "$snapshot_path" >&2
-    exit 1
-  fi
 fi
 
 if [ -z "$report_path" ]; then
