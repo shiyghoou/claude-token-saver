@@ -131,6 +131,16 @@ def safe_int(value):
     return value
 
 
+def median_integer(values):
+    ordered = sorted(value for value in values if isinstance(value, int) and value > 0)
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) // 2
+
+
 def has_unsafe_text(text):
     return any(
         ord(ch) == 127 or unicodedata.category(ch) in ("Cc", "Cf", "Cs")
@@ -249,11 +259,18 @@ class Usage:
         ]
 
 
+class SessionStats:
+    def __init__(self):
+        self.cache_read = 0
+        self.assistant_turns = 0
+
+
 class Scan:
     def __init__(self):
         self.files = 0
         self.lines = 0
         self.sessions = set()
+        self.session_stats = {}
         self.main = Usage()
         self.by_model = defaultdict(Usage)
         self.tool_calls = Counter()
@@ -314,8 +331,9 @@ def scan_transcripts(paths, since):
                         continue
 
                 session_id = entry.get("sessionId")
-                if session_id:
-                    scan.sessions.add(str(session_id))
+                session_key = str(session_id) if session_id else None
+                if session_key:
+                    scan.sessions.add(session_key)
 
                 message = entry.get("message")
                 if entry.get("type") == "assistant" and isinstance(message, dict):
@@ -338,6 +356,12 @@ def scan_transcripts(paths, since):
                             one.add_raw(usage)
                             scan.main += one
                             scan.messages += 1
+                            if session_key:
+                                stats = scan.session_stats.setdefault(
+                                    session_key, SessionStats()
+                                )
+                                stats.cache_read += one.cache_read
+                                stats.assistant_turns += 1
                             model = sanitize_model(message.get("model")) or "(不明)"
                             scan.by_model[model] += one
 
