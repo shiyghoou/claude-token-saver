@@ -141,6 +141,8 @@ printf '{"session_id":"abc","source":"startup","cwd":"%s"}' "$proj" \
 printf 'EMPTY_EXIT=%s\n' "$?"
 printf 'EMPTY_STDOUT_BYTES=%s\n' "$(wc -c </tmp/out2 | tr -d ' ')"
 printf 'EMPTY_STDERR_BYTES=%s\n' "$(wc -c </tmp/err2 | tr -d ' ')"
+printf 'EMPTY_CONTRACT=%s\n' \
+  "$(grep -c -F '現在の明示的なユーザー依頼を最優先' /tmp/out2 || true)"
 
 # Stop hook 本体を実際の payload と assistant JSONL で走らせる。
 # clear を PATH 上で監視し、自動実行されないことも Bash 3.2 上で確かめる。
@@ -259,7 +261,7 @@ want 'CONSUME_FAIL_RAW_SHELL=0' "consumer失敗時stderrにraw shell文字列が
 want 'CONSUME_FAIL_MARKER=0' "consumer失敗時にshell markerが作成された"
 want 'CONSUME_FAIL_PENDING=1' "consumer失敗時にpendingファイルが失われた"
 want 'EMPTY_EXIT=0'         "未消費ゼロで終了コードが 0 でない"
-want 'EMPTY_STDOUT_BYTES=0' "未消費ゼロなのに出力がある"
+want 'EMPTY_CONTRACT=1'     "未消費ゼロのstartupで判断契約が出ていない"
 want 'EMPTY_STDERR_BYTES=0' "未消費ゼロで標準エラーを汚している"
 want 'CUT_EXIT=0'            "suggest-session-cut の終了コードが 0 でない"
 want 'CUT_STDERR_BYTES=0'    "suggest-session-cut が標準エラーを汚している"

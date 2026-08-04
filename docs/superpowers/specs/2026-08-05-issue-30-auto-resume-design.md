@@ -3,7 +3,7 @@
 - 作成日: 2026-08-05
 - 対象Issue: #30
 - 基点: `origin/main` (`e1391bd6257fe63e62a01bee2ab6d4f46ec7e18d`)
-- 状態: 実装前・設計承認済み
+- 状態: 実装・検証済み
 
 ## 1. 目的
 
@@ -13,7 +13,7 @@ SessionStart command hook はモデル要求そのものを新規生成できな
 
 ## 2. 現状と変更点
 
-現在の `scripts/handoff-check.sh` は、pending がある `startup` / `clear` だけで本文をatomicにclaimし、出力成功後にconsumedへ移す。モデルには「要約して指示を待つ」と要求し、pendingが無ければ無出力である。Claude Code の `.claude/settings.local.json` には登録されるが、Codex hookは未登録である。
+現在の `scripts/handoff-check.sh` は、`startup` / `clear` で起動後判断契約を出し、pendingがあるときだけ本文をatomicにclaimする。判断契約は本文のfence外、handoff本文はfence内へ置き、stdout成功後にconsumedへ移す。Claude Codeの`.claude/settings.local.json`とCodexの`.codex/hooks.json`から同じhookを呼び出す。
 
 本Issueでは次を変更する。
 
@@ -73,6 +73,8 @@ hook自身が出す指示は本文の区切り外に置き、次の順序を固�
 - 本文は実行ごとに変わる識別子で囲い、前セッションの非信頼な記録と明示する。
 - stdout送信が完了したclaimだけをconsumedへcommitし、失敗分はpendingへ戻す。
 - 何が起きてもSessionStartを妨げない終了コード0と空stderrを維持する。
+- `pending/` 自体、handoff親、実体境界の検証をpayload列挙より先に行う。pendingがsymlinkまたは
+  親symlinkを経由する場合はfail-closedで無出力・未消費とし、外部ディレクトリの内容を読まず移動しない。
 
 pendingゼロ時だけは従来の「無出力」を変更し、上記判断契約だけを短く出す。状態ディレクトリの作成やGitHubアクセスはhook内では行わない。
 
@@ -130,3 +132,11 @@ READMEとsession-handoff skillに次を記載する。
 主な変更対象は `scripts/handoff-check.sh`、`lib/settings-hooks.py`、`lib/ledger.py`、`install.sh`、`uninstall.sh`、`test/test-handoff-check.sh`、`test/test-install.sh`、`test/test-uninstall.sh`、README、session-handoff skill、基礎設計書である。Issue #31のtoken-report freshness変更は含めない。
 
 既存の公開CLI引数、handoff保存場所、pending/consumed形式、skill名、Claude Code hook eventは変更しない。
+
+## 10. 実装・検証結果
+
+- Task 3（Codex hookの安全なinstall/uninstall）: uninstall focused 113/113 PASS。旧readonly ledgerの一時コピー経路、未知キー・利用者hook・差し替え時の保持、残存時のmanaged `.gitignore` block保持を確認した。
+- Task 4（起動後判断契約）: handoff-check focused 96/96 PASS。pendingゼロのstartup/clear、本文fence外の契約、stdout失敗時rollback、pending親symlinkの外部内容を読まないfail-closedを確認した。
+- 全体テスト: `CTS_NO_SKIP=1 bash test/run.sh` は 595 PASS / 0 FAIL / 0 SKIP、終了コード0。
+- runtime: Python互換性、Bash 3.2 e2e、Codex CLIの隔離fixtureでSessionStart contextの到達とpendingからconsumedへの消費を確認した。
+- 通常文書ではtrust bypassを案内せず、Codexの初回確認は `/hooks` から利用者が行う契約を維持した。
