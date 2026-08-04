@@ -62,7 +62,9 @@ claude-token-saver/
 ├── skills/
 │   ├── session-handoff/SKILL.md       引き継ぎの書き方・読み方・テンプレ
 │   ├── token-report/SKILL.md          計測の回し方・レポートの読み方
-│   └── delegation-policy/SKILL.md     委譲判断の原則
+│   └── delegation-policy/
+│       ├── SKILL.md                   委譲判断の原則（Claude Code向け）
+│       └── agents/openai.yaml         Codexの明示実行 metadata
 ├── lib/                               install/uninstall が共有する編集ロジック
 │   ├── gitignore-block.py             .gitignore のマーカーブロック解析・再生成
 │   ├── settings-hooks.py              settings.local.json のフック登録・除去
@@ -91,7 +93,10 @@ claude-token-saver/
 外部コマンドに依存しない。
 
 委譲ガイドを常駐指示ではなく**スキル**として置くのは意図的である。常駐指示に置けば毎メッセージ再送されるが、
-スキルなら必要時のみ読み込まれる。本スキルの目的そのものに沿う。
+スキルなら必要時のみ読み込まれる。本スキルの目的そのものに沿う。`agents/openai.yaml` を持つこのスキルは
+Claude Code の `.claude/skills/delegation-policy` と Codex の `.agents/skills/delegation-policy` に配置する。
+metadata の `allow_implicit_invocation: false` により Codex では `$delegation-policy` の明示実行だけを許可する。
+Codex 側の hook、handoff 自動消費、token-report 計測はこの設計の対象外であり、SessionStart / handoff は後続タスク #30 で扱う。
 
 ## 5. 機能設計
 
@@ -293,6 +298,11 @@ cache/marker の tmp → rename による原子的な更新である。
 
 本リポジトリの `skills/delegation-policy/SKILL.md` を、必要なときだけ明示的に読み込む判断ガイドとして提供する。委譲を自動発火させず、常駐指示・Stop フック・設定変更へ接続しない。
 
+配布時は `agents/openai.yaml` が存在するスキルだけを Codex の `.agents/skills/<name>` にも配置する。
+Codex CLI / IDE では `$delegation-policy` と指定して明示実行し、`/skills` で利用可能な skill を確認する。
+`allow_implicit_invocation: false` により暗黙起動を禁止する。これは Claude Code 向けの判断ガイドを Codex から
+発見・明示実行できるようにする adapter であり、Codex 用 hook、handoff 自動消費、token-report 計測は提供しない。
+
 - 判断順序は、非コスト理由、作業の重さと残りの会話期間、起動・指示受け渡し・結果の読解・統合の固定費、能力帯と bounded ownership、完了条件と結果回収で固定する。
 - 非コスト理由は、並列化、ツール制限、専門知識の分離、独立した敵対的レビューである。必要ならトークン節約だけで却下しない。
 - 高能力帯は創作、アーキテクチャ設計、矛盾発見、敵対的レビューに、軽量帯は機械的な検索、形式確認、狭い静的チェック、限定されたテスト実行に使う。
@@ -399,6 +409,7 @@ snapshot の条件・現在値・fingerprint が不整合なら適用しない�
 1. `.claude/settings.local.json` を初回書き換え前に `.cts-backup` へ退避する（既存があれば上書きしない）。
    通常は版管理外の個人設定であり、事故ったときの復旧手段が他に無いためである。
 2. `skills/` 配下の各スキルを、導入先の `.claude/skills/<name>` へシンボリックリンクする。
+   `agents/openai.yaml` を持つスキルは、同じ実体を `.agents/skills/<name>` にも配置する。
    実体はクローン先に1つだけ置き、複数プロジェクトへ導入しても更新は `git pull` 1回で全体に反映される。
    シンボリックリンクが使えない環境（Windows のネイティブ環境など）ではコピーへ退避し、その旨を出力する。
    導入先が自前で置いた実ディレクトリには触らない。
@@ -432,6 +443,9 @@ snapshot の条件・現在値・fingerprint が不整合なら適用しない�
 
 `.gitignore` と `settings.local.json` の解析・編集ロジックは `lib/` に置き、`install.sh` と `uninstall.sh` で
 共有する。片方だけ直す事故を防ぐためである。
+
+Codex 対応は既存のスキル自動発見、台帳、所有マーカーを再利用する。`install.sh` / `uninstall.sh` の既存公開 CLI と
+既存 API は変更せず、Codex 専用の installer 分岐も追加しない。
 
 ### 個人設定と共有設定を分けるCLIスコープ
 

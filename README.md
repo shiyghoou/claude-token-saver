@@ -34,7 +34,8 @@ cd <導入したいリポジトリ>
 `install.sh` が行うこと:
 
 1. `.token-saver/handoff/{pending,consumed}` を作る
-2. `skills/` 配下を `.claude/skills/<name>` へシンボリックリンクする
+2. `skills/` 配下を Claude Code の `.claude/skills/<name>` へシンボリックリンクする。
+   `agents/openai.yaml` を持つスキルだけは、Codex の `.agents/skills/<name>` にも配置する。
 3. `.claude/settings.local.json` の `SessionStart` に `handoff-check.sh` を
    `matcher: "startup|clear"` 付きで登録する。
    `Stop` には `suggest-session-cut.sh` を登録する。実体のあるフックだけを登録し、
@@ -74,13 +75,15 @@ cd <導入したいリポジトリ>
     settings.local.json  ← フックの登録先。Claude Code がパスを決めるため動かせない
     skills/session-handoff
     skills/delegation-policy
+  .agents/
+    skills/delegation-policy  ← Codex用。暗黙起動は禁止
 ```
 
 引き継ぎと台帳をルート直下 `.token-saver/` へ置くのは、`.claude/` 配下から追い出すことで
 Claude Code 以外のエージェント（Codex CLI など）からも同じ場所を参照できるようにするためである。
-ただし**現時点で Codex 側から自動で読み込む仕掛けは無い**。フックの登録先とスキル本体は
-Claude Code がパスを決めるため `.claude/` に残る。Codex から読ませるには Codex 側のアダプタが
-別途必要であり、それは今後の段階で扱う。
+ただし**現時点で Codex 側から引き継ぎを自動で読み込む仕掛けは無い**。`SessionStart` フックと
+handoff の Codex 対応は後続タスク #30 で扱う。フックの登録先と Claude Code 向けスキル本体は
+Claude Code がパスを決めるため `.claude/` に残り、Codex 向けの配置は metadata を持つスキルに限る。
 
 リポジトリ名が `claude-token-saver` でディレクトリ名が `.token-saver` であるのは意図的で、
 管理するデータをツール中立にする一歩である。
@@ -259,9 +262,17 @@ prompt、tool-result 本文、環境変数、認証情報、repo 外の実パス
 
 `delegation-policy` は、重い調査・実装・レビューを委譲または並列化するか、bounded subtask の能力帯を選ぶ必要なときだけ、モデルが明示的に読み込むスキルである。常駐指示、Stop フック、自動起動は追加しない。
 
+Codex CLI / IDE では `$delegation-policy` と指定して明示実行する。利用可能な skill は `/skills` で確認できる。
+`agents/openai.yaml` の `allow_implicit_invocation: false` により暗黙起動を禁止しているため、通常の会話へ自動適用されない。
+本文は Claude Code 向けの判断ガイドであり、Codex 対応はこの skill の発見と明示実行だけを対象とする。Codex用フック、
+handoff の自動消費、token-report による Codex 使用量計測は提供しない。SessionStart / handoff の自動連携は後続タスク #30 の対象である。
+Codex 側の配置先は `.agents/skills/delegation-policy` である。
+
 判断は、非コスト理由（並列化、ツール制限、専門知識の分離、独立した敵対的レビュー）を先に確認し、作業の重さと残りの会話期間、起動・指示受け渡し・結果の読解・統合の固定費、能力帯と境界、完了条件と回収計画の順に見る。起動した結果は必ず回収し、メイン側で検証・統合する。判断結果は `decision`、`reason`、`delegated scope`、`capability tier`、`completion condition`、`collection method` を含める。
 
 Stage 4 の token-report / calibration 出力は任意の人間向け参考情報であり、このスキルは snapshot の JSON 構造や `.token-saver/calibration/latest.json` を解析しない。計測値だけで委譲先・モデル・設定を自動選択せず、既存の CLI、設定、台帳、フック、MCP、エージェント設定も変更しない。起動固定費は直接測定していないため、固定の損益分岐点、モデル名、価格、固定トークン数を規則として置かない。
+
+`install.sh` / `uninstall.sh` の既存公開 CLI（`--personal`、`--shared`、`--guess`）と既存の台帳・所有者保護・原子的な書き込み契約は維持する。Codex 対応のために専用の installer 分岐や既存公開 API の変更は行わない。
 
 ### 移植元の切り替え
 
