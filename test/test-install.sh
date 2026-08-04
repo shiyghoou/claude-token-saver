@@ -259,7 +259,96 @@ test_delegation_policyをコピー配置できる() {
   assert_file_exists "$TARGET/.claude/skills/delegation-policy/.claude-token-saver"
 }
 
-test_利用者所有のdelegation_policyを上書きも記録もしない() {
+test_Codex対応スキルを_agentsへリンクする() {
+  _setup_target
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy/SKILL.md"
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy/agents/openai.yaml"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".agents/skills/delegation-policy" ".gitignore"
+}
+
+test_Codex対応スキルをmarker付きcopyで配置する() {
+  _setup_target
+  CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >/dev/null 2>&1
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy/SKILL.md"
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy/.claude-token-saver"
+}
+
+test_metadata無しスキルを_agentsへ配置しない() {
+  _setup_target
+  _run_install
+  assert_file_missing "$TARGET/.agents/skills/session-handoff"
+  assert_file_missing "$TARGET/.agents/skills/token-report"
+}
+
+test_利用者所有のCodex同名directoryを上書きも除外もしない() {
+  _setup_target
+  mkdir -p "$TARGET/.agents/skills/delegation-policy"
+  printf '利用者のCodex方針\n' >"$TARGET/.agents/skills/delegation-policy/SKILL.md"
+  _run_install
+  assert_contains "$(cat "$TARGET/.agents/skills/delegation-policy/SKILL.md")" "利用者のCodex方針" "同名保護"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".agents/skills/delegation-policy" ".gitignore"
+}
+
+test_利用者所有のCodex同名fileを上書きも除外もしない() {
+  _setup_target
+  mkdir -p "$TARGET/.agents/skills"
+  printf '利用者のfile\n' >"$TARGET/.agents/skills/delegation-policy"
+  _run_install
+  assert_contains "$(cat "$TARGET/.agents/skills/delegation-policy")" "利用者のfile" "同名file"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".agents/skills/delegation-policy" ".gitignore"
+}
+
+test_利用者所有のCodex同名linkを上書きも除外もしない() {
+  _setup_target
+  mkdir -p "$TEST_TMP/user-skill" "$TARGET/.agents/skills"
+  printf '利用者のlink\n' >"$TEST_TMP/user-skill/SKILL.md"
+  ln -s "$TEST_TMP/user-skill" "$TARGET/.agents/skills/delegation-policy"
+  _run_install
+  assert_eq "$TEST_TMP/user-skill" "$(readlink "$TARGET/.agents/skills/delegation-policy")" "foreign link"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".agents/skills/delegation-policy" ".gitignore"
+}
+
+test_agents_parent_symlinkは変更前に拒否する() {
+  _setup_target
+  mkdir -p "$TEST_TMP/outside"
+  ln -s "$TEST_TMP/outside" "$TARGET/.agents"
+  _run_install
+  assert_ne "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.claude/settings.local.json"
+  assert_file_missing "$TEST_TMP/outside/skills"
+}
+
+test_agents_skills_parent_symlinkは変更前に拒否する() {
+  _setup_target
+  mkdir -p "$TARGET/.agents" "$TEST_TMP/outside"
+  ln -s "$TEST_TMP/outside" "$TARGET/.agents/skills"
+  _run_install
+  assert_ne "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.claude/settings.local.json"
+  assert_file_missing "$TEST_TMP/outside/delegation-policy"
+}
+
+test_personal後のsharedは実所有Codexスキルだけを除外する() {
+  _setup_target
+  bash "$INSTALL" --personal "$TARGET" >/dev/null 2>&1
+  assert_file_missing "$TARGET/.gitignore"
+  bash "$INSTALL" --shared "$TARGET" >/dev/null 2>&1
+  assert_contains "$(cat "$TARGET/.gitignore")" ".agents/skills/delegation-policy" ".gitignore"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".agents/skills/session-handoff" ".gitignore"
+}
+
+test_Codex同名衝突でもClaude側は従来どおり配置する() {
+  _setup_target
+  mkdir -p "$TARGET/.agents/skills/delegation-policy"
+  printf '利用者のCodex方針\n' >"$TARGET/.agents/skills/delegation-policy/SKILL.md"
+  _run_install
+  assert_file_exists "$TARGET/.claude/skills/delegation-policy/SKILL.md"
+  assert_contains "$(cat "$TARGET/.token-saver/installed.json")" '"name": "delegation-policy"' "台帳"
+}
+
+test_利用者所有のClaude側delegation_policyは保護しCodex側だけ記録する() {
   _setup_target
   mkdir -p "$TARGET/.claude/skills/delegation-policy"
   printf '利用者の方針\n' >"$TARGET/.claude/skills/delegation-policy/SKILL.md"
@@ -267,10 +356,13 @@ test_利用者所有のdelegation_policyを上書きも記録もしない() {
   assert_eq "0" "$INSTALL_STATUS" "終了コード"
   assert_contains "$(cat "$TARGET/.claude/skills/delegation-policy/SKILL.md")" \
     "利用者の方針" "同名保護"
-  assert_not_contains "$(cat "$TARGET/.token-saver/installed.json")" \
-    '"name": "delegation-policy"' "台帳"
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy/SKILL.md" "Codex側の配置"
+  assert_contains "$(cat "$TARGET/.token-saver/installed.json")" \
+    '"name": "delegation-policy"' "Codex側の台帳"
   assert_not_contains "$(cat "$TARGET/.gitignore")" \
     ".claude/skills/delegation-policy" ".gitignore"
+  assert_contains "$(cat "$TARGET/.gitignore")" \
+    ".agents/skills/delegation-policy" ".gitignore"
 }
 
 test_スキルのリンクは二度実行しても失敗しない() {
@@ -1206,8 +1298,11 @@ test_sharedスコープは台帳が無ければ推測しない() {
   assert_not_contains "$(cat "$TARGET/.gitignore")" ".claude/skills/session-handoff" ".gitignoreの推測除外"
 }
 
-test_sharedスコープは旧台帳を読み取るが移行しない() {
+test_sharedスコープは旧台帳を読み取り実所有スキルだけを除外し移行しない() {
   _setup_target
+  # 旧台帳の記録だけでなく、実配置も自分のリンクである場合に限って除外する。
+  mkdir -p "$TARGET/.claude/skills"
+  ln -s "$REPO_ROOT/skills/session-handoff" "$TARGET/.claude/skills/session-handoff"
   mkdir -p "$TARGET/.claude/.token-saver"
   python3 - "$TARGET/.claude/.token-saver/installed.json" "$REPO_ROOT/skills/session-handoff" <<'PY'
 import json

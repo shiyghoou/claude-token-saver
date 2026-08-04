@@ -94,9 +94,71 @@ warn() {
   printf '  警告: %s\n' "$*"
 }
 
+# 台帳が無い旧環境向けの推測。リンク先が「どこかのクローンの skills/<同名>」で
+# あり、その親に install.sh が実在するときだけ自分のものとみなす。
+# basename と親ディレクトリ名だけで判定すると、利用者が社内共有の skills/ へ
+# 張ったリンクまで自分のものと誤認する。
+looks_like_our_link() {
+  local link="$1" name="$2" home
+  [ "$(basename "$link")" = "$name" ] || return 1
+  [ "$(basename "$(dirname "$link")")" = "skills" ] || return 1
+  home="$(dirname "$(dirname "$link")")"
+  [ -f "$home/install.sh" ]
+}
+
+cts_place_skill() {
+  local name="$1" src="$2" dest="$3" runtime_label="$4" link recorded
+  placed_skill=""
+  placed_mode=""
+
+  if [ -z "${CTS_NO_SYMLINK:-}" ] && [ -L "$dest" ] &&
+     [ "$(readlink "$dest")" = "$src" ]; then
+    placed_skill=1
+    placed_mode=link
+    return 0
+  fi
+  if [ -L "$dest" ]; then
+    link="$(readlink "$dest")"
+    recorded="$(python3 "$CTS_HOME/lib/ledger.py" get-skill "$LEDGER" "$name" | cut -d $'\037' -f1)"
+    if [ "$link" != "$recorded" ] &&
+       { [ -n "$recorded" ] || ! looks_like_our_link "$link" "$name"; }; then
+      warn "$runtime_label スキル $name は導入先が張ったリンクなので触らない（$link）"
+      return 0
+    fi
+  elif [ -d "$dest" ]; then
+    if [ ! -f "$dest/.claude-token-saver" ]; then
+      warn "$runtime_label スキル $name は導入先に既存のディレクトリがあるため触らない（.gitignore にも書かない）"
+      return 0
+    fi
+  elif [ -e "$dest" ]; then
+    warn "$runtime_label スキル $name は導入先に既存のファイルがあるため触らない（.gitignore にも書かない）"
+    return 0
+  fi
+
+  rm -rf "$dest"
+  placed_mode=link
+  if [ -z "${CTS_NO_SYMLINK:-}" ] && ln -s "$src" "$dest" 2>/dev/null; then
+    info "  $runtime_label スキルをリンクした: $name"
+  else
+    cp -R "$src" "$dest" || die "$runtime_label スキル $name を配置できない"
+    printf 'claude-token-saver が配置したコピー。手で編集しない。\n' >"$dest/.claude-token-saver"
+    placed_mode=copy
+    info "  $runtime_label スキルをコピーで配置した: $name"
+  fi
+  placed_skill=1
+}
+
+cts_destination_is_owned() {
+  local src="$1" dest="$2"
+  { [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; } ||
+    { [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; }
+}
+
 cts_reject_managed_symlinks() {
   local path
   for path in \
+    "$TARGET/.agents" \
+    "$TARGET/.agents/skills" \
     "$TARGET/.claude" \
     "$TARGET/.claude/skills" \
     "$TARGET/$(cts_legacy_handoff_rel)" \
@@ -129,6 +191,8 @@ fi
 info "claude-token-saver を導入する: $TARGET"
 
 installed_skills=()
+claude_installed_skills=()
+codex_installed_skills=()
 gitignore_existed=1
 [ -e "$GITIGNORE" ] || [ -L "$GITIGNORE" ] || gitignore_existed=0
 legacy_ledger="$TARGET/$(cts_legacy_ledger_rel)"
@@ -436,78 +500,37 @@ mkdir -p "$TARGET/.claude/skills" || die "skills ディレクトリを作成で�
 # 実際に設置したスキルだけを .gitignore へ書くため、名前を集める。
 found_skills=0
 
-# 台帳が無い旧環境向けの推測。リンク先が「どこかのクローンの skills/<同名>」で
-# あり、その親に install.sh が実在するときだけ自分のものとみなす。
-# basename と親ディレクトリ名だけで判定すると、利用者が社内共有の skills/ へ
-# 張ったリンクまで自分のものと誤認する。
-looks_like_our_link() {
-  local link="$1" name="$2" home
-  [ "$(basename "$link")" = "$name" ] || return 1
-  [ "$(basename "$(dirname "$link")")" = "skills" ] || return 1
-  home="$(dirname "$(dirname "$link")")"
-  [ -f "$home/install.sh" ]
-}
-
 for skill_dir in "$CTS_HOME"/skills/*/; do
   [ -d "$skill_dir" ] || continue
   found_skills=$((found_skills + 1))
   name="$(basename "$skill_dir")"
-  dest="$TARGET/.claude/skills/$name"
   src="${skill_dir%/}"
 
-  # 既に正しくリンクされているなら何もしない。
-  if [ -z "${CTS_NO_SYMLINK:-}" ] && [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
-    installed_skills+=("$name")
-    python3 "$CTS_HOME/lib/ledger.py" add-skill "$LEDGER" "$name" "$src" link ||
+  installed_any=""
+  ledger_mode=""
+  cts_place_skill "$name" "$src" "$TARGET/.claude/skills/$name" "Claude Code"
+  if [ -n "$placed_skill" ]; then
+    claude_installed_skills+=("$name")
+    installed_any=1
+    ledger_mode="$placed_mode"
+  fi
+
+  if [ -f "$src/agents/openai.yaml" ]; then
+    mkdir -p "$TARGET/.agents/skills" || die "Codex skills ディレクトリを作成できない"
+    cts_place_skill "$name" "$src" "$TARGET/.agents/skills/$name" "Codex"
+    if [ -n "$placed_skill" ]; then
+      codex_installed_skills+=("$name")
+      installed_any=1
+      [ -n "$ledger_mode" ] || ledger_mode="$placed_mode"
+    fi
+  fi
+
+  if [ -n "$installed_any" ]; then
+    python3 "$CTS_HOME/lib/ledger.py" add-skill "$LEDGER" "$name" "$src" "$ledger_mode" ||
       die "台帳を更新できない"
-    continue
+    installed_skills+=("$name")
+    applied+=("スキル $name を設置")
   fi
-
-  if [ -L "$dest" ]; then
-    # 別の場所を指すリンク。自分が過去に張ったもの（クローンを移した等）なら
-    # 張り替える。そうでなければ導入先の設置物なので触らない。
-    link="$(readlink "$dest")"
-    # 区切りは US(0x1f)。ledger.py の行プロトコルと合わせる。
-    recorded="$(python3 "$CTS_HOME/lib/ledger.py" get-skill "$LEDGER" "$name" | cut -d $'\037' -f1)"
-    if [ -n "$recorded" ] && [ "$recorded" = "$link" ]; then
-      : # 自分が張ったリンクである
-    elif [ -z "$recorded" ] && looks_like_our_link "$link" "$name"; then
-      : # 台帳の無い旧環境で張ったリンクとみなす
-    else
-      warn "スキル $name は導入先が張ったリンクなので触らない（$link）"
-      continue
-    fi
-  elif [ -d "$dest" ]; then
-    # 実ディレクトリがあり、それが install.sh のコピーでないなら触らない。
-    # 導入先が自前で置いたスキルを上書きすると、他人の作業を消す。
-    if [ ! -f "$dest/.claude-token-saver" ]; then
-      warn "スキル $name は導入先に既存のディレクトリがあるため触らない（.gitignore にも書かない）"
-      continue
-    fi
-  elif [ -e "$dest" ]; then
-    # リンクでもディレクトリでもない既存物（通常ファイル・FIFO など）。
-    # 分岐がリンクとディレクトリしか見ていないと、これが下の rm -rf へ落ちて
-    # 利用者のファイルを無警告で消す。知らない種類のものには触らない。
-    warn "スキル $name は導入先に既存のファイルがあるため触らない（.gitignore にも書かない）"
-    continue
-  fi
-
-  rm -rf "$dest"
-  mode=link
-  if [ -z "${CTS_NO_SYMLINK:-}" ] && ln -s "$src" "$dest" 2>/dev/null; then
-    info "  スキルをリンクした: $name"
-  else
-    cp -R "$src" "$dest" || die "スキル $name を配置できない"
-    # コピーであることを記録する。次回の install.sh が更新してよいと判断できるようにする。
-    printf 'claude-token-saver が配置したコピー。手で編集しない。\n' >"$dest/.claude-token-saver"
-    mode=copy
-    info "  スキルをコピーで配置した（シンボリックリンクが使えない環境）: $name"
-    info "    リポジトリを更新したら install.sh を再実行してコピーを更新せよ。"
-  fi
-  python3 "$CTS_HOME/lib/ledger.py" add-skill "$LEDGER" "$name" "$src" "$mode" ||
-    die "台帳を更新できない"
-  installed_skills+=("$name")
-  applied+=("スキル $name を設置")
 done
 
 [ "$found_skills" -gt 0 ] ||
@@ -524,12 +547,21 @@ if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
 
   # 共有設定では個人領域を推測しない。台帳に実際に記録されたスキル名だけを
   # 読み、台帳が無ければ状態ディレクトリの除外だけを書く。
-  while IFS=$'\037' read -r name _src _mode; do
+  while IFS=$'\037' read -r name src _mode; do
     case "$name" in
       "" | . | .. | */*)
         [ -z "$name" ] || warn "台帳のスキル名が不正なので .gitignore に書かない: $name"
         ;;
-      *) installed_skills+=("$name") ;;
+      *)
+        installed_skills+=("$name")
+        if cts_destination_is_owned "$src" "$TARGET/.claude/skills/$name"; then
+          claude_installed_skills+=("$name")
+        fi
+        if [ -f "$src/agents/openai.yaml" ] &&
+           cts_destination_is_owned "$src" "$TARGET/.agents/skills/$name"; then
+          codex_installed_skills+=("$name")
+        fi
+        ;;
     esac
   done < <(python3 "$CTS_HOME/lib/ledger.py" list-skills "$shared_ledger")
 fi
@@ -547,8 +579,11 @@ if [ "$do_shared" = 1 ]; then
 # （導入先が自前で持っているもの）を無視すると、その版管理を静かに壊す。
 {
   printf '%s/\n' "$(cts_base_rel)"
-  for name in ${installed_skills[@]+"${installed_skills[@]}"}; do
+  for name in ${claude_installed_skills[@]+"${claude_installed_skills[@]}"}; do
     printf '.claude/skills/%s\n' "$name"
+  done
+  for name in ${codex_installed_skills[@]+"${codex_installed_skills[@]}"}; do
+    printf '.agents/skills/%s\n' "$name"
   done
 } | python3 "$CTS_HOME/lib/gitignore-block.py" apply "$GITIGNORE"
 gitignore_status=$?
