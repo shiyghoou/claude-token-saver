@@ -82,6 +82,8 @@ TARGET="$(cd -- "$target_arg" 2>/dev/null && pwd -P)" || {
 
 SETTINGS="$TARGET/.claude/settings.local.json"
 BACKUP="$SETTINGS.cts-backup"
+CODEX_DIR="$TARGET/.codex"
+CODEX_HOOKS="$CODEX_DIR/hooks.json"
 GITIGNORE="$TARGET/.gitignore"
 LEDGER="$TARGET/$(cts_ledger_rel)"
 TOKEN_REPORT_ENTRYPOINT="$TARGET/$(cts_token_report_rel)"
@@ -106,6 +108,8 @@ cts_reject_managed_symlinks() {
     "$TARGET/.agents/skills" \
     "$TARGET/.claude" \
     "$TARGET/.claude/skills" \
+    "$TARGET/.codex" \
+    "$TARGET/.codex/hooks.json" \
     "$TARGET/$(cts_legacy_handoff_rel)" \
     "$TARGET/$(cts_legacy_handoff_rel)/pending" \
     "$TARGET/$(cts_legacy_handoff_rel)/consumed" \
@@ -149,6 +153,16 @@ have_ledger=0
 have_skill_record=0
 python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" any && have_ledger=1
 python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" skills && have_skill_record=1
+have_codex_hook_record=0
+python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" codex_hooks && have_codex_hook_record=1
+codex_hooks_created=0
+codex_dir_created=0
+codex_remove_ledger="$LEDGER"
+codex_remove_ledger_temp=""
+if [ "$have_ledger" = 1 ]; then
+  codex_hooks_created="$(python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" codex_hooks_created)"
+  codex_dir_created="$(python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" codex_dir_created)"
+fi
 token_report_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" token_report_source)"
 token_calibrate_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" token_calibrate_source)"
 
@@ -158,6 +172,49 @@ token_calibrate_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" 
 skills_left=0
 token_report_left=0
 token_calibrate_left=0
+codex_hooks_left=0
+
+codex_hooks_is_empty_object() {
+  python3 - "$CODEX_HOOKS" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8-sig", errors="surrogateescape", newline="") as handle:
+        value = json.load(handle)
+except (OSError, UnicodeError, ValueError):
+    sys.exit(2)
+sys.exit(0 if value == {} else 1)
+PY
+}
+
+if [ "$do_personal" = 1 ]; then
+  if [ -e "$CODEX_DIR" ] && [ ! -d "$CODEX_DIR" ]; then
+    die ".codex がディレクトリでないため変更しない: $CODEX_DIR"
+  fi
+  if [ -e "$CODEX_HOOKS" ] && [ ! -f "$CODEX_HOOKS" ]; then
+    die ".codex/hooks.json が通常ファイルでないため変更しない: $CODEX_HOOKS"
+  fi
+  python3 "$CTS_HOME/lib/settings-hooks.py" validate "$CODEX_HOOKS" ||
+    die ".codex/hooks.json が妥当なJSONでないため変更しない"
+  if [ "$have_codex_hook_record" = 1 ] && [ -f "$CODEX_HOOKS" ]; then
+    if ! python3 "$CTS_HOME/lib/ledger.py" check-writable "$LEDGER"; then
+      if [ "$LEDGER" = "$LEGACY_LEDGER" ]; then
+        codex_remove_ledger_temp="$(mktemp "${TMPDIR:-/tmp}/cts-codex-ledger.XXXXXX")" ||
+          die "旧Codex用台帳の作業用控えを作成できない"
+        cp "$LEDGER" "$codex_remove_ledger_temp" || {
+          rm -f "$codex_remove_ledger_temp"
+          die "旧Codex用台帳の作業用控えを作成できない"
+        }
+        codex_remove_ledger="$codex_remove_ledger_temp"
+      else
+        die "Codex用台帳に安全に書き込めない"
+      fi
+    fi
+    python3 "$CTS_HOME/lib/ledger.py" check-writable "$CODEX_HOOKS" ||
+      die ".codex/hooks.json に安全に書き込めない"
+  fi
+fi
 
 if [ "$do_personal" = 1 ]; then
 
@@ -242,6 +299,60 @@ if [ -f "$SETTINGS" ]; then
   esac
 else
   info "  settings.local.json が無い"
+fi
+
+# Codex project hookはClaude側と別の台帳キーで外す。台帳が無い状態では
+# --guessへ落とさず、利用者のhookとして残す。Codex側に残りがあっても、上の
+# Claude側の取り外し結果を巻き戻さない（所有権と失敗を独立に扱う）。
+if [ "$do_personal" = 1 ] &&
+   { [ "$have_codex_hook_record" = 1 ] || [ -f "$CODEX_HOOKS" ]; }; then
+  if [ "$have_codex_hook_record" = 1 ] && [ ! -f "$CODEX_HOOKS" ]; then
+    warn "Codex hooks.json が無いため台帳を保持する"
+    codex_hooks_left=1
+  elif [ -f "$CODEX_HOOKS" ]; then
+    python3 "$CTS_HOME/lib/settings-hooks.py" remove "$CODEX_HOOKS" \
+      --ledger "$codex_remove_ledger" --ledger-key codex_hooks
+    codex_status=$?
+    case "$codex_status" in
+      0)
+        if [ -f "$CODEX_HOOKS" ]; then
+          codex_empty_status=0
+          codex_hooks_is_empty_object || codex_empty_status=$?
+          if [ "$codex_empty_status" -eq 0 ] && [ "$codex_hooks_created" = 1 ]; then
+            if rm -f "$CODEX_HOOKS" && [ ! -e "$CODEX_HOOKS" ] && [ ! -L "$CODEX_HOOKS" ]; then
+              info "  Codex hooks.json を外した"
+            else
+              warn "導入者が作成したCodex hooks.jsonを削除できないため残す"
+              codex_hooks_left=1
+            fi
+          elif [ "$codex_empty_status" -eq 2 ]; then
+            warn "Codex hooks.jsonを検証できないため残す"
+            codex_hooks_left=1
+          elif [ "$codex_empty_status" -ne 0 ]; then
+            warn "Codex hooks.jsonに利用者のキーまたはhookが残っているため残す"
+            codex_hooks_left=1
+          fi
+        fi
+        ;;
+      2)
+        if [ "$have_codex_hook_record" = 1 ]; then
+          warn "Codex hooks.jsonのhookが導入後に差し替えられているか外せないため残す"
+        else
+          warn "Codex hooks.jsonに台帳のフック記録が無いため変更しない（推測削除しない）"
+        fi
+        codex_hooks_left=1
+        ;;
+      *)
+        [ -z "$codex_remove_ledger_temp" ] || rm -f "$codex_remove_ledger_temp"
+        die ".codex/hooks.json を更新できない"
+        ;;
+    esac
+    if [ -n "$codex_remove_ledger_temp" ]; then
+      rm -f "$codex_remove_ledger_temp"
+      codex_remove_ledger_temp=""
+      codex_remove_ledger="$LEDGER"
+    fi
+  fi
 fi
 
 # --- 2. スキル ---------------------------------------------------------------
@@ -438,6 +549,16 @@ recorded_skill_destinations_left
 
 fi
 
+if [ "$do_personal" = 1 ] && [ "$codex_dir_created" = 1 ] &&
+   [ "$codex_hooks_left" = 0 ] && [ -d "$CODEX_DIR" ]; then
+  if rmdir "$CODEX_DIR" 2>/dev/null; then
+    info "  導入者が作成した空の .codex を外した"
+  else
+    warn "導入者が作成した .codex に残存物があるためディレクトリを残す"
+    codex_hooks_left=1
+  fi
+fi
+
 # --- 3. .gitignore -----------------------------------------------------------
 
 handoff_dir="$TARGET/$(cts_handoff_rel)"
@@ -498,7 +619,7 @@ fi
 if [ "$do_shared" = 1 ]; then
   if { [ "$do_personal" = 1 ] &&
        { [ "$skills_left" = 1 ] || [ "$token_report_left" = 1 ] ||
-         [ "$token_calibrate_left" = 1 ]; }; } ||
+         [ "$token_calibrate_left" = 1 ] || [ "$codex_hooks_left" = 1 ]; }; } ||
      { [ "$do_personal" = 0 ] && [ "$shared_left" = 1 ]; }; then
     warn "管理対象の設置物が残っているため .gitignore の除外を外していない"
   elif [ -f "$GITIGNORE" ]; then
