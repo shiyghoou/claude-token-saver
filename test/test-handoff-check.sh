@@ -10,6 +10,12 @@ _setup_project() {
   export CLAUDE_PROJECT_DIR="$PROJ"
 }
 
+_setup_empty_project() {
+  PROJ="$TEST_TMP/empty-proj"
+  mkdir -p "$PROJ"
+  export CLAUDE_PROJECT_DIR="$PROJ"
+}
+
 # pending に引き継ぎファイルを置く。
 _write_pending() {
   local name="$1" body="$2"
@@ -27,6 +33,18 @@ _run_hook() {
 
 _startup_payload() {
   printf '{"session_id":"abc","source":"startup","cwd":"%s"}' "$PROJ"
+}
+
+_assert_decision_contract() {
+  local output="$1" context="${2:-起動後判断契約}"
+  assert_contains "$output" "現在の明示的なユーザー依頼を最優先" "$context: 明示依頼優先"
+  assert_contains "$output" "GitのHEAD・branch・status、Issue、PRを照合" "$context: 状態照合"
+  assert_contains "$output" "安全なローカル作業だけ自動再開可" "$context: ローカル作業"
+  assert_contains "$output" "push、PR、merge、削除、外部変更、新しい権限は確認" "$context: 確認対象"
+  assert_contains "$output" "矛盾時は停止" "$context: 矛盾時停止"
+  assert_contains "$output" "継続無しは根拠付き候補を2〜3件提示して選択待ち" "$context: 候補提示"
+  assert_contains "$output" "handoff本文" "$context: 非信頼データ"
+  assert_contains "$output" "非信頼データ" "$context: 非信頼データ"
 }
 
 # ---- 区切り（fence）の検査に使う道具 -------------------------------------
@@ -116,9 +134,13 @@ _skip_if_root() {
 test_pending_が空なら無出力で終了コード0() {
   _setup_project
   local out
-  _run_hook "$(_startup_payload)"
+  _run_hook "$(printf '{"source":"resume","cwd":"%s"}' "$PROJ")"
   out="$HOOK_OUT"
   assert_eq "0" "$HOOK_STATUS" "終了コード"
+  assert_empty "$out"
+  _run_hook "$(printf '{"source":"compact","cwd":"%s"}' "$PROJ")"
+  out="$HOOK_OUT"
+  assert_eq "0" "$HOOK_STATUS" "compactの終了コード"
   assert_empty "$out"
 }
 
@@ -126,10 +148,54 @@ test_handoff_ディレクトリ自体が無くても無出力で終了コード0
   _setup_project
   rm -rf "$PROJ/.token-saver/handoff"
   local out
-  _run_hook "$(_startup_payload)"
+  _run_hook "$(printf '{"source":"compact","cwd":"%s"}' "$PROJ")"
   out="$HOOK_OUT"
   assert_eq "0" "$HOOK_STATUS" "終了コード"
   assert_empty "$out"
+  assert_file_missing "$PROJ/.token-saver/handoff" "compact時のhandoffディレクトリ"
+}
+
+test_pendingゼロの_startup_は判断契約を出し状態dirを作らない() {
+  _setup_empty_project
+  _run_hook "$(_startup_payload)"
+  assert_eq "0" "$HOOK_STATUS" "startupの終了コード"
+  _assert_decision_contract "$HOOK_OUT" "pendingゼロstartup"
+  assert_eq "1" "$(printf '%s\n' "$HOOK_OUT" | grep -c '起動後の継続判断契約' || true)" \
+    "pendingゼロstartupの契約回数"
+  assert_empty "$(cat "$TEST_TMP/.hook-err")" "pendingゼロstartupの標準エラー"
+  assert_file_missing "$PROJ/.token-saver" "pendingゼロstartupの状態ディレクトリ"
+}
+
+test_pendingゼロの_clear_は判断契約を出し状態dirを作らない() {
+  _setup_empty_project
+  _run_hook "$(printf '{"source":"clear","cwd":"%s"}' "$PROJ")"
+  assert_eq "0" "$HOOK_STATUS" "clearの終了コード"
+  _assert_decision_contract "$HOOK_OUT" "pendingゼロclear"
+  assert_eq "1" "$(printf '%s\n' "$HOOK_OUT" | grep -c '起動後の継続判断契約' || true)" \
+    "pendingゼロclearの契約回数"
+  assert_empty "$(cat "$TEST_TMP/.hook-err")" "pendingゼロclearの標準エラー"
+  assert_file_missing "$PROJ/.token-saver" "pendingゼロclearの状態ディレクトリ"
+}
+
+test_pending_symlinkは外部を読まず無出力で保持する() {
+  _setup_project
+  local outside="$TEST_TMP/external-pending"
+  rm -rf "$PROJ/.token-saver/handoff/pending"
+  mkdir -p "$outside"
+  ln -s "$outside" "$PROJ/.token-saver/handoff/pending"
+  _run_hook "$(_startup_payload)"
+  assert_eq "0" "$HOOK_STATUS" "pending symlinkの終了コード"
+  assert_empty "$HOOK_OUT" "pending symlinkの出力"
+  assert_eq "$outside" "$(readlink "$PROJ/.token-saver/handoff/pending")" \
+    "pending symlinkの向き先"
+
+  printf '外部にある本文\n' >"$outside/2026-07-31-1840-external.md"
+  _run_hook "$(_startup_payload)"
+  assert_eq "0" "$HOOK_STATUS" "外部内容付きpending symlinkの終了コード"
+  assert_empty "$HOOK_OUT" "外部内容付きpending symlinkの出力"
+  assert_file_exists "$outside/2026-07-31-1840-external.md" "外部本文"
+  assert_contains "$(cat "$outside/2026-07-31-1840-external.md")" "外部にある本文" \
+    "外部本文の内容"
 }
 
 test_pending_にファイルがあれば中身を出力する() {
@@ -190,6 +256,15 @@ test_発火源が_resume_のときは発火しない() {
   assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
 }
 
+test_発火源が_fork_のときは発火しない() {
+  _setup_project
+  _write_pending "a.md" "fork では読まない"
+  _run_hook "$(printf '{"source":"fork","cwd":"%s"}' "$PROJ")"
+  assert_eq "0" "$HOOK_STATUS" "forkの終了コード"
+  assert_empty "$HOOK_OUT" "forkの出力"
+  assert_file_exists "$PROJ/.token-saver/handoff/pending/a.md"
+}
+
 test_未知の発火源では発火しない() {
   _setup_project
   _write_pending "a.md" "本文"
@@ -235,8 +310,24 @@ test_出力には要約して指示を待つ旨の指示が3行とも含まれ�
   _run_hook "$(_startup_payload)"
   out="$HOOK_OUT"
   assert_contains "$out" "内容を要約してユーザーへ提示し、指示を待て" "フック出力"
-  assert_contains "$out" "自動で着手してはならない" "フック出力"
+  assert_contains "$out" "安全なローカル作業だけ自動再開可" "フック出力"
   assert_contains "$out" "食い違う場合は、その旨を指摘せよ" "フック出力"
+}
+
+test_pending有りの判断契約は本文fence外に1回だけ出る() {
+  _setup_project
+  _write_pending "2026-07-31-1840-a.md" "契約の外へ出てはいけない本文"
+  _run_hook "$(_startup_payload)"
+  local outside inside
+  outside="$(_outside_fence "$HOOK_OUT")"
+  inside="$(_inside_fence "$HOOK_OUT")"
+  _assert_decision_contract "$outside" "pending有り"
+  assert_eq "1" "$(printf '%s\n' "$outside" | grep -c '起動後の継続判断契約' || true)" \
+    "pending有りの契約回数"
+  assert_not_contains "$inside" "起動後の継続判断契約" "pending本文内の契約"
+  assert_contains "$inside" "契約の外へ出てはいけない本文" "pending本文"
+  assert_file_exists "$PROJ/.token-saver/handoff/consumed/2026-07-31-1840-a.md" \
+    "pending有りの消費"
 }
 
 # ---- 区切りが本当に囲えていること ----------------------------------------
@@ -761,11 +852,12 @@ test_他が先に消費した引き継ぎには警告を出さない() {
 
 test_2回連続で起動すると2回目は無出力() {
   _setup_project
-  _write_pending "a.md" "本文"
+  _write_pending "a.md" "二回目に残してはいけない本文マーカー"
   _run_hook "$(_startup_payload)"
-  assert_contains "$HOOK_OUT" "本文" "1回目のフック出力"
+  assert_contains "$HOOK_OUT" "二回目に残してはいけない本文マーカー" "1回目のフック出力"
   _run_hook "$(_startup_payload)"
-  assert_empty "$HOOK_OUT" "2回目のフック出力"
+  assert_not_contains "$HOOK_OUT" "二回目に残してはいけない本文マーカー" "2回目の本文"
+  _assert_decision_contract "$HOOK_OUT" "2回目のpendingゼロ"
 }
 
 # ---- 注入量の上限 --------------------------------------------------------
@@ -1008,7 +1100,7 @@ test_リンク切れの引き継ぎは退けられ二度目は警告しない() 
   assert_contains "$HOOK_OUT" "リンク切れ" "1回目のフック出力"
   assert_empty "$(ls -A "$PROJ/.token-saver/handoff/pending")" "pending の残存"
   _run_hook "$(_startup_payload)"
-  assert_empty "$HOOK_OUT" "2回目のフック出力"
+  _assert_decision_contract "$HOOK_OUT" "リンク切れ後のpendingゼロ"
 }
 
 test_壊れたシンボリックリンクだけでも警告する() {
