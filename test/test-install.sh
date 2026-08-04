@@ -263,6 +263,10 @@ test_Codex対応スキルを_agentsへリンクする() {
   _setup_target
   _run_install
   assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  [ -L "$TARGET/.agents/skills/delegation-policy" ] ||
+    _fail "Codex対応スキルがシンボリックリンクではない"
+  assert_eq "$REPO_ROOT/skills/delegation-policy" \
+    "$(readlink "$TARGET/.agents/skills/delegation-policy")" "Codexリンク先"
   assert_file_exists "$TARGET/.agents/skills/delegation-policy/SKILL.md"
   assert_file_exists "$TARGET/.agents/skills/delegation-policy/agents/openai.yaml"
   assert_contains "$(cat "$TARGET/.gitignore")" ".agents/skills/delegation-policy" ".gitignore"
@@ -308,6 +312,21 @@ test_利用者所有のCodex同名linkを上書きも除外もしない() {
   _run_install
   assert_eq "$TEST_TMP/user-skill" "$(readlink "$TARGET/.agents/skills/delegation-policy")" "foreign link"
   assert_not_contains "$(cat "$TARGET/.gitignore")" ".agents/skills/delegation-policy" ".gitignore"
+}
+
+test_Codexのlegacy風foreign_linkを所有扱いしない() {
+  _setup_target
+  foreign_repo="$TEST_TMP/foreign-repo"
+  foreign_link="$foreign_repo/skills/delegation-policy"
+  mkdir -p "$foreign_link" "$TARGET/.agents/skills"
+  printf '#!/usr/bin/env bash\n' >"$foreign_repo/install.sh"
+  ln -s "$foreign_link" "$TARGET/.agents/skills/delegation-policy"
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_eq "$foreign_link" \
+    "$(readlink "$TARGET/.agents/skills/delegation-policy")" "Codex foreign link"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" \
+    ".agents/skills/delegation-policy" "foreign Codex .gitignore"
 }
 
 test_agents_parent_symlinkは変更前に拒否する() {

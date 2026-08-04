@@ -107,7 +107,7 @@ looks_like_our_link() {
 }
 
 cts_place_skill() {
-  local name="$1" src="$2" dest="$3" runtime_label="$4" link recorded
+  local name="$1" src="$2" dest="$3" runtime_label="$4" allow_legacy_link="${5:-0}" link recorded
   placed_skill=""
   placed_mode=""
 
@@ -121,7 +121,8 @@ cts_place_skill() {
     link="$(readlink "$dest")"
     recorded="$(python3 "$CTS_HOME/lib/ledger.py" get-skill "$LEDGER" "$name" | cut -d $'\037' -f1)"
     if [ "$link" != "$recorded" ] &&
-       { [ -n "$recorded" ] || ! looks_like_our_link "$link" "$name"; }; then
+       { [ -n "$recorded" ] || [ "$allow_legacy_link" != 1 ] ||
+         ! looks_like_our_link "$link" "$name"; }; then
       warn "$runtime_label スキル $name は導入先が張ったリンクなので触らない（$link）"
       return 0
     fi
@@ -508,7 +509,7 @@ for skill_dir in "$CTS_HOME"/skills/*/; do
 
   installed_any=""
   ledger_mode=""
-  cts_place_skill "$name" "$src" "$TARGET/.claude/skills/$name" "Claude Code"
+  cts_place_skill "$name" "$src" "$TARGET/.claude/skills/$name" "Claude Code" 1
   if [ -n "$placed_skill" ]; then
     claude_installed_skills+=("$name")
     installed_any=1
@@ -517,7 +518,7 @@ for skill_dir in "$CTS_HOME"/skills/*/; do
 
   if [ -f "$src/agents/openai.yaml" ]; then
     mkdir -p "$TARGET/.agents/skills" || die "Codex skills ディレクトリを作成できない"
-    cts_place_skill "$name" "$src" "$TARGET/.agents/skills/$name" "Codex"
+    cts_place_skill "$name" "$src" "$TARGET/.agents/skills/$name" "Codex" 0
     if [ -n "$placed_skill" ]; then
       codex_installed_skills+=("$name")
       installed_any=1
