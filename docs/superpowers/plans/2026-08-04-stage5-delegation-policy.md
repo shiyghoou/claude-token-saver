@@ -351,4 +351,3 @@ Lunaの引き渡し後、controllerは次を順に行う。
 4. 設計者・実装者の既存文脈に依存しないfresh Sol / Highレビューで、Issue #25、段階4整合、公開API、実diff、テスト証拠を照合する。
 5. 指摘があれば同じLuna Max taskへTDD修正を返し、controllerが再検証・fresh reviewを繰り返す。
 6. 指摘ゼロでのみbranchをpushし、日本語PRを作成する。マージせずユーザーへ依頼する。
-
