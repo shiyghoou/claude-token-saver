@@ -26,11 +26,11 @@
 - Modify: `test/test-token-report-launcher.sh`
 - Modify: `test/expected-min-count`
 
-- [ ] 1. fixture engineの `report` modeで、`CTS_REPORT_MTIME=rollback` のとき書き込み後に `os.utime(out_path, (1, 1))` を実行する。これは内容生成後のmtimeだけを確実に過去へ戻す。
-- [ ] 2. `test_clock_rollback後のexplicit_outでも今回レポートを採用する` を追加する。既存の最終パスへold canaryを置き、rollback modeでnew canaryを生成し、終了0、最終パスがnew canary、成功出力が利用者指定パスであることを検証する。
-- [ ] 3. `bash test/run.sh token-report-launcher` を実行し、現行の `-nt` freshness判定による「更新されていません」でこの新規testだけがREDになることを確認する。
-- [ ] 4. RED testの内容がmtimeを直接検査せず、利用者可視の終了コードと成果物内容を検査していることを確認する。
-- [ ] 5. この時点ではproduction codeを変更せず、RED testを次Taskの実装と同一commitに含める。
+- [x] 1. fixture engineの `report` modeで、`CTS_REPORT_MTIME=rollback` のとき書き込み後に `os.utime(out_path, (1, 1))` を実行する。これは内容生成後のmtimeだけを確実に過去へ戻す。
+- [x] 2. `test_clock_rollback後のexplicit_outでも今回レポートを採用する` を追加する。既存の最終パスへold canaryを置き、rollback modeでnew canaryを生成し、終了0、最終パスがnew canary、成功出力が利用者指定パスであることを検証する。
+- [x] 3. `bash test/run.sh token-report-launcher` を実行し、現行の `-nt` freshness判定による「更新されていません」でこの新規testだけがREDになることを確認する。
+- [x] 4. RED testの内容がmtimeを直接検査せず、利用者可視の終了コードと成果物内容を検査していることを確認する。
+- [x] 5. この時点ではproduction codeを変更せず、RED testを次Taskの実装と同一commitに含める。
 
 ## Task 2: explicit outを同一directory private tempへ差し替える
 
@@ -39,16 +39,16 @@
 - Modify: `test/test-token-report-launcher.sh`
 - Modify: `test/expected-min-count`
 
-- [ ] 1. `test_explicit_outはengineへ最終パスでなくprivate_tempを渡す` を `--out VALUE` 形式で追加し、engine argsのoutが最終パスと異なること、親directoryが同じこと、成功後だけ最終パスへnew canaryがあることを検証する。
-- [ ] 2. `test_out_equalsもengineへprivate_tempを渡す` を `--out=VALUE` 形式で追加し、他の引数が欠落・並べ替えされないこともengine logで検証する。
-- [ ] 3. focused testを再実行し、private temp期待の2ケースが現行実装でREDになることを確認する。
-- [ ] 4. `scripts/token-report.sh` で元の `"$@"` をBash 3.2互換arrayへ複製し、`--out` の次値または `--out=...` だけをlauncherが作ったtemp pathへ置換する。欠損した `--out` 値は従来どおりengine側の公開挙動へ渡し、launcher独自の別エラーへ変えない。
-- [ ] 5. 明示outでは `dirname "$out_path"` が既存directoryかを確認し、無ければ作成せず終了1にする。最終パスがsymlinkなら参照先を開かず終了1にする。
-- [ ] 6. 同じparentへ `mktemp "$parent/.token-report.XXXXXX"` でprivate tempを作り、`tmp_out` に記録する。engineへ差し替え後のarrayを渡し、既定出力の既存引数追加経路はそのままにする。
-- [ ] 7. engine成功後はprivate tempを既存の非空・先頭40行 `## 計測条件`・calibration snapshot検査へ渡す。marker作成と明示outの `[ report -nt marker ]` 判定を完全に削除し、mtimeをfreshness根拠に残さない。
-- [ ] 8. 全検証成功後だけ `mv "$report_path" "$out_path"` を行う。成功時に `tmp_out` を空にしてtrapが最終成果物を消さないようにし、`report_path` をfinal pathへ更新する。
-- [ ] 9. 3つの新規testをGREENにし、既存19件もPASSすることを確認する。`test/expected-min-count` を総数568、`test-token-report-launcher.sh 22` に更新する。
-- [ ] 10. `git diff --check` と対象diffを確認し、`git commit -m "fix: clock rollbackに依存しないfreshness判定へ変更"` でコミットする。
+- [x] 1. `test_explicit_outはengineへ最終パスでなくprivate_tempを渡す` を `--out VALUE` 形式で追加し、engine argsのoutが最終パスと異なること、親directoryが同じこと、成功後だけ最終パスへnew canaryがあることを検証する。
+- [x] 2. `test_out_equalsもengineへprivate_tempを渡す` を `--out=VALUE` 形式で追加し、他の引数が欠落・並べ替えされないこともengine logで検証する。
+- [x] 3. focused testを再実行し、private temp期待の2ケースが現行実装でREDになることを確認する。
+- [x] 4. `scripts/token-report.sh` で元の `"$@"` をBash 3.2互換arrayへ複製し、`--out` の次値または `--out=...` だけをlauncherが作ったtemp pathへ置換する。欠損した `--out` 値は従来どおりengine側の公開挙動へ渡し、launcher独自の別エラーへ変えない。
+- [x] 5. 明示outでは解決済み最終pathのparent directoryが既存かを確認し、無ければ作成せず終了1にする。最終パスがsymlinkなら参照先を開かず終了1にする。
+- [x] 6. 同じparentへ `mktemp "$parent/.token-report.XXXXXX"` でprivate tempを作り、`tmp_out` に記録する。engineへ差し替え後のarrayを渡し、既定出力の既存引数追加経路はそのままにする。呼出元subdirectoryからのrelative `--out` もrepo root基準へ解決する。
+- [x] 7. engine成功後はprivate tempを既存の非空・先頭40行 `## 計測条件`・calibration snapshot検査へ渡す。marker作成と明示outの `[ report -nt marker ]` 判定を完全に削除し、mtimeをfreshness根拠に残さない。
+- [x] 8. 全検証成功後だけ解決済み最終pathへ `mv` を行う。成功時に `tmp_out` を空にしてtrapが最終成果物を消さないようにし、`report_path` をfinal pathへ更新する。
+- [x] 9. 5つの新規成功系testをGREENにし、既存21件もPASSすることを確認した。`test/expected-min-count` を総数572、`test-token-report-launcher.sh 26` に更新する。
+- [x] 10. `git diff --check` と対象diffを確認した。commitはTask 4の最終検証後に作成する。
 
 ## Task 3: すべての失敗経路で既存出力を保護する
 
@@ -57,14 +57,14 @@
 - Modify: `scripts/token-report.sh`
 - Modify: `test/expected-min-count`
 
-- [ ] 1. 既存 `test_前回の既存レポートだけで成功扱いにしない` を未来mtimeのold canaryへ強化し、touchless engine後も同じbytesであることを検証する。期待理由はmtimeの「更新」ではなく「今回のprivate tempが空」である。
-- [ ] 2. 既存のengine非ゼロ、空report、calibration snapshot missing/symlink/stale testへ、明示outにold canaryを置いた場合も内容を保持するassertionを追加する。新規関数数は増やさず既存安全契約を強める。
-- [ ] 3. `test_symlinkのexplicit_outを拒否し参照先を変更しない` を追加する。linkとtarget内容の両方を検査する。
-- [ ] 4. `test_explicit_outの最終mv失敗でも既存出力を保持する` を追加する。fixtureのfailing `mv` wrapperを用い、old canary、非ゼロ、temp残存なしを検査する。
-- [ ] 5. 既存parent missing testを、parent未作成と最終path未作成に加え、engineが起動されていないことまで検証する。
-- [ ] 6. `bash test/run.sh token-report-launcher` を実行し、新しいsymlink/mvケースがREDならproduction codeを最小修正する。symlink判定はtemp作成前、mv失敗時はtrapでprivate tempだけ削除する。
-- [ ] 7. focused testを全件GREENにし、`test/expected-min-count` を総数570、`test-token-report-launcher.sh 24` に更新する。
-- [ ] 8. `git diff --check` と対象diffを確認し、`git commit -m "test: explicit out失敗時の既存成果物を保護"` でコミットする。
+- [x] 1. 既存 `test_前回の既存レポートだけで成功扱いにしない` を未来mtimeのold canaryへ強化し、touchless engine後も同じbytesであることを検証する。期待理由はmtimeの「更新」ではなく「今回のprivate tempが空」である。
+- [x] 2. 既存のengine非ゼロ、空report、calibration snapshot missing/symlink/stale testへ、明示outにold canaryを置いた場合も内容を保持するassertionを追加する。新規関数数は増やさず既存安全契約を強める。
+- [x] 3. `test_symlinkのexplicit_outを拒否し参照先を変更しない` を追加する。linkとtarget内容の両方を検査する。
+- [x] 4. `test_explicit_outの最終mv失敗でも既存出力を保持する` を追加する。fixtureのfailing `mv` wrapperを用い、old canary、非ゼロ、temp残存なしを検査する。
+- [x] 5. 既存parent missing testを、parent未作成と最終path未作成に加え、engineが起動されていないことまで検証する。
+- [x] 6. `bash test/run.sh token-report-launcher` を実行し、新しいsymlink/mvケースのREDを確認してからproduction codeを最小修正した。symlink判定はtemp作成前、mv失敗時はtrapでprivate tempだけ削除する。
+- [x] 7. focused testを全件GREENにし、`test/expected-min-count` を総数572、`test-token-report-launcher.sh 26` に更新する。
+- [x] 8. `git diff --check` と対象diffを確認した。commitはTask 4の最終検証後に作成する。
 
 ## Task 4: 関連回帰と互換性を検証する
 
@@ -73,13 +73,13 @@
 - Inspect: `scripts/token-report.sh`
 - Inspect: `test/test-token-report-launcher.sh`
 
-- [ ] 1. `bash test/run.sh token-report-launcher token-report calibration token-report-docs` を実行し全件PASSを確認する。
-- [ ] 2. `bash -n scripts/token-report.sh test/test-token-report-launcher.sh` を実行する。
-- [ ] 3. `bash test/run.sh python-compatibility` を実行しPython 3.6/3.8互換testをPASSさせる。
-- [ ] 4. Bash 3.2が利用可能なら `CTS_BASH32_BIN=<path> bash test/run.sh token-report-launcher` を実行する。利用不能なら探索結果と理由を証跡へ残す。
-- [ ] 5. `CTS_NO_SKIP=1 bash test/run.sh` を実行し全件PASSを確認する。環境依存skipが不可避なら通常全件結果とskip理由を分けて記録し、テスト自体を弱めない。
-- [ ] 6. `rg -n -- '-nt|marker|更新されていません' scripts/token-report.sh test/test-token-report-launcher.sh` を実行し、report freshnessにmtime/marker判定が残っていないことを確認する。snapshotのinode同一性検査は対象外として維持する。
-- [ ] 7. 設計書の状態を「実装・検証済み」へ更新し、private temp名、引数置換、rollback再現、失敗時保持の最終契約を反映する。
+- [x] 1. `bash test/run.sh token-report-launcher`、`token-report`、`calibration`、`token-report-docs`を個別実行し、関連全件PASSを確認した。
+- [x] 2. `bash -n scripts/token-report.sh test/test-token-report-launcher.sh`を実行した。
+- [x] 3. `bash test/run.sh python-compatibility`を実行し、Python 3.6/3.8互換test 2件をPASSさせた。
+- [x] 4. Bash 3.2実体は探索したが環境に無かったため実行不可。GNU Bash 5.2とBash 3.2静的監査（guarded array expansion）を確認した。
+- [x] 5. `CTS_NO_SKIP=1 bash test/run.sh`を実行し、総572件・失敗0件・スキップ0件を確認した。
+- [x] 6. `rg -n -- '-nt|marker|更新されていません' scripts/token-report.sh test/test-token-report-launcher.sh`が無出力で、report freshnessにmtime/marker判定が残っていないことを確認した。snapshotのinode同一性検査は維持した。
+- [x] 7. 設計書の状態を「実装・検証済み」へ更新し、private temp名、repo-root基準の引数置換、rollback再現、失敗時保持の最終契約を反映した。
 - [ ] 8. `git status --short`、`git diff origin/main...HEAD --stat`、`git diff origin/main...HEAD`、`git diff --check origin/main...HEAD` をSol primaryへ提示できる形で保存する。
 - [ ] 9. 文書更新を `git commit -m "docs: clock rollback修正の検証結果を反映"` でコミットする。
 
