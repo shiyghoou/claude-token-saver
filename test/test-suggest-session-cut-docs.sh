@@ -99,7 +99,7 @@ test_設計書がinstall契約と実装フェーズを現在状態へ追随さ�
     "設計書 段階3"
   assert_contains "$design" "| 4 | キャリブレーションと診断 | 実測に合った閾値と改善提案が出る（段階2） |" \
     "設計書 段階4"
-  assert_contains "$design" "段階1〜4は本リポジトリで実装済みであり、段階5の委譲ガイドは未実装である。" \
+  assert_contains "$design" "段階1〜5は本リポジトリで実装済みである。" \
     "設計書 実装状態"
   assert_not_contains "$design" "Stop フックは段階3の成果物であり、それまでは登録されない" \
     "設計書 future install wording"
