@@ -1056,6 +1056,20 @@ test_記録にリンク先が無ければ触らない() {
     "利用者のスキル" "スキルの内容"
 }
 
+test_Codexのsrc空marker_copyは残存を管理状態として保持する() {
+  _setup_target
+  CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >/dev/null 2>&1
+  _replace_ledger_skills delegation-policy "" copy
+  CTS_STRICT=1 _run_uninstall
+  assert_ne "0" "$UNINSTALL_STATUS" "src空Codex残存時のstrict終了コード"
+  assert_file_missing "$TARGET/.claude/skills/delegation-policy" "Claude側のmarker copy"
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy" "Codex側のmarker copy"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "src空Codex残存時の台帳"
+  assert_contains "$(_gitignore_text)" ".agents/skills/delegation-policy" \
+    "src空Codex残存時の.gitignore"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "Codex" "src空Codex残存時の警告"
+}
+
 # --- 台帳の寿命と後片付け ----------------------------------------------------
 
 test_取り残しがあれば台帳を残す() {

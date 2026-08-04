@@ -326,7 +326,13 @@ remove_skill() {
   if [ -e "$codex_dest" ] || [ -L "$codex_dest" ]; then
     # Codex destination は source metadata があるときだけ所有権を検査する。
     # source clone が消費・変更された場合に、記録だけを根拠に削除してはならない。
-    if [ -z "$src" ] || [ ! -f "$src/agents/openai.yaml" ]; then
+    if [ -z "$src" ]; then
+      # src が空の記録は所有判別不能であり、metadata非対応のuser objectと
+      # 同じ扱いにしてはならない。Codex destination が存在する限り、
+      # fail-closedで警告し、台帳と.gitignoreを残す。
+      warn "Codex スキル $name の記録にリンク先が無いため触らない"
+      skills_left=1
+    elif [ ! -f "$src/agents/openai.yaml" ]; then
       # metadata非対応スキルは、install.sh がCodexへ配置できないため、
       # 既存のuser file/dir/foreign linkを管理残存と数えない。過去にCTSが
       # 配置した証拠（source一致linkまたはmarker付きcopy）がある場合だけ
@@ -356,7 +362,7 @@ recorded_skill_destinations_left() {
     for dest in "$TARGET/.claude/skills/$name" "$TARGET/.agents/skills/$name"; do
       if [ -e "$dest" ] || [ -L "$dest" ]; then
         if [ "$dest" = "$TARGET/.agents/skills/$name" ] &&
-           { [ -z "$src" ] || [ ! -f "$src/agents/openai.yaml" ]; } &&
+           [ -n "$src" ] && [ ! -f "$src/agents/openai.yaml" ] &&
            ! skill_destination_matches_record "$src" "$dest"; then
           continue
         fi
