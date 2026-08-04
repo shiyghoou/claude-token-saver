@@ -300,8 +300,11 @@ cache/marker の tmp → rename による原子的な更新である。
 
 配布時は `agents/openai.yaml` が存在するスキルだけを Codex の `.agents/skills/<name>` にも配置する。
 Codex CLI / IDE では `$delegation-policy` と指定して明示実行し、`/skills` で利用可能な skill を確認する。
-`allow_implicit_invocation: false` により暗黙起動を禁止する。これは Claude Code 向けの判断ガイドを Codex から
-発見・明示実行できるようにする adapter であり、Codex 用 hook、handoff 自動消費、token-report 計測は提供しない。
+`allow_implicit_invocation: false` により、暗黙起動を禁止する。
+Codex用フックは提供しない。
+handoff の自動消費は提供しない。
+token-report による Codex 使用量計測は提供しない。
+これは Claude Code 向けの判断ガイドを Codex から発見・明示実行できるようにする adapter である。
 
 - 判断順序は、非コスト理由、作業の重さと残りの会話期間、起動・指示受け渡し・結果の読解・統合の固定費、能力帯と bounded ownership、完了条件と結果回収で固定する。
 - 非コスト理由は、並列化、ツール制限、専門知識の分離、独立した敵対的レビューである。必要ならトークン節約だけで却下しない。

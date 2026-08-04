@@ -263,9 +263,11 @@ prompt、tool-result 本文、環境変数、認証情報、repo 外の実パス
 `delegation-policy` は、重い調査・実装・レビューを委譲または並列化するか、bounded subtask の能力帯を選ぶ必要なときだけ、モデルが明示的に読み込むスキルである。常駐指示、Stop フック、自動起動は追加しない。
 
 Codex CLI / IDE では `$delegation-policy` と指定して明示実行する。利用可能な skill は `/skills` で確認できる。
-`agents/openai.yaml` の `allow_implicit_invocation: false` により暗黙起動を禁止しているため、通常の会話へ自動適用されない。
-本文は Claude Code 向けの判断ガイドであり、Codex 対応はこの skill の発見と明示実行だけを対象とする。Codex用フック、
-handoff の自動消費、token-report による Codex 使用量計測は提供しない。SessionStart / handoff の自動連携は後続タスク #30 の対象である。
+`agents/openai.yaml` の `allow_implicit_invocation: false` により、暗黙起動を禁止する。
+Codex用フックは提供しない。
+handoff の自動消費は提供しない。
+token-report による Codex 使用量計測は提供しない。
+本文は Claude Code 向けの判断ガイドであり、Codex 対応はこの skill の発見と明示実行だけを対象とする。SessionStart / handoff の自動連携は後続タスク #30 の対象である。
 Codex 側の配置先は `.agents/skills/delegation-policy` である。
 
 判断は、非コスト理由（並列化、ツール制限、専門知識の分離、独立した敵対的レビュー）を先に確認し、作業の重さと残りの会話期間、起動・指示受け渡し・結果の読解・統合の固定費、能力帯と境界、完了条件と回収計画の順に見る。起動した結果は必ず回収し、メイン側で検証・統合する。判断結果は `decision`、`reason`、`delegated scope`、`capability tier`、`completion condition`、`collection method` を含める。
