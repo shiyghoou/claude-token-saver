@@ -421,17 +421,21 @@ test_削除不能なCodex_copyはdestinationと台帳と除外を残す() {
 }
 
 test_スキル残存再確認は_gitignore処理の前後にある() {
-  local first_call late_call gitignore_line
-  first_call="$(awk '$0 == "recorded_skill_destinations_left" { print NR; exit }' "$REPO_ROOT/uninstall.sh")"
-  late_call="$(awk '$0 == "recorded_skill_destinations_left" { if (++n == 2) { print NR; exit } }' "$REPO_ROOT/uninstall.sh")"
-  gitignore_line="$(awk '$0 ~ /gitignore-block\.py.*remove/ { print NR; exit }' "$REPO_ROOT/uninstall.sh")"
+  local first_call late_call gitignore_line ledger_remove_line
+  first_call="$(awk '$0 ~ /^[[:space:]]*recorded_skill_destinations_left[[:space:]]*$/ { print NR; exit }' "$REPO_ROOT/uninstall.sh")"
+  late_call="$(awk '$0 ~ /^[[:space:]]*recorded_skill_destinations_left[[:space:]]*$/ { if (++n == 2) { print NR; exit } }' "$REPO_ROOT/uninstall.sh")"
+  gitignore_line="$(awk '$0 ~ /gitignore-block\.py.*[[:space:]]remove[[:space:]]/ { print NR; exit }' "$REPO_ROOT/uninstall.sh")"
+  ledger_remove_line="$(awk '$0 ~ /^[[:space:]]*rm[[:space:]]+-f[[:space:]]*"\$LEDGER"[[:space:]]*$/ { print NR; exit }' "$REPO_ROOT/uninstall.sh")"
   assert_ne "" "$first_call" "スキル残存再確認の先行呼び出し"
   assert_ne "" "$late_call" "スキル残存再確認のlate呼び出し"
   assert_ne "" "$gitignore_line" ".gitignore処理の呼び出し"
+  assert_ne "" "$ledger_remove_line" "台帳削除処理の呼び出し"
   [ "$first_call" -lt "$gitignore_line" ] ||
     _fail "スキル残存再確認が.gitignore処理より後にある"
   [ "$late_call" -gt "$gitignore_line" ] ||
     _fail "台帳削除前のlate残存再確認が.gitignore処理より前にない"
+  [ "$late_call" -lt "$ledger_remove_line" ] ||
+    _fail "台帳削除前のlate残存再確認が台帳削除処理より後にある"
 }
 
 test_uninstallは_agents_parent_symlinkを変更前に拒否する() {
