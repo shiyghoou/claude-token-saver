@@ -320,6 +320,92 @@ test_残った_settings_は妥当な_JSON_である() {
     _fail "settings.local.json が妥当な JSON でない"
 }
 
+# --- Task 3: Codex destination の fail-closed uninstall ----------------------
+
+test_Codexスキルのlinkを外す() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.agents/skills/delegation-policy"
+}
+
+test_Codexスキルのmarker付きcopyを外す() {
+  _setup_target
+  CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >/dev/null 2>&1
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.agents/skills/delegation-policy"
+}
+
+test_差し替えられたCodexスキルは残して台帳と除外を保持する() {
+  _setup_target
+  _run_install
+  rm "$TARGET/.agents/skills/delegation-policy"
+  mkdir -p "$TARGET/.agents/skills/delegation-policy"
+  printf '差し替え\n' >"$TARGET/.agents/skills/delegation-policy/SKILL.md"
+  _run_uninstall
+  assert_contains "$(cat "$TARGET/.agents/skills/delegation-policy/SKILL.md")" "差し替え" "利用者所有物"
+  assert_file_exists "$TARGET/.token-saver/installed.json"
+  assert_contains "$(_gitignore_text)" ".agents/skills/delegation-policy" ".gitignore"
+}
+
+test_source_metadata消失時はCodexスキルを残す() {
+  _setup_target
+  local clone="$TEST_TMP/source-clone"
+  _clone_repo "$clone"
+  bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
+  rm "$clone/skills/delegation-policy/agents/openai.yaml"
+  bash "$clone/uninstall.sh" "$TARGET" >"$TEST_TMP/.out" 2>"$TEST_TMP/.err"
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy/SKILL.md"
+  assert_contains "$(cat "$TEST_TMP/.out")$(cat "$TEST_TMP/.err")" "metadata" "警告"
+  assert_file_exists "$TARGET/.token-saver/installed.json"
+}
+
+test_台帳無しではCodexスキルを推測削除しない() {
+  _setup_target
+  mkdir -p "$TARGET/.agents/skills"
+  ln -s "$REPO_ROOT/skills/delegation-policy" "$TARGET/.agents/skills/delegation-policy"
+  _run_uninstall
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy/SKILL.md"
+}
+
+test_guessでもCodexスキルを推測削除しない() {
+  _setup_target
+  mkdir -p "$TARGET/.agents/skills"
+  ln -s "$REPO_ROOT/skills/delegation-policy" "$TARGET/.agents/skills/delegation-policy"
+  _run_uninstall_guess
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy/SKILL.md"
+}
+
+test_uninstallは_agents_parent_symlinkを変更前に拒否する() {
+  _setup_target
+  mkdir -p "$TEST_TMP/outside"
+  ln -s "$TEST_TMP/outside" "$TARGET/.agents"
+  _run_uninstall
+  assert_ne "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_exists "$TARGET/.agents"
+}
+
+test_uninstallは_agents_skills_parent_symlinkを変更前に拒否する() {
+  _setup_target
+  mkdir -p "$TARGET/.agents" "$TEST_TMP/outside"
+  ln -s "$TEST_TMP/outside" "$TARGET/.agents/skills"
+  _run_uninstall
+  assert_ne "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_exists "$TARGET/.agents/skills"
+  assert_file_missing "$TEST_TMP/outside/delegation-policy"
+}
+
+test_Codexスキルは_install_uninstall_installで再導入できる() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  assert_file_missing "$TARGET/.agents/skills/delegation-policy"
+  _run_install
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy/SKILL.md"
+}
+
 # --- 以下、敵対的レビューの指摘に対する回帰テスト -----------------------------
 
 GITIGNORE_START="# claude-token-saver (install.sh が追記。uninstall.sh で削除される)"

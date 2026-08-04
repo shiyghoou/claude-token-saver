@@ -102,6 +102,8 @@ warn() {
 cts_reject_managed_symlinks() {
   local path
   for path in \
+    "$TARGET/.agents" \
+    "$TARGET/.agents/skills" \
     "$TARGET/.claude" \
     "$TARGET/.claude/skills" \
     "$TARGET/$(cts_legacy_handoff_rel)" \
@@ -150,7 +152,7 @@ python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" skills && have_skill_reco
 token_report_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" token_report_source)"
 token_calibrate_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" token_calibrate_source)"
 
-# 外せなかった・触らなかった設置物が .claude/skills に残っているか。
+# 外せなかった・触らなかった設置物が Claude Code / Codex の skills destination に残っているか。
 # 残っているなら .gitignore の除外を外してはならない（絶対パスのリンクが
 # 未追跡ファイルとして git に現れる）。
 skills_left=0
@@ -257,9 +259,36 @@ looks_like_our_link() {
 }
 
 # 設置したものだけを外す。dest が記録どおりでなければ、導入後に導入先が
-# 差し替えたということなので触らない。
+# 差し替えたということなので触らない。Claude Code と Codex は別々の
+# destination として検査し、片方の取り残しがもう片方の取り外しを妨げない。
+remove_skill_destination() {
+  local name="$1" src="$2" dest="$3" runtime_label="$4"
+  if [ -L "$dest" ]; then
+    # src が空の記録は「何を指していたか分からない」ということである。
+    # それを無条件削除の許可と読み替えると、利用者のリンクを消しうる。
+    if [ -z "$src" ]; then
+      warn "$runtime_label スキル $name の記録にリンク先が無いため触らない"
+      skills_left=1
+      return 0
+    fi
+    if [ "$(readlink "$dest")" = "$src" ]; then
+      rm -f "$dest"
+      info "  $runtime_label スキルのリンクを外した: $name"
+      return 0
+    fi
+  elif [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; then
+    rm -rf "$dest"
+    info "  $runtime_label スキルのコピーを削除した: $name"
+    return 0
+  elif [ ! -e "$dest" ]; then
+    return 0
+  fi
+  warn "$runtime_label スキル $name は導入後に差し替えられているので残す"
+  skills_left=1
+}
+
 remove_skill() {
-  local name="$1" src="$2" dest
+  local name="$1" src="$2" codex_dest
   # 台帳の name はそのままパスへ連結される。/ や .. を通すと導入先の外の
   # リンクまで削除できる。台帳は自分が書いたものだが、手で編集もされうるので
   # 読む側でも検証する（ledger.py 側と二重に持つのは、どちらか一方の
@@ -270,29 +299,20 @@ remove_skill() {
       return 0
       ;;
   esac
-  dest="$TARGET/.claude/skills/$name"
-  if [ -L "$dest" ]; then
-    # src が空の記録は「何を指していたか分からない」ということである。
-    # それを無条件削除の許可と読み替えると、利用者のリンクを消しうる。
-    if [ -z "$src" ]; then
-      warn "スキル $name の記録にリンク先が無いため触らない"
+  remove_skill_destination "$name" "$src" \
+    "$TARGET/.claude/skills/$name" "Claude Code"
+
+  codex_dest="$TARGET/.agents/skills/$name"
+  if [ -e "$codex_dest" ] || [ -L "$codex_dest" ]; then
+    # Codex destination は source metadata があるときだけ所有権を検査する。
+    # source clone が消費・変更された場合に、記録だけを根拠に削除してはならない。
+    if [ -z "$src" ] || [ ! -f "$src/agents/openai.yaml" ]; then
+      warn "Codex スキル $name のsource metadataを確認できないため残す"
       skills_left=1
-      return 0
+    else
+      remove_skill_destination "$name" "$src" "$codex_dest" "Codex"
     fi
-    if [ "$(readlink "$dest")" = "$src" ]; then
-      rm -f "$dest"
-      info "  スキルのリンクを外した: $name"
-      return 0
-    fi
-  elif [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; then
-    rm -rf "$dest"
-    info "  スキルのコピーを削除した: $name"
-    return 0
-  elif [ ! -e "$dest" ]; then
-    return 0
   fi
-  warn "スキル $name は導入後に差し替えられているので残す"
-  skills_left=1
 }
 
 if [ "$have_skill_record" = 1 ]; then
@@ -308,6 +328,11 @@ elif [ "$GUESS" = 0 ]; then
   if [ -d "$TARGET/.claude/skills" ] &&
      [ -n "$(find "$TARGET/.claude/skills" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
     warn "台帳にスキルの記録が無いため .claude/skills を変更していない（--guess で推測できる）"
+    skills_left=1
+  fi
+  if [ -d "$TARGET/.agents/skills" ] &&
+     [ -n "$(find "$TARGET/.agents/skills" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    warn "台帳にスキルの記録が無いため .agents/skills を変更していない（--guess ではCodexを推測しない）"
     skills_left=1
   fi
 elif [ -d "$TARGET/.claude/skills" ]; then
@@ -330,11 +355,23 @@ elif [ -d "$TARGET/.claude/skills" ]; then
   done
 fi
 
+# --guess は従来の Claude destination だけを対象とする。Codex destination は
+# source metadata と台帳が無い状態で推測削除すると、利用者のリンクやコピーを
+# 巻き込むため、存在を警告して残す。
+if [ "$have_skill_record" = 0 ] && [ "$GUESS" = 1 ] &&
+   [ -d "$TARGET/.agents/skills" ] &&
+   [ -n "$(find "$TARGET/.agents/skills" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+  warn "--guess では Codex の .agents/skills を推測削除しない"
+  skills_left=1
+fi
+
 # 空になった skills ディレクトリは片付ける。中身があるなら触らない。
 # 一度も導入していない導入先の空ディレクトリへ手を出さないため、
 # 記録がある（＝ここへ導入した）ときだけ片付ける。
 if [ "$have_ledger" = 1 ] || [ "$GUESS" = 1 ]; then
   rmdir "$TARGET/.claude/skills" 2>/dev/null || true
+  rmdir "$TARGET/.agents/skills" 2>/dev/null || true
+  rmdir "$TARGET/.agents" 2>/dev/null || true
 fi
 
 fi
@@ -369,6 +406,10 @@ if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
           ;;
         *)
           dest="$TARGET/.claude/skills/$name"
+          if [ -e "$dest" ] || [ -L "$dest" ]; then
+            shared_left=1
+          fi
+          dest="$TARGET/.agents/skills/$name"
           if [ -e "$dest" ] || [ -L "$dest" ]; then
             shared_left=1
           fi
