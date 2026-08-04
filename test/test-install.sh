@@ -239,6 +239,40 @@ test_スキルを導入先へリンクする() {
   assert_file_exists "$TARGET/.claude/skills/session-handoff/SKILL.md"
 }
 
+test_delegation_policyをリンクし台帳とgitignoreへ記録する() {
+  _setup_target
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_file_exists "$TARGET/.claude/skills/delegation-policy/SKILL.md"
+  assert_contains "$(cat "$TARGET/.token-saver/installed.json")" \
+    '"name": "delegation-policy"' "台帳"
+  assert_contains "$(cat "$TARGET/.gitignore")" \
+    ".claude/skills/delegation-policy" ".gitignore"
+}
+
+test_delegation_policyをコピー配置できる() {
+  _setup_target
+  local status=0
+  CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >"$TEST_TMP/.out" 2>&1 || status=$?
+  assert_eq "0" "$status" "終了コード"
+  assert_file_exists "$TARGET/.claude/skills/delegation-policy/SKILL.md"
+  assert_file_exists "$TARGET/.claude/skills/delegation-policy/.claude-token-saver"
+}
+
+test_利用者所有のdelegation_policyを上書きも記録もしない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/skills/delegation-policy"
+  printf '利用者の方針\n' >"$TARGET/.claude/skills/delegation-policy/SKILL.md"
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_contains "$(cat "$TARGET/.claude/skills/delegation-policy/SKILL.md")" \
+    "利用者の方針" "同名保護"
+  assert_not_contains "$(cat "$TARGET/.token-saver/installed.json")" \
+    '"name": "delegation-policy"' "台帳"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" \
+    ".claude/skills/delegation-policy" ".gitignore"
+}
+
 test_スキルのリンクは二度実行しても失敗しない() {
   _setup_target
   _run_install

@@ -223,11 +223,27 @@ test_スキルのリンクを外す() {
   assert_file_missing "$TARGET/.claude/skills/session-handoff"
 }
 
+test_delegation_policyのリンクを外す() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.claude/skills/delegation-policy"
+}
+
 test_コピーで配置したスキルも外す() {
   _setup_target
   CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >/dev/null 2>&1
   _run_uninstall
   assert_file_missing "$TARGET/.claude/skills/session-handoff"
+}
+
+test_delegation_policyのコピーも外す() {
+  _setup_target
+  CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >/dev/null 2>&1
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.claude/skills/delegation-policy"
 }
 
 test_導入先が自前で置いたスキルは消さない() {
@@ -237,6 +253,27 @@ test_導入先が自前で置いたスキルは消さない() {
   _run_install
   _run_uninstall
   assert_file_exists "$TARGET/.claude/skills/my-own-skill/SKILL.md"
+}
+
+test_利用者所有のdelegation_policyは消さない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/skills/delegation-policy"
+  printf '利用者の方針\n' >"$TARGET/.claude/skills/delegation-policy/SKILL.md"
+  _run_install
+  _run_uninstall
+  assert_contains "$(cat "$TARGET/.claude/skills/delegation-policy/SKILL.md")" \
+    "利用者の方針" "同名保護"
+}
+
+test_delegation_policyは_install_uninstall_installで再導入できる() {
+  _setup_target
+  _run_install
+  assert_file_exists "$TARGET/.claude/skills/delegation-policy/SKILL.md" "初回導入"
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "初回取り外しの終了コード"
+  assert_file_missing "$TARGET/.claude/skills/delegation-policy" "初回取り外し"
+  _run_install
+  assert_file_exists "$TARGET/.claude/skills/delegation-policy/SKILL.md" "再導入"
 }
 
 test_導入先が自前で置いた同名スキルは消さない() {
