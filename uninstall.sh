@@ -272,13 +272,21 @@ remove_skill_destination() {
       return 0
     fi
     if [ "$(readlink "$dest")" = "$src" ]; then
-      rm -f "$dest"
-      info "  $runtime_label スキルのリンクを外した: $name"
+      if rm -f "$dest" && [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+        info "  $runtime_label スキルのリンクを外した: $name"
+        return 0
+      fi
+      warn "$runtime_label スキル $name は削除できないため残す"
+      skills_left=1
       return 0
     fi
   elif [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; then
-    rm -rf "$dest"
-    info "  $runtime_label スキルのコピーを削除した: $name"
+    if rm -rf "$dest" && [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+      info "  $runtime_label スキルのコピーを削除した: $name"
+      return 0
+    fi
+    warn "$runtime_label スキル $name は削除できないため残す"
+    skills_left=1
     return 0
   elif [ ! -e "$dest" ]; then
     return 0
@@ -313,6 +321,27 @@ remove_skill() {
       remove_skill_destination "$name" "$src" "$codex_dest" "Codex"
     fi
   fi
+}
+
+# helper の判定を通らない記録が将来追加されても、台帳を消費する直前に
+# destination の残存を再確認する。通常の差し替え・削除失敗は helper が既に
+# 警告へ変えているため、ここは警告がまだ無い場合だけ防御的に実行する。
+recorded_skill_destinations_left() {
+  local name src _mode dest
+  [ "$have_skill_record" = 1 ] || return 0
+  [ "${#warnings[@]}" -eq 0 ] || return 0
+  while IFS=$'\037' read -r name src _mode; do
+    [ -n "$name" ] || continue
+    case "$name" in
+      "" | . | .. | */*) continue ;;
+    esac
+    for dest in "$TARGET/.claude/skills/$name" "$TARGET/.agents/skills/$name"; do
+      if [ -e "$dest" ] || [ -L "$dest" ]; then
+        warn "台帳のスキル $name の導入先が残っているため台帳を残す"
+        skills_left=1
+      fi
+    done
+  done < <(python3 "$CTS_HOME/lib/ledger.py" list-skills "$LEDGER")
 }
 
 if [ "$have_skill_record" = 1 ]; then
@@ -465,6 +494,7 @@ settings_created=0
 # 台帳は、外し切れたときだけ役目を終える。取り残しがあるのに消すと、次回の
 # 実行が「記録の無い状態」＝何もできない状態になり、取り外し不能になる。
 # 無条件に消していた頃は、2回目が必ず推測経路へ落ちていた。
+recorded_skill_destinations_left
 if [ "${#warnings[@]}" -eq 0 ]; then
   rm -f "$LEDGER"
 else

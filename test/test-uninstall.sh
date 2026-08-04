@@ -345,6 +345,7 @@ test_差し替えられたCodexスキルは残して台帳と除外を保持す�
   mkdir -p "$TARGET/.agents/skills/delegation-policy"
   printf '差し替え\n' >"$TARGET/.agents/skills/delegation-policy/SKILL.md"
   _run_uninstall
+  assert_file_missing "$TARGET/.claude/skills/delegation-policy" "Claude側の所有スキル"
   assert_contains "$(cat "$TARGET/.agents/skills/delegation-policy/SKILL.md")" "差し替え" "利用者所有物"
   assert_file_exists "$TARGET/.token-saver/installed.json"
   assert_contains "$(_gitignore_text)" ".agents/skills/delegation-policy" ".gitignore"
@@ -360,6 +361,19 @@ test_source_metadata消失時はCodexスキルを残す() {
   assert_file_exists "$TARGET/.agents/skills/delegation-policy/SKILL.md"
   assert_contains "$(cat "$TEST_TMP/.out")$(cat "$TEST_TMP/.err")" "metadata" "警告"
   assert_file_exists "$TARGET/.token-saver/installed.json"
+  assert_contains "$(_gitignore_text)" ".agents/skills/delegation-policy" ".gitignore"
+}
+
+test_Claude利用者所有残存時はCodexスキルだけ外す() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/skills/delegation-policy"
+  printf '利用者のClaude方針\n' >"$TARGET/.claude/skills/delegation-policy/SKILL.md"
+  _run_install
+  _run_uninstall
+  assert_contains "$(cat "$TARGET/.claude/skills/delegation-policy/SKILL.md")" "利用者のClaude方針" "Claude側の利用者所有物"
+  assert_file_missing "$TARGET/.agents/skills/delegation-policy" "Codex側の所有スキル"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "取り残し台帳"
+  assert_contains "$(_gitignore_text)" ".agents/skills/delegation-policy" ".gitignore"
 }
 
 test_台帳無しではCodexスキルを推測削除しない() {
@@ -378,23 +392,71 @@ test_guessでもCodexスキルを推測削除しない() {
   assert_file_exists "$TARGET/.agents/skills/delegation-policy/SKILL.md"
 }
 
+test_削除不能なCodex_linkはdestinationと台帳と除外を残す() {
+  _setup_target
+  _run_install
+  chmod a-w "$TARGET/.agents/skills"
+  trap 'chmod u+w "$TARGET/.agents/skills" 2>/dev/null || true' EXIT
+  _run_uninstall
+  chmod u+w "$TARGET/.agents/skills"
+  trap - EXIT
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy" "削除不能なCodex link"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "削除不能時の台帳"
+  assert_contains "$(_gitignore_text)" ".agents/skills/delegation-policy" "削除不能時の.gitignore"
+}
+
+test_削除不能なCodex_copyはdestinationと台帳と除外を残す() {
+  _setup_target
+  CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >/dev/null 2>&1
+  chmod a-w "$TARGET/.agents/skills"
+  trap 'chmod u+w "$TARGET/.agents/skills" 2>/dev/null || true' EXIT
+  _run_uninstall
+  chmod u+w "$TARGET/.agents/skills"
+  trap - EXIT
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_exists "$TARGET/.agents/skills/delegation-policy" "削除不能なCodex copy"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "削除不能時の台帳"
+  assert_contains "$(_gitignore_text)" ".agents/skills/delegation-policy" "削除不能時の.gitignore"
+}
+
 test_uninstallは_agents_parent_symlinkを変更前に拒否する() {
   _setup_target
+  mkdir -p "$TARGET/.claude" "$TARGET/.token-saver"
+  printf '{"before":"settings"}\n' >"$SETTINGS"
+  printf '{"skills":[]}\n' >"$TARGET/.token-saver/installed.json"
+  printf 'before-gitignore\n' >"$TARGET/.gitignore"
+  cp "$SETTINGS" "$TEST_TMP/settings.before"
+  cp "$TARGET/.token-saver/installed.json" "$TEST_TMP/ledger.before"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
   mkdir -p "$TEST_TMP/outside"
   ln -s "$TEST_TMP/outside" "$TARGET/.agents"
   _run_uninstall
   assert_ne "0" "$UNINSTALL_STATUS" "終了コード"
   assert_file_exists "$TARGET/.agents"
+  cmp -s "$TEST_TMP/settings.before" "$SETTINGS" || _fail "settings.local.json が変更された"
+  cmp -s "$TEST_TMP/ledger.before" "$TARGET/.token-saver/installed.json" || _fail "台帳が変更された"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" || _fail ".gitignore が変更された"
 }
 
 test_uninstallは_agents_skills_parent_symlinkを変更前に拒否する() {
   _setup_target
+  mkdir -p "$TARGET/.claude" "$TARGET/.token-saver"
+  printf '{"before":"settings"}\n' >"$SETTINGS"
+  printf '{"skills":[]}\n' >"$TARGET/.token-saver/installed.json"
+  printf 'before-gitignore\n' >"$TARGET/.gitignore"
+  cp "$SETTINGS" "$TEST_TMP/settings.before"
+  cp "$TARGET/.token-saver/installed.json" "$TEST_TMP/ledger.before"
+  cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
   mkdir -p "$TARGET/.agents" "$TEST_TMP/outside"
   ln -s "$TEST_TMP/outside" "$TARGET/.agents/skills"
   _run_uninstall
   assert_ne "0" "$UNINSTALL_STATUS" "終了コード"
   assert_file_exists "$TARGET/.agents/skills"
   assert_file_missing "$TEST_TMP/outside/delegation-policy"
+  cmp -s "$TEST_TMP/settings.before" "$SETTINGS" || _fail "settings.local.json が変更された"
+  cmp -s "$TEST_TMP/ledger.before" "$TARGET/.token-saver/installed.json" || _fail "台帳が変更された"
+  cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" || _fail ".gitignore が変更された"
 }
 
 test_Codexスキルは_install_uninstall_installで再導入できる() {
