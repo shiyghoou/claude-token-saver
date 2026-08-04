@@ -403,6 +403,10 @@ if [ "$have_ledger" = 1 ] || [ "$GUESS" = 1 ]; then
   rmdir "$TARGET/.agents" 2>/dev/null || true
 fi
 
+# スキル処理の直後にも記録済み destination を再確認する。.gitignore の除外を
+# 外す前に残存を skills_left へ反映し、後段の台帳削除前チェックと二重に守る。
+recorded_skill_destinations_left
+
 fi
 
 # --- 3. .gitignore -----------------------------------------------------------

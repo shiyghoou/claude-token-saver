@@ -420,20 +420,32 @@ test_削除不能なCodex_copyはdestinationと台帳と除外を残す() {
   assert_contains "$(_gitignore_text)" ".agents/skills/delegation-policy" "削除不能時の.gitignore"
 }
 
+test_スキル残存再確認は_gitignore処理の前後にある() {
+  local first_call late_call gitignore_line
+  first_call="$(awk '$0 == "recorded_skill_destinations_left" { print NR; exit }' "$REPO_ROOT/uninstall.sh")"
+  late_call="$(awk '$0 == "recorded_skill_destinations_left" { if (++n == 2) { print NR; exit } }' "$REPO_ROOT/uninstall.sh")"
+  gitignore_line="$(awk '$0 ~ /gitignore-block\.py.*remove/ { print NR; exit }' "$REPO_ROOT/uninstall.sh")"
+  assert_ne "" "$first_call" "スキル残存再確認の先行呼び出し"
+  assert_ne "" "$late_call" "スキル残存再確認のlate呼び出し"
+  assert_ne "" "$gitignore_line" ".gitignore処理の呼び出し"
+  [ "$first_call" -lt "$gitignore_line" ] ||
+    _fail "スキル残存再確認が.gitignore処理より後にある"
+  [ "$late_call" -gt "$gitignore_line" ] ||
+    _fail "台帳削除前のlate残存再確認が.gitignore処理より前にない"
+}
+
 test_uninstallは_agents_parent_symlinkを変更前に拒否する() {
   _setup_target
-  mkdir -p "$TARGET/.claude" "$TARGET/.token-saver"
-  printf '{"before":"settings"}\n' >"$SETTINGS"
-  printf '{"skills":[]}\n' >"$TARGET/.token-saver/installed.json"
-  printf 'before-gitignore\n' >"$TARGET/.gitignore"
+  _run_install
   cp "$SETTINGS" "$TEST_TMP/settings.before"
   cp "$TARGET/.token-saver/installed.json" "$TEST_TMP/ledger.before"
   cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
+  rm -rf "$TARGET/.agents"
   mkdir -p "$TEST_TMP/outside"
   ln -s "$TEST_TMP/outside" "$TARGET/.agents"
   _run_uninstall
   assert_ne "0" "$UNINSTALL_STATUS" "終了コード"
-  assert_file_exists "$TARGET/.agents"
+  [ -L "$TARGET/.agents" ] || _fail ".agentsのsymlinkが変更された"
   cmp -s "$TEST_TMP/settings.before" "$SETTINGS" || _fail "settings.local.json が変更された"
   cmp -s "$TEST_TMP/ledger.before" "$TARGET/.token-saver/installed.json" || _fail "台帳が変更された"
   cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" || _fail ".gitignore が変更された"
@@ -441,19 +453,16 @@ test_uninstallは_agents_parent_symlinkを変更前に拒否する() {
 
 test_uninstallは_agents_skills_parent_symlinkを変更前に拒否する() {
   _setup_target
-  mkdir -p "$TARGET/.claude" "$TARGET/.token-saver"
-  printf '{"before":"settings"}\n' >"$SETTINGS"
-  printf '{"skills":[]}\n' >"$TARGET/.token-saver/installed.json"
-  printf 'before-gitignore\n' >"$TARGET/.gitignore"
+  _run_install
   cp "$SETTINGS" "$TEST_TMP/settings.before"
   cp "$TARGET/.token-saver/installed.json" "$TEST_TMP/ledger.before"
   cp "$TARGET/.gitignore" "$TEST_TMP/gitignore.before"
-  mkdir -p "$TARGET/.agents" "$TEST_TMP/outside"
+  rm -rf "$TARGET/.agents/skills"
+  mkdir -p "$TEST_TMP/outside"
   ln -s "$TEST_TMP/outside" "$TARGET/.agents/skills"
   _run_uninstall
   assert_ne "0" "$UNINSTALL_STATUS" "終了コード"
-  assert_file_exists "$TARGET/.agents/skills"
-  assert_file_missing "$TEST_TMP/outside/delegation-policy"
+  [ -L "$TARGET/.agents/skills" ] || _fail ".agents/skillsのsymlinkが変更された"
   cmp -s "$TEST_TMP/settings.before" "$SETTINGS" || _fail "settings.local.json が変更された"
   cmp -s "$TEST_TMP/ledger.before" "$TARGET/.token-saver/installed.json" || _fail "台帳が変更された"
   cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" || _fail ".gitignore が変更された"
