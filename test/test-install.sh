@@ -1076,6 +1076,190 @@ test_ledgerのhas_recordはCodexのhook記録を管理対象として数える()
   assert_eq "0" "$rc" "codex_hooks_createdのany記録"
 }
 
+test_personal_installはCodexのSessionStart_hookとtrust案内を導入する() {
+  _setup_target
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "Codex personal installの終了コード"
+  assert_file_exists "$TARGET/.codex/hooks.json" "Codex hooks.json"
+  assert_contains "$INSTALL_OUT" "/hooks" "Codex hookのtrust案内"
+  assert_contains "$INSTALL_OUT" "trust" "Codex hookのtrust案内"
+  assert_not_contains "$INSTALL_OUT" "dangerously-bypass-hook-trust" "通常利用のtrust案内"
+  python3 - "$TARGET/.codex/hooks.json" "$TARGET/.token-saver/installed.json" "$REPO_ROOT/scripts/handoff-check.sh" <<'PY' || _fail "Codex personal hookの導入結果が妥当でない"
+import json
+import shlex
+import sys
+
+hooks_path, ledger_path, command = sys.argv[1:]
+with open(hooks_path, encoding="utf-8-sig") as handle:
+    hooks = json.load(handle)
+with open(ledger_path, encoding="utf-8") as handle:
+    ledger = json.load(handle)
+groups = hooks["hooks"]["SessionStart"]
+assert len(groups) == 1
+assert groups[0]["matcher"] == "startup|clear"
+entries = groups[0]["hooks"]
+assert len(entries) == 1
+assert entries[0]["command"] == shlex.quote(command)
+assert entries[0]["additionalContextLimit"] == 10000
+assert ledger["codex_hooks"] == [shlex.quote(command)]
+assert ledger["codex_hooks_created"] is True
+assert ledger["codex_dir_created"] is True
+PY
+}
+
+test_personal_installはCodex_hookを再実行しても重複させない() {
+  _setup_target
+  _run_install_args --personal
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "Codex再installの終了コード"
+  python3 - "$TARGET/.codex/hooks.json" <<'PY' || _fail "Codex hookが再installで重複した"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+entries = [
+    entry
+    for group in data["hooks"].get("SessionStart", [])
+    for entry in group.get("hooks", [])
+    if "handoff-check.sh" in entry.get("command", "")
+]
+assert len(entries) == 1
+assert entries[0]["additionalContextLimit"] == 10000
+PY
+}
+
+test_Codex_hooks_jsonの未知キー利用者hook他eventとBOMを保持する() {
+  _setup_target
+  mkdir -p "$TARGET/.codex"
+  python3 - "$TARGET/.codex/hooks.json" <<'PY'
+import json
+import sys
+
+data = {
+    "custom": {"keep": True},
+    "hooks": {
+        "SessionStart": [
+            {"description": "利用者説明", "hooks": [
+                {"type": "command", "command": "echo 利用者SessionStart"}
+            ]}
+        ],
+        "Stop": [
+            {"hooks": [{"type": "command", "command": "echo 利用者Stop"}]}
+        ],
+    },
+}
+with open(sys.argv[1], "w", encoding="utf-8-sig") as handle:
+    json.dump(data, handle, ensure_ascii=False)
+PY
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "既存Codex hooks.json installの終了コード"
+  python3 - "$TARGET/.codex/hooks.json" "$TARGET/.token-saver/installed.json" <<'PY' || _fail "既存Codex hooks.jsonの保持結果が妥当でない"
+import json
+import sys
+
+path, ledger_path = sys.argv[1:]
+with open(path, "rb") as handle:
+    raw = handle.read()
+assert raw.startswith(b"\xef\xbb\xbf")
+with open(path, encoding="utf-8-sig") as handle:
+    data = json.load(handle)
+assert data["custom"] == {"keep": True}
+session = data["hooks"]["SessionStart"]
+stop = data["hooks"]["Stop"]
+assert any(
+    hook.get("command") == "echo 利用者SessionStart"
+    for group in session for hook in group["hooks"]
+)
+assert any(
+    hook.get("command") == "echo 利用者Stop"
+    for group in stop for hook in group["hooks"]
+)
+managed = [
+    hook
+    for group in session
+    for hook in group["hooks"]
+    if "handoff-check.sh" in hook.get("command", "")
+]
+assert len(managed) == 1
+assert managed[0]["additionalContextLimit"] == 10000
+with open(ledger_path, encoding="utf-8") as handle:
+    ledger = json.load(handle)
+assert ledger["codex_hooks_created"] is False
+assert ledger["codex_dir_created"] is False
+PY
+  assert_contains "$INSTALL_OUT" "/hooks" "既存Codex hookのtrust案内"
+}
+
+test_Codex_hooks_jsonの不正JSONと不正構造は変更前に拒否する() {
+  _setup_target
+  local invalid
+  for invalid in '{"hooks": ' '{"hooks":[]}' '{"hooks":{"SessionStart":[{"hooks":{}}]}}'; do
+    rm -rf "$TARGET/.claude" "$TARGET/.token-saver" "$TARGET/.codex"
+    mkdir -p "$TARGET/.codex"
+    printf '%s' "$invalid" >"$TARGET/.codex/hooks.json"
+    _run_install_args --personal
+    assert_ne "0" "$INSTALL_STATUS" "不正Codex hooks[$invalid]の終了コード"
+    assert_not_contains "$INSTALL_OUT$INSTALL_ERR" "完了" "不正Codex hooks[$invalid]の完了表示"
+    assert_file_missing "$TARGET/.claude/settings.local.json" "不正Codex hooks[$invalid]のClaude設定変更"
+    assert_file_missing "$TARGET/.token-saver/handoff" "不正Codex hooks[$invalid]の状態変更"
+    assert_eq "$invalid" "$(cat "$TARGET/.codex/hooks.json")" "不正Codex hooks[$invalid]の原状"
+  done
+}
+
+test_Codexの管理対象symlinkはpersonal変更前に拒否する() {
+  _setup_target
+  local kind outside="$TEST_TMP/codex-outside" before
+  mkdir -p "$outside"
+  for kind in parent hooks; do
+    rm -rf "$TARGET/.claude" "$TARGET/.token-saver" "$TARGET/.codex"
+    if [ "$kind" = "parent" ]; then
+      ln -s "$outside" "$TARGET/.codex"
+      before="parent-marker"
+      printf '%s\n' "$before" >"$outside/marker"
+    else
+      mkdir -p "$TARGET/.codex"
+      printf '%s\n' "hooks-marker" >"$outside/hooks.json"
+      ln -s "$outside/hooks.json" "$TARGET/.codex/hooks.json"
+      before="hooks-marker"
+    fi
+    _run_install_args --personal
+    assert_ne "0" "$INSTALL_STATUS" "Codex $kind symlinkの終了コード"
+    assert_file_missing "$TARGET/.token-saver/handoff" "Codex $kind symlinkの状態変更"
+    if [ "$kind" = "parent" ]; then
+      assert_file_exists "$TARGET/.codex" "Codex parent symlink"
+      assert_eq "$before" "$(cat "$outside/marker")" "Codex parent symlinkの外部原状"
+    else
+      assert_file_exists "$TARGET/.codex/hooks.json" "Codex hooks symlink"
+      assert_eq "$before" "$(cat "$outside/hooks.json")" "Codex hooks symlinkの外部原状"
+    fi
+  done
+}
+
+test_Codex台帳のsymlinkはpersonal変更前に拒否する() {
+  _setup_target
+  mkdir -p "$TARGET/.token-saver" "$TEST_TMP/ledger-outside"
+  printf '{"hooks":[]}\n' >"$TEST_TMP/ledger-outside/installed.json"
+  ln -s "$TEST_TMP/ledger-outside/installed.json" "$TARGET/.token-saver/installed.json"
+  _run_install_args --personal
+  assert_ne "0" "$INSTALL_STATUS" "Codex台帳symlinkの終了コード"
+  assert_file_missing "$TARGET/.claude/settings.local.json" "Codex台帳symlinkのClaude設定変更"
+  assert_file_missing "$TARGET/.token-saver/handoff" "Codex台帳symlinkの状態変更"
+  assert_eq "$(printf '{\"hooks\":[]}\n')" "$(cat "$TEST_TMP/ledger-outside/installed.json")" "Codex台帳symlinkの外部原状"
+}
+
+test_shared_installはCodex個人hookを変更せずtrust案内もしない() {
+  _setup_target
+  mkdir -p "$TARGET/.codex"
+  printf '{"custom":"keep"}\n' >"$TARGET/.codex/hooks.json"
+  local before
+  before="$(cat "$TARGET/.codex/hooks.json")"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "shared installの終了コード"
+  assert_eq "$before" "$(cat "$TARGET/.codex/hooks.json")" "shared installのCodex hooks未変更"
+  assert_not_contains "$INSTALL_OUT" "/hooks" "shared installのtrust案内"
+}
+
 test_既存の_settings_をバックアップする() {
   _setup_target
   mkdir -p "$TARGET/.claude"

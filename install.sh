@@ -64,6 +64,8 @@ TARGET="$(cd -- "$target_arg" 2>/dev/null && pwd -P)" || {
 
 SETTINGS="$TARGET/.claude/settings.local.json"
 BACKUP="$SETTINGS.cts-backup"
+CODEX_DIR="$TARGET/.codex"
+CODEX_HOOKS="$CODEX_DIR/hooks.json"
 GITIGNORE="$TARGET/.gitignore"
 # 何を設置したかの台帳。uninstall.sh はこれを正として取り外す。
 # 記録が無いと、利用者が自分で張った同名のリンクまで巻き込んで消してしまう。
@@ -162,6 +164,8 @@ cts_reject_managed_symlinks() {
     "$TARGET/.agents/skills" \
     "$TARGET/.claude" \
     "$TARGET/.claude/skills" \
+    "$TARGET/.codex" \
+    "$TARGET/.codex/hooks.json" \
     "$TARGET/$(cts_legacy_handoff_rel)" \
     "$TARGET/$(cts_legacy_handoff_rel)/pending" \
     "$TARGET/$(cts_legacy_handoff_rel)/consumed" \
@@ -181,6 +185,18 @@ command -v python3 >/dev/null 2>&1 ||
 
 if [ "$do_personal" = 1 ]; then
   cts_reject_managed_symlinks
+  if [ -e "$CODEX_DIR" ] && [ ! -d "$CODEX_DIR" ]; then
+    die ".codex がディレクトリでないため変更しない: $CODEX_DIR"
+  fi
+  if [ -e "$CODEX_HOOKS" ] && [ ! -f "$CODEX_HOOKS" ]; then
+    die ".codex/hooks.json が通常ファイルでないため変更しない: $CODEX_HOOKS"
+  fi
+  python3 "$CTS_HOME/lib/settings-hooks.py" validate "$CODEX_HOOKS" ||
+    die ".codex/hooks.json が妥当なJSONでないため変更しない"
+  python3 "$CTS_HOME/lib/ledger.py" check-writable "$LEDGER" ||
+    die "台帳に安全に書き込めない"
+  python3 "$CTS_HOME/lib/ledger.py" check-writable "$CODEX_HOOKS" ||
+    die ".codex/hooks.json に安全に書き込めない"
   python3 "$CTS_HOME/lib/ledger.py" check-writable "$SETTINGS" ||
     die "settings.local.json に安全に書き込めない"
 fi
@@ -194,6 +210,25 @@ info "claude-token-saver を導入する: $TARGET"
 installed_skills=()
 claude_installed_skills=()
 codex_installed_skills=()
+codex_hook_installed=0
+codex_hooks_created=0
+codex_dir_created=0
+codex_hooks_created_this_run=0
+codex_dir_created_this_run=0
+if [ "$do_personal" = 1 ]; then
+  if python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" codex_hooks_created | grep -qx 1; then
+    codex_hooks_created=1
+  fi
+  if python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" codex_dir_created | grep -qx 1; then
+    codex_dir_created=1
+  fi
+  if [ ! -e "$CODEX_HOOKS" ] && [ ! -L "$CODEX_HOOKS" ]; then
+    codex_hooks_created_this_run=1
+  fi
+  if [ ! -e "$CODEX_DIR" ] && [ ! -L "$CODEX_DIR" ]; then
+    codex_dir_created_this_run=1
+  fi
+fi
 gitignore_existed=1
 [ -e "$GITIGNORE" ] || [ -L "$GITIGNORE" ] || gitignore_existed=0
 legacy_ledger="$TARGET/$(cts_legacy_ledger_rel)"
@@ -491,6 +526,34 @@ if [ "${#hook_specs[@]}" -gt 0 ]; then
     settings_created=1
   fi
   applied+=("settings.local.json へフックを登録")
+fi
+
+if [ -f "$CTS_HOME/scripts/handoff-check.sh" ]; then
+  python3 "$CTS_HOME/lib/settings-hooks.py" install "$CODEX_HOOKS" \
+    --ledger "$LEDGER" \
+    --ledger-key codex_hooks \
+    --matcher "SessionStart=startup|clear" \
+    --additional-context-limit "SessionStart=10000" \
+    "SessionStart:$CTS_HOME/scripts/handoff-check.sh"
+  codex_status=$?
+  case "$codex_status" in
+    0) ;;
+    2) warnings+=(".codex/hooks.json に台帳無しの推測候補があるため、候補を削除せずフックを登録した") ;;
+    *) die ".codex/hooks.json またはCodex用台帳を更新できない" ;;
+  esac
+  if [ "$codex_hooks_created_this_run" = 1 ]; then
+    codex_hooks_created=1
+  fi
+  if [ "$codex_dir_created_this_run" = 1 ]; then
+    codex_dir_created=1
+  fi
+  python3 "$CTS_HOME/lib/ledger.py" set-flag "$LEDGER" codex_hooks_created "$codex_hooks_created" ||
+    die "Codex hooks.jsonの所有フラグを台帳へ記録できない"
+  python3 "$CTS_HOME/lib/ledger.py" set-flag "$LEDGER" codex_dir_created "$codex_dir_created" ||
+    die ".codexの所有フラグを台帳へ記録できない"
+  codex_hook_installed=1
+  applied+=(".codex/hooks.json へCodex SessionStartフックを登録")
+  info "  Codex の project hook を登録した。Codex の /hooks で定義を確認し、trust せよ。"
 fi
 
 # --- 3. スキルのリンク -------------------------------------------------------

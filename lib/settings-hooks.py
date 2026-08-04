@@ -83,9 +83,11 @@ def load(path):
     if not os.path.lexists(path):
         return {}, None
     try:
-        with open(path, encoding="utf-8-sig", errors="surrogateescape", newline="") as f:
+        # 原文のBOMを保持する。解析時だけ取り除かないと、利用者のBOM付き
+        # JSONを再保存したときにBOMを失い、変更していない前置きを壊してしまう。
+        with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
             original = f.read()
-        text = original.strip()
+        text = original.lstrip("\ufeff").strip()
         data = json.loads(text) if text else {}
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         # 壊れたファイルを上書きすると、利用者の既存設定を失う。何もせず落ちる。
