@@ -5,6 +5,10 @@
 `docs/specs/2026-07-31-claude-token-saver-design.md` の一部を改訂する設計である。
 段階1（セッション引き継ぎ）の実装を含む PR #1 のマージ前に取り込む。
 
+> **現在状態（GitHub #29）:** `delegation-policy` は `agents/openai.yaml` を宣言し、
+> `.agents/skills` へも配置される。これはスキル配置だけのCodex adapterであり、
+> hook、handoff自動消費、token計測は本設計当時と同じく未対応である。SessionStart / handoff の自動連携は後続タスク #30 で扱う。
+
 ## 1. 目的
 
 token-saver が管理するデータと状態を `.claude/` 配下から導入先リポジトリの
@@ -23,8 +27,9 @@ token-saver が管理するデータと状態を `.claude/` 配下から導入�
 | フック登録 | `.claude/settings.local.json` | **変更なし** | パスは Claude Code が決める |
 | スキル本体 | `.claude/skills/session-handoff` | **変更なし** | 同上 |
 
-下2つが動かないため、Codex と実際に連携するには Codex 側にも別途アダプタが
-必要になる。今回はそれを作らない。この非対称は README に明記する。
+下2つが動かないため、handoff を Codex と実際に連携するには Codex 側にも別途アダプタが
+必要になる。GitHub #29 で追加するのは delegation-policy のスキル配置と明示実行 metadata だけであり、
+SessionStart / handoff の自動連携は後続タスク #30 で扱う。この非対称は README に明記する。
 
 ## 3. 配置
 

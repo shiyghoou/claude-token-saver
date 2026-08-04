@@ -4,9 +4,24 @@
 set -u
 
 SKILL="$REPO_ROOT/skills/delegation-policy/SKILL.md"
+OPENAI_METADATA="$REPO_ROOT/skills/delegation-policy/agents/openai.yaml"
 
 _skill_text() {
   cat "$SKILL"
+}
+
+test_Codex_metadataを持つ() {
+  assert_file_exists "$OPENAI_METADATA" "Codex metadata"
+  local body
+  body="$(cat "$OPENAI_METADATA")"
+  assert_contains "$body" "policy:" "policy root"
+}
+
+test_Codexの暗黙起動を禁止する() {
+  local body
+  body="$(cat "$OPENAI_METADATA")"
+  assert_contains "$body" "allow_implicit_invocation: false" "explicit-only policy"
+  assert_not_contains "$body" "allow_implicit_invocation: true" "implicit invocation"
 }
 
 test_frontmatter名と必要時の読み込み条件を持つ() {
@@ -109,4 +124,35 @@ test_基礎設計は段階1から5を実装済みとする() {
   body="$(cat "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md")"
   assert_contains "$body" "段階1〜5は本リポジトリで実装済み" "段階完了"
   assert_not_contains "$body" "段階5の委譲ガイドは未実装" "旧状態"
+}
+
+test_READMEはCodexの配置と明示実行を案内する() {
+  local body
+  body="$(cat "$REPO_ROOT/README.md")"
+  assert_contains "$body" ".agents/skills/delegation-policy" "Codex配置"
+  assert_contains "$body" '$delegation-policy' "明示実行"
+  assert_contains "$body" '`/skills`' "skill一覧"
+}
+
+test_READMEはCodex対応範囲を限定する() {
+  local body
+  body="$(awk '
+    /^## 委譲判断ガイド（delegation-policy）$/ { in_section=1; print; next }
+    in_section && /^## / { exit }
+    in_section { print }
+  ' "$REPO_ROOT/README.md")"
+  assert_contains "$body" "暗黙起動を禁止する。" "explicit-only"
+  assert_contains "$body" "Codex用フックは提供しない。" "hook非対応"
+  assert_contains "$body" "handoff の自動消費は提供しない。" "handoff非対応"
+  assert_contains "$body" "token-report による Codex 使用量計測は提供しない。" "計測非対応"
+}
+
+test_設計文書はCodex_adapterの現在状態を示す() {
+  local base root_design
+  base="$(cat "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md")"
+  root_design="$(cat "$REPO_ROOT/docs/specs/2026-07-31-token-saver-root-dir-design.md")"
+  assert_contains "$base" "agents/openai.yaml" "Codex opt-in"
+  assert_contains "$base" "allow_implicit_invocation: false" "明示起動"
+  assert_contains "$root_design" "GitHub #29" "現在状態"
+  assert_contains "$root_design" "スキル配置だけ" "adapter境界"
 }
