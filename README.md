@@ -17,7 +17,7 @@ Claude Code のトークン消費を減らすヘルパー。任意のリポジ�
 | 計測（token-report） | **実装済み** |
 | セッション切り提案（suggest-session-cut） | **実装済み** |
 | キャリブレーションと診断（calibrate） | **実装済み** |
-| 委譲判断ガイド（delegation-policy） | 未実装（段階5） |
+| 委譲判断ガイド（delegation-policy） | **実装済み** |
 
 設計は [`docs/specs/2026-07-31-claude-token-saver-design.md`](docs/specs/2026-07-31-claude-token-saver-design.md) にある。
 
@@ -73,6 +73,7 @@ cd <導入したいリポジトリ>
   .claude/
     settings.local.json  ← フックの登録先。Claude Code がパスを決めるため動かせない
     skills/session-handoff
+    skills/delegation-policy
 ```
 
 引き継ぎと台帳をルート直下 `.token-saver/` へ置くのは、`.claude/` 配下から追い出すことで
@@ -253,6 +254,25 @@ root 直下 `calibration.min_sessions` / `calibration.min_assistant_turns` で�
 診断は境界を分けて表示する。`## 実測診断` には超過セッション、重い main tool_result、MCP の未使用 / 利用済み / 判定不能分類、
 Agent 利用、`/compact`、画像未計測を載せる。`## 概算診断` の MCP 定義サイズ（bytes ÷ 4）は実測合計・中央値・未使用判定へ混ぜない。
 prompt、tool-result 本文、環境変数、認証情報、repo 外の実パスは snapshot とレポートへ出力しない。
+
+## 委譲判断ガイド（delegation-policy）
+
+`delegation-policy` は、重い調査・実装・レビューを委譲または並列化するか、bounded subtask の能力帯を選ぶ必要なときだけ、モデルが明示的に読み込むスキルである。常駐指示、Stop フック、自動起動は追加しない。
+
+判断は、非コスト理由（並列化、ツール制限、専門知識の分離、独立した敵対的レビュー）を先に確認し、作業の重さと残りの会話期間、起動・指示受け渡し・結果の読解・統合の固定費、能力帯と境界、完了条件と回収計画の順に見る。起動した結果は必ず回収し、メイン側で検証・統合する。判断結果は `decision`、`reason`、`delegated scope`、`capability tier`、`completion condition`、`collection method` を含める。
+
+Stage 4 の token-report / calibration 出力は任意の人間向け参考情報であり、このスキルは snapshot の JSON 構造や `.token-saver/calibration/latest.json` を解析しない。計測値だけで委譲先・モデル・設定を自動選択せず、既存の CLI、設定、台帳、フック、MCP、エージェント設定も変更しない。起動固定費は直接測定していないため、固定の損益分岐点、モデル名、価格、固定トークン数を規則として置かない。
+
+### 移植元の切り替え
+
+段階5では本リポジトリを委譲方針の正とする。以下は移植元側で別途行う手順であり、この変更は移植元へ書き込まない。
+
+1. 移植元の運用規約に従い、独立した Issue / branch を作る。
+2. 本リポジトリの `install.sh` を移植元へ実行し、`delegation-policy` を含むスキル、フック、台帳を検証する。
+3. 移植元固有の実測値・秘密情報・未公開データは移さず、必要なら移植元のローカル文書として保持する。
+4. 新スキルを実際に読み込み、旧方針と判断原則が一致することを確認する。
+5. その確認後にだけ、重複する方針文書やスクリプト実体を移植元側の PR で削除する。
+6. uninstall 往復と既存運用を検証し、本リポジトリを正とする。
 
 ### 台帳に記録が無いときは何もしない（fail-closed）
 
