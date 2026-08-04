@@ -198,6 +198,42 @@ test_pending_symlinkは外部を読まず無出力で保持する() {
     "外部本文の内容"
 }
 
+test_token_saver親symlinkは外部を読まず無出力で保持する() {
+  _setup_empty_project
+  local outside="$TEST_TMP/external-token-saver"
+  mkdir -p "$outside/handoff/pending" "$outside/handoff/consumed"
+  printf 'TOKEN-SAVER-SYMLINK-CANARY\n' >"$outside/handoff/pending/2026-07-31-1840-token-saver.md"
+  ln -s "$outside" "$PROJ/.token-saver"
+
+  _run_hook "$(_startup_payload)"
+  assert_eq "0" "$HOOK_STATUS" ".token-saver symlinkの終了コード"
+  assert_empty "$HOOK_OUT" ".token-saver symlinkの出力"
+  assert_empty "$(cat "$TEST_TMP/.hook-err")" ".token-saver symlinkの標準エラー"
+  assert_eq "$outside" "$(readlink "$PROJ/.token-saver")" ".token-saver symlinkの向き先"
+  assert_file_exists "$outside/handoff/pending/2026-07-31-1840-token-saver.md" \
+    ".token-saver symlink外部のpending本文"
+  assert_file_missing "$outside/handoff/consumed/2026-07-31-1840-token-saver.md" \
+    ".token-saver symlink外部のconsumed本文"
+}
+
+test_handoff_symlinkは外部を読まず無出力で保持する() {
+  _setup_empty_project
+  local outside="$TEST_TMP/external-handoff"
+  mkdir -p "$PROJ/.token-saver" "$outside/pending" "$outside/consumed"
+  printf 'HANDOFF-SYMLINK-CANARY\n' >"$outside/pending/2026-07-31-1840-handoff.md"
+  ln -s "$outside" "$PROJ/.token-saver/handoff"
+
+  _run_hook "$(_startup_payload)"
+  assert_eq "0" "$HOOK_STATUS" "handoff symlinkの終了コード"
+  assert_empty "$HOOK_OUT" "handoff symlinkの出力"
+  assert_empty "$(cat "$TEST_TMP/.hook-err")" "handoff symlinkの標準エラー"
+  assert_eq "$outside" "$(readlink "$PROJ/.token-saver/handoff")" "handoff symlinkの向き先"
+  assert_file_exists "$outside/pending/2026-07-31-1840-handoff.md" \
+    "handoff symlink外部のpending本文"
+  assert_file_missing "$outside/consumed/2026-07-31-1840-handoff.md" \
+    "handoff symlink外部のconsumed本文"
+}
+
 test_pending_にファイルがあれば中身を出力する() {
   _setup_project
   _write_pending "2026-07-31-1840-643-stage.md" "# 引き継ぎ (2026-07-31 18:40)

@@ -319,7 +319,12 @@ if [ "$do_personal" = 1 ] &&
           codex_empty_status=0
           codex_hooks_is_empty_object || codex_empty_status=$?
           if [ "$codex_empty_status" -eq 0 ] && [ "$codex_hooks_created" = 1 ]; then
-            if rm -f "$CODEX_HOOKS" && [ ! -e "$CODEX_HOOKS" ] && [ ! -L "$CODEX_HOOKS" ]; then
+            codex_hooks_rel="${CODEX_HOOKS#"$TARGET/"}"
+            if git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+               git -C "$TARGET" ls-files --error-unmatch -- "$codex_hooks_rel" >/dev/null 2>&1; then
+              warn "導入者が作成したCodex hooks.jsonが追跡済みのため削除せず残す"
+              codex_hooks_left=1
+            elif rm -f "$CODEX_HOOKS" && [ ! -e "$CODEX_HOOKS" ] && [ ! -L "$CODEX_HOOKS" ]; then
               info "  Codex hooks.json を外した"
             else
               warn "導入者が作成したCodex hooks.jsonを削除できないため残す"

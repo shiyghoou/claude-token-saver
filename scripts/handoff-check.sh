@@ -59,24 +59,30 @@ if [ "${CTS_FORCE:-}" != "1" ]; then
   esac
 fi
 
-handoff_dir="$(cts_handoff_dir)"
+project_dir="$(cts_project_dir)"
+state_dir="$project_dir/$(cts_base_rel)"
+handoff_dir="$state_dir/handoff"
 pending_dir="$handoff_dir/pending"
 consumed_dir="$handoff_dir/consumed"
 
-# リンクの解決先を照合するための実パス。シンボリックリンクを含まない形にする。
-# pendingのglob走査より先に行い、外部の置き場を列挙したり、空の外部置き場へ
-# 起動後契約を出したりしない。
-if [ -L "$pending_dir" ]; then
+# pendingのglob走査より先に、状態親とhandoff親とpending自身のsymlinkを拒否する。
+# 親symlinkを経由した外部の置き場を列挙したり、空の外部置き場へ起動後契約を
+# 出したりしない。
+if [ -L "$state_dir" ] || [ -L "$handoff_dir" ] || [ -L "$pending_dir" ]; then
   exit 0
 fi
 if [ ! -d "$pending_dir" ]; then
   cts_print_decision_contract || true
   exit 0
 fi
+
+# リンクの解決先を照合するための実パス。handoffはcanonicalized project root内、
+# pendingはcanonicalized handoff内であることを、payload列挙より先に確認する。
+project_real="$(cd -P -- "$project_dir" 2>/dev/null && pwd -P)" || project_real=""
 handoff_real="$(cd -P -- "$handoff_dir" 2>/dev/null && pwd -P)" || handoff_real=""
 pending_real="$(cd -P -- "$pending_dir" 2>/dev/null && pwd -P)" || exit 0
-[ -n "$handoff_real" ] && cts_path_is_within "$pending_real" "$handoff_real" || exit 0
-[ -L "$pending_dir" ] && exit 0
+[ -n "$project_real" ] && cts_path_is_within "$handoff_real" "$project_real" || exit 0
+cts_path_is_within "$pending_real" "$handoff_real" || exit 0
 
 # pending直下に実ファイル・リンク・特殊エントリが無い場合は、inflightやspoolを
 # 作らずに契約だけを返す。起動後判断だけでは状態ディレクトリを新規作成しない。

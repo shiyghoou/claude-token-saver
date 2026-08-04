@@ -19,7 +19,7 @@ description: Use when the session is about to be cut or cleared, when the user a
 /path/to/claude-token-saver/install.sh --shared <導入先>
 ```
 
-`--personal` は `.claude/settings.local.json`、Codexの `.codex/hooks.json`、フック、スキル、`.token-saver/`、台帳だけを扱い、`.gitignore` を変更しない。`--shared` は `.gitignore` だけを扱い、既存台帳に記録されたスキルだけを除外へ反映する。台帳が無い場合にスキルを推測しない。引数なしは従来どおり両方を扱う。
+`--personal` は `.claude/settings.local.json`、Codexの `.codex/hooks.json`、フック、スキル、`.token-saver/`、台帳だけを扱い、`.gitignore` を変更しない。`--shared` は `.gitignore` だけを扱い、既存台帳に記録されたスキルと、installer作成・現JSON一致・未追跡のCodex hooks.jsonだけを除外へ反映する。既存・追跡済み・利用者所有のhooks.jsonを推測でignoreしない。台帳が無い場合にスキルやhooks.jsonを推測しない。引数なしは従来どおり両方を扱う。
 
 取り外しも同じスコープを指定できる。
 
@@ -28,7 +28,7 @@ description: Use when the session is about to be cut or cleared, when the user a
 /path/to/claude-token-saver/uninstall.sh --shared <導入先>
 ```
 
-`--personal` は共有の `.gitignore` を残し、`--shared` は個人用設置物を削除しない。台帳・状態・引き継ぎ・残存スキルがある場合、`--shared` は未追跡ファイルを露出させないため `.gitignore` のブロックを残す。台帳の無い旧環境を推測する `--guess` は個人側でのみ使う。
+`--personal` は共有の `.gitignore` を残し、`--shared` は個人用設置物を削除しない。台帳・状態・引き継ぎ・残存スキル・利用者Codex hookがある場合、`--shared` は未追跡ファイルを露出させないため `.gitignore` のブロックを残す。台帳の無い旧環境を推測する `--guess` は個人側でのみ使う。
 
 Codex project hookを使う場合は、personal install後に `/hooks` を開き、`.codex/hooks.json`
 の `SessionStart` / `startup|clear` commandとその実体を確認してtrustする。hookは

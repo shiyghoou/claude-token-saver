@@ -498,6 +498,56 @@ PY
   assert_contains "$(_gitignore_text)" ".token-saver/" "Codex差し替え時の管理対象.gitignore"
 }
 
+test_Codex_hooks_json差し替え後の再installは古い作成所有権を失効させ利用者ファイルを残す() {
+  _setup_target
+  _run_install
+  printf '%s\n' '{"hooks":{}}' >"$TARGET/.codex/hooks.json"
+
+  local install_status=0
+  bash "$INSTALL" "$TARGET" >/dev/null 2>&1 || install_status=$?
+  assert_eq "0" "$install_status" "Codex差し替え後の再install終了コード"
+  python3 - "$TARGET/.token-saver/installed.json" <<'PY' || _fail "差し替え後のCodex所有フラグが失効していない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    ledger = json.load(handle)
+assert ledger["codex_hooks_created"] is False
+assert ledger["codex_dir_created"] is False
+PY
+
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "Codex差し替え再install後のuninstall終了コード"
+  assert_file_exists "$TARGET/.codex/hooks.json" "差し替えた利用者Codex hooks.json"
+  assert_file_exists "$TARGET/.codex" "差し替え後の利用者Codexディレクトリ"
+  python3 - "$TARGET/.codex/hooks.json" <<'PY' || _fail "差し替え後のCodex利用者ファイルが妥当でない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+assert data == {}
+PY
+  assert_not_contains "$(_codex_hooks_text)" "handoff-check.sh" \
+    "差し替え後のmanaged Codex hook"
+  if [ -f "$TARGET/.token-saver/installed.json" ]; then
+    python3 - "$TARGET/.token-saver/installed.json" <<'PY' || _fail "差し替え後のCodex台帳整理が妥当でない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    ledger = json.load(handle)
+assert "codex_hooks" not in ledger
+assert ledger["codex_hooks_created"] is False
+assert ledger["codex_dir_created"] is False
+PY
+  else
+    assert_file_missing "$TARGET/.token-saver/installed.json" "差し替え後の不要な台帳"
+  fi
+  assert_not_contains "$(_gitignore_text)" ".codex/hooks.json" \
+    "差し替え後のCodex hooks.json除外"
+}
+
 test_Codex台帳欠損時は推測削除しない() {
   _setup_target
   _run_install

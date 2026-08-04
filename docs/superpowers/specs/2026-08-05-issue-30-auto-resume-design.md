@@ -73,8 +73,9 @@ hook自身が出す指示は本文の区切り外に置き、次の順序を固�
 - 本文は実行ごとに変わる識別子で囲い、前セッションの非信頼な記録と明示する。
 - stdout送信が完了したclaimだけをconsumedへcommitし、失敗分はpendingへ戻す。
 - 何が起きてもSessionStartを妨げない終了コード0と空stderrを維持する。
-- `pending/` 自体、handoff親、実体境界の検証をpayload列挙より先に行う。pendingがsymlinkまたは
-  親symlinkを経由する場合はfail-closedで無出力・未消費とし、外部ディレクトリの内容を読まず移動しない。
+- `.token-saver`、handoff親、`pending/` 自体のsymlinkと、canonicalized project root外のhandoff実体を
+  payload列挙より先に拒否する。pendingがsymlinkまたは親symlinkを経由する場合はfail-closedで無出力・
+  未消費とし、外部ディレクトリの内容を読まず移動しない。
 
 pendingゼロ時だけは従来の「無出力」を変更し、上記判断契約だけを短く出す。状態ディレクトリの作成やGitHubアクセスはhook内では行わない。
 
@@ -87,7 +88,9 @@ pendingゼロ時だけは従来の「無出力」を変更し、上記判断契�
 
 `install.sh` はpersonal scopeでのみCodex hookを扱う。`.codex` または `.codex/hooks.json` がsymlink、JSONが不正、最上位やhooks構造が不正、台帳を書けない場合は変更前に失敗する。既存のdescription、未知キー、他event、同一group内の利用者hookを保持する。再installでは台帳に記録した旧commandだけを除去して1件へ戻す。
 
-台帳にはCodexへ実際に記録したcommand文字列と、installerが `hooks.json` を新規作成したかを保存する。`uninstall.sh` は `codex_hooks` と完全一致するentryだけを外す。差し替え、台帳欠損、削除不能では利用者所有として残し、台帳と警告を保持する。installerが作ったファイルが空オブジェクトになった場合だけ削除し、既存ファイルは再整形以外の不要な変更を行わない。
+台帳にはCodexへ実際に記録したcommand文字列と、installerが `hooks.json` を新規作成したかを保存する。再install時に台帳のmanaged entryが現在のhooks.jsonと完全一致しなければ、hooks.jsonと必要な`.codex`の作成所有権を失効させる。`uninstall.sh` は `codex_hooks` と完全一致するentryだけを外す。差し替え、台帳欠損、削除不能、追跡済みファイルでは利用者所有として残し、台帳と警告を保持する。installerが作ったファイルが空オブジェクトになった場合だけ削除し、既存ファイルは再整形以外の不要な変更を行わない。
+
+共有managed `.gitignore` には、installerが新規作成し、台帳のmanaged entryが現在ファイルへ完全一致し、かつ未追跡である`.codex/hooks.json`だけを追加する。既存・追跡済み・利用者所有のhooks.jsonは無条件にignoreしない。`--shared` は新旧台帳を読み取り専用で確認し、この所有条件を満たす場合だけ行を反映する。残存するCodex利用者hookや状態があるuninstallではmanaged block全体を保持する。
 
 shared scopeは個人hookを変更しない。Claude Codeのinstall/uninstallとCodexのinstall/uninstallは独立し、片方の残存や欠損がもう片方の安全な処理を妨げない。
 
@@ -109,15 +112,16 @@ READMEとsession-handoff skillに次を記載する。
 - pendingゼロのstartup/clearが判断契約を出す。
 - 新しいユーザー依頼優先、安全なローカル再開、承認必須操作、矛盾時停止、候補2〜3件の契約を検証する。
 - resume/compact/不明payloadは従来どおり無出力・未消費である。
-- pending有無、同時実行、stdout切断、異常entry、注入量上限の既存テストを維持する。
+- pending有無、同時実行、stdout切断、異常entry、注入量上限の既存テストを維持する。`.token-saver`親symlink、handoff symlink、pending symlinkは外部canaryを出力・移動せずpendingに残すことを独立に検証する。
 
 ### install / uninstall
 
 - 空のtargetへCodex SessionStart hookを1件配置する。
 - 既存hooks.jsonの未知キー、他event、他hookを保持する。
+- 新規作成したhooks.jsonだけをmanaged `.gitignore`へ追加し、既存・追跡済み・利用者所有ファイルは除外しない。
 - 再installで重複しない。
 - ClaudeとCodexの台帳キー・削除を独立させる。
-- invalid JSON、symlink親、symlink本体、台帳欠損、差し替え、削除不能をfail-closedで検証する。
+- invalid JSON、symlink親、symlink本体、台帳欠損、差し替え、差し替え後の再install、削除不能、追跡済みファイルをfail-closedで検証する。
 - install→uninstall→installとclone移動後の更新を検証する。
 - trust案内が成功メッセージとREADMEにあることを検証する。
 
@@ -135,8 +139,9 @@ READMEとsession-handoff skillに次を記載する。
 
 ## 10. 実装・検証結果
 
-- Task 3（Codex hookの安全なinstall/uninstall）: uninstall focused 113/113 PASS。旧readonly ledgerの一時コピー経路、未知キー・利用者hook・差し替え時の保持、残存時のmanaged `.gitignore` block保持を確認した。
-- Task 4（起動後判断契約）: handoff-check focused 96/96 PASS。pendingゼロのstartup/clear、本文fence外の契約、stdout失敗時rollback、pending親symlinkの外部内容を読まないfail-closedを確認した。
-- 全体テスト: `CTS_NO_SKIP=1 bash test/run.sh` は 595 PASS / 0 FAIL / 0 SKIP、終了コード0。
+- Task 2（Codex project hookの安全な導入）: install focused 137/137 PASS。新規・既存・追跡済みhooks.jsonのmanaged `.gitignore` 境界、shared-onlyの台帳読取、未知キー・symlink・trust案内を確認した。
+- Task 3（Codex hookの安全なinstall/uninstall）: uninstall focused 114/114 PASS。旧readonly ledgerの一時コピー経路、未知キー・利用者hook・差し替え時の保持、差し替え再installでの所有権失効、残存時のmanaged `.gitignore` block保持を確認した。
+- Task 4（起動後判断契約）: handoff-check focused 98/98 PASS。pendingゼロのstartup/clear、本文fence外の契約、stdout失敗時rollback、`.token-saver`／handoff／pending親symlinkの外部内容を読まないfail-closed、canonical project root境界を確認した。
+- 全体テスト: `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` は 602 PASS / 0 FAIL / 0 SKIP、終了コード0。
 - runtime: Python互換性、Bash 3.2 e2e、Codex CLIの隔離fixtureでSessionStart contextの到達とpendingからconsumedへの消費を確認した。
 - 通常文書ではtrust bypassを案内せず、Codexの初回確認は `/hooks` から利用者が行う契約を維持した。

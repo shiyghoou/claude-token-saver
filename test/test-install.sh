@@ -1129,6 +1129,40 @@ assert entries[0]["additionalContextLimit"] == 10000
 PY
 }
 
+test_新規作成したCodex_hooks_jsonだけをmanaged_gitignoreへ追加する() {
+  _setup_target
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "新規Codex hooks.json installの終了コード"
+  local gitignore status
+  gitignore="$(cat "$TARGET/.gitignore")"
+  assert_contains "$gitignore" ".codex/hooks.json" "新規Codex hooks.jsonのmanaged .gitignore"
+  status="$(git -C "$TARGET" status --short -- .codex)"
+  assert_empty "$status" "新規Codex hooks.jsonのgit status"
+}
+
+test_既存の利用者Codex_hooks_jsonはmanaged_gitignoreへ追加しない() {
+  _setup_target
+  mkdir -p "$TARGET/.codex"
+  printf '%s\n' '{"custom":{"keep":true},"hooks":{}}' >"$TARGET/.codex/hooks.json"
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "既存Codex hooks.json installの終了コード"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".codex/hooks.json" \
+    "既存Codex hooks.jsonのmanaged .gitignore"
+  assert_contains "$(git -C "$TARGET" status --short -- .codex)" ".codex" \
+    "既存Codex hooks.jsonのgit status"
+}
+
+test_追跡済みの利用者Codex_hooks_jsonはmanaged_gitignoreへ追加しない() {
+  _setup_target
+  mkdir -p "$TARGET/.codex"
+  printf '%s\n' '{"custom":{"keep":true},"hooks":{}}' >"$TARGET/.codex/hooks.json"
+  ( cd "$TARGET" && git add .codex/hooks.json )
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "追跡済みCodex hooks.json installの終了コード"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".codex/hooks.json" \
+    "追跡済みCodex hooks.jsonのmanaged .gitignore"
+}
+
 test_Codex_hooks_jsonの未知キー利用者hook他eventとBOMを保持する() {
   _setup_target
   mkdir -p "$TARGET/.codex"
@@ -1258,6 +1292,19 @@ test_shared_installはCodex個人hookを変更せずtrust案内もしない() {
   assert_eq "0" "$INSTALL_STATUS" "shared installの終了コード"
   assert_eq "$before" "$(cat "$TARGET/.codex/hooks.json")" "shared installのCodex hooks未変更"
   assert_not_contains "$INSTALL_OUT" "/hooks" "shared installのtrust案内"
+}
+
+test_sharedスコープはCodex作成所有権を台帳から読んでmanaged除外だけを追加する() {
+  _setup_target
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "shared確認前のpersonal installの終了コード"
+  cp "$TARGET/.token-saver/installed.json" "$TEST_TMP/ledger.before"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "Codex所有権を読むshared installの終了コード"
+  cmp -s "$TEST_TMP/ledger.before" "$TARGET/.token-saver/installed.json" ||
+    _fail "shared installが台帳を変更した"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".codex/hooks.json" \
+    "shared installのCodex作成所有権由来のmanaged除外"
 }
 
 test_既存の_settings_をバックアップする() {

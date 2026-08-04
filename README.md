@@ -46,7 +46,8 @@ cd <導入したいリポジトリ>
    書き換える場合は、`.cts-backup` がまだ無ければ書き換え前の内容を退避する
    （新規作成時は対象なし）。Codex側のsymlinkや不正JSONは変更前に拒否する。
 4. `.gitignore` の `# claude-token-saver` ブロックを（再）生成する。中身は `.token-saver/`、
-   および**実際に設置したスキル**のリンクパス
+   installerが新規作成し、台帳と現JSONが一致していて未追跡の `.codex/hooks.json`、および**実際に設置したスキル**のリンクパス。
+   既存・追跡済み・利用者所有のCodex hooks.jsonは無条件にignoreしない。
 5. 導入先から計測と明示適用を実行する `.token-saver/token-report.sh` / `.token-saver/token-calibrate.sh` を設置する
 6. 設置したものを `.token-saver/installed.json`（台帳）へ記録する
 
@@ -59,7 +60,7 @@ cd <導入したいリポジトリ>
 ~/claude-token-saver/install.sh --shared     # .gitignoreだけ
 ```
 
-`--personal` は `.gitignore` を作成・変更せず、Claude Code設定、Codex project hook、スキル、状態、台帳だけを扱う。`--shared` は既存の新旧台帳を読み取り、実際に記録されたスキルだけを除外へ含める。台帳が無い場合は `.token-saver/` だけを書き、スキルを推測しない。共有設定を複数のクローンへ反映する場合も、各導入先で `--shared` を実行する。
+`--personal` は `.gitignore` を作成・変更せず、Claude Code設定、Codex project hook、スキル、状態、台帳だけを扱う。`--shared` は既存の新旧台帳を読み取り、実際に記録されたスキルと、installer作成・現JSON一致・未追跡のCodex hooks.jsonだけを除外へ含める。台帳が無い場合は `.token-saver/` だけを書き、スキルやCodex hooks.jsonを推測しない。共有設定を複数のクローンへ反映する場合も、各導入先で `--shared` を実行する。
 
 ### 配置
 
@@ -145,7 +146,7 @@ END を欠くと `uninstall.sh` はブロックを特定できず、安全側に
 /path/to/claude-token-saver/uninstall.sh [--personal|--shared] [--guess] [<導入先ディレクトリ>]
 ```
 
-`uninstall.sh --personal` は個人設定・フック・スキル・状態・台帳だけを外し、`.gitignore` を残す。個人側を外したあと、共有ブロックも不要なら `uninstall.sh --shared` を実行する。`--shared` は個人用設置物を削除せず、台帳・状態・引き継ぎ・残存スキルがある場合は未追跡ファイルを露出させないためブロックを残す。所有者が不明な空の `.gitignore` 自体は削除しない。
+`uninstall.sh --personal` は個人設定・フック・スキル・状態・台帳だけを外し、`.gitignore` を残す。個人側を外したあと、共有ブロックも不要なら `uninstall.sh --shared` を実行する。`--shared` は個人用設置物を削除せず、台帳・状態・引き継ぎ・残存スキル・Codex利用者hookがある場合は未追跡ファイルを露出させないためmanaged blockを残す。所有者が不明な空の `.gitignore` 自体は削除しない。
 
 `--guess` は台帳の無い旧環境を推測する個人側のオプションであり、`--shared --guess` は拒否される。
 
@@ -379,8 +380,8 @@ Python 3.6.15、3.8.20、3.12.3 で `python -B test/python-compatibility.py` の
 `python:3.8.20-slim-bookworm` で同じスモークを実行する。この記録は確認済みの
 バージョンに限るもので、Python 3.6 未満や未検証の将来版を保証しない。
 
-全体テストは実行環境 Python 3.12.3 で `CTS_NO_SKIP=1 bash test/run.sh` を実行し、
-成功 595 件 / 失敗 0 件 / スキップ 0 件、総 595 件・ファイル別 17 件分の実行件数下限を満たし、
+全体テストは実行環境 Python 3.12.3 で `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` を実行し、
+成功 602 件 / 失敗 0 件 / スキップ 0 件、総 602 件・ファイル別 17 件分の実行件数下限を満たし、
 終了コード 0 だった。これは互換性スモークとは別の全体テスト結果である。
 `python-compatibility` job は matrix の Python 3.6.15 / 3.8.20 で実行し、
 Docker イメージの取得・起動・スモークのいずれかが非 0 なら、その失敗を握り潰さず CI の失敗へ伝播させる。

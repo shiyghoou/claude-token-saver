@@ -439,11 +439,11 @@ snapshot の条件・現在値・fingerprint が不整合なら適用しない�
    `SessionStart` 定義を確認し、利用者がtrustする。再installやclone移動で定義が変わると再確認が必要になり得る。
 4. `.gitignore` の `# claude-token-saver` ブロックを**毎回再生成する**。存在の有無だけを見て
    追記済みなら何もしない作りにすると、段階が進んでスキルやレポート出力先が増えても既存の導入先へ永久に届かない。
-   ブロックの中身は `.token-saver/`、レポート出力先、
-   および**実際に設置したスキル**のリンクパス。スキルのリンクは絶対パスを指す環境依存の産物であり、
-   版管理へ入れると他の開発者のクローンで壊れたリンクになる。設置しなかったスキル（導入先が自前で持つもの）を
+   ブロックの中身は `.token-saver/`、レポート出力先、installerが新規作成し台帳と現JSONが一致していて未追跡の
+   `.codex/hooks.json`、および**実際に設置したスキル**のリンクパス。スキルのリンクは絶対パスを指す環境依存の産物であり、
+   版管理へ入れると他の開発者のクローンで壊れたリンクになる。設置しなかったスキル（導入先が自前で持つもの）や既存・追跡済み・利用者所有のCodex hooks.jsonを
    書いてはならない。書くと、そのスキルへの変更が git から見えなくなる。
-5. 設置したもの（スキル名と設置方式、登録したフックのコマンド、`.gitignore` を新規作成したか）を
+5. 設置したもの（スキル名と設置方式、登録したフックのコマンド、Codex hooks.jsonの作成所有権、`.gitignore` を新規作成したか）を
    `.token-saver/installed.json` へ記録する。**台帳を持つのは `uninstall.sh` に推測をさせないためである。**
    「リンク先が `skills/<同名>` を指している」といった推測で判定すると、利用者が自分で張った無関係な
    リンクを巻き込んで削除する。台帳が無い旧環境向けのフォールバックは明示的な opt-in（`--guess`）とし、
@@ -468,9 +468,9 @@ Codex 対応は既存のスキル自動発見、台帳、所有マーカーを�
 引数なしは後方互換のため個人設定と共有設定の両方を扱う。明示的なスコープは相互排他的である。
 
 - `install.sh --personal` は `.claude/settings.local.json`、フック、スキル、`.token-saver/`、台帳だけを更新し、`.gitignore` を作成・変更しない。
-- `install.sh --shared` は `.gitignore` だけを更新する。現在の台帳にスキル記録が無ければ旧台帳を読み取り、どちらにも記録が無ければ `.token-saver/` だけを書き、スキルを推測しない。台帳や個人ファイルは作成・変更しない。
+- `install.sh --shared` は `.gitignore` だけを更新する。現在の台帳にスキル記録が無ければ旧台帳を読み取り、Codex hooksの作成所有権も新旧台帳から読み取る。どちらにも記録が無ければ `.token-saver/` だけを書き、スキルやCodex hooks.jsonを推測しない。台帳や個人ファイルは作成・変更しない。
 - `uninstall.sh --personal` は個人側だけを外し、`.gitignore` を残す。
-- `uninstall.sh --shared` は `.gitignore` の管理ブロックだけを扱い、台帳、settings、フック、スキル、entrypoint、状態を削除しない。記録済みスキル、token-report entrypoint、handoff、状態ファイルが残る場合は、未追跡ファイルを露出させないためブロックを残す。所有者が不明な空の `.gitignore` 自体も削除しない。
+- `uninstall.sh --shared` は `.gitignore` の管理ブロックだけを扱い、台帳、settings、フック、スキル、entrypoint、状態を削除しない。記録済みスキル、token-report entrypoint、handoff、状態ファイル、Codex利用者hookが残る場合は、未追跡ファイルを露出させないためブロックを残す。所有者が不明な空の `.gitignore` 自体も削除しない。
 - `uninstall.sh --guess` は従来どおり個人側の推測経路であり、`--shared --guess` は拒否する。
 
 共有設定を個人設定より先に適用・解除しても個人側へ副作用を出さない。個人側を解除したあとに共有ブロックを解除する場合は、`--personal`、`--shared` の順に実行する。
@@ -511,7 +511,7 @@ Codex 対応は既存のスキル自動発見、台帳、所有マーカーを�
 - `startup` / `clear` の `pending/` が空なら `handoff-check.sh` は短い判断契約だけを出し、状態ディレクトリを作らず終了コード 0
 - `resume` / `compact` / `fork` / 不明値 / 壊れたJSONは無出力・未消費・終了コード 0
 - `pending/` にファイルがあれば中身を出力し `consumed/` へ移動する
-- pending親やpending自体がsymlinkなら外部内容を読まず、無出力・未消費で終了する
+- `.token-saver`、handoff親、pending自体がsymlink、またはhandoff実体がcanonicalized project root外なら外部内容を読まず、無出力・未消費で終了する
 - 発火源が `compact` のときは発火しない
 - **発火源が判定できないとき（空・不明・壊れた JSON・入れ子の同名キー・stdin が閉じない）も発火しない**
 - **移動に失敗したら本文を出さず、パスを示す**（再注入が続かないこと）
