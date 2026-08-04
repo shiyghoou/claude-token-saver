@@ -80,8 +80,8 @@
 - [x] 5. `CTS_NO_SKIP=1 bash test/run.sh`を実行し、総572件・失敗0件・スキップ0件を確認した。
 - [x] 6. `rg -n -- '-nt|marker|更新されていません' scripts/token-report.sh test/test-token-report-launcher.sh`が無出力で、report freshnessにmtime/marker判定が残っていないことを確認した。snapshotのinode同一性検査は維持した。
 - [x] 7. 設計書の状態を「実装・検証済み」へ更新し、private temp名、repo-root基準の引数置換、rollback再現、失敗時保持の最終契約を反映した。
-- [ ] 8. `git status --short`、`git diff origin/main...HEAD --stat`、`git diff origin/main...HEAD`、`git diff --check origin/main...HEAD` をSol primaryへ提示できる形で保存する。
-- [ ] 9. 文書更新を `git commit -m "docs: clock rollback修正の検証結果を反映"` でコミットする。
+- [x] 8. `git status --short`、`git diff origin/main...HEAD --stat`、`git diff origin/main...HEAD`、`git diff --check origin/main...HEAD` を確認し、Sol primaryへ提示できる状態にした。
+- [x] 9. 文書更新をlocal commit `7bbd5bb`（`docs: Issue #31の検証結果を反映`）へ反映した。
 
 ## Task 5: Luna引き渡しとPR境界
 
