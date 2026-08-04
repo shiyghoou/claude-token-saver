@@ -40,7 +40,7 @@
 - Modify: `test/test-uninstall.sh`
   - Codex link/copy削除、差し替え・metadata消失・台帳無し・親symlinkのfail-closedを検証する。
 - Modify: `test/expected-min-count`
-  - 追加24件を反映して総数556件、install 117件、uninstall 95件、delegation-policy 17件にする。
+  - 追加24件を反映して総数563件、install 120件、uninstall 99件、delegation-policy 17件にする。
 - Modify: `README.md`
   - 両runtimeの配置、`$delegation-policy`、`/skills`、非対応範囲を案内する。
 - Modify: `docs/specs/2026-07-31-claude-token-saver-design.md`
@@ -223,7 +223,7 @@ test_Codex同名衝突でもClaude側は従来どおり配置する() {
 
 - [ ] **Step 2: REDを確認する**
 
-Run: `bash test/run.sh install`
+Run: `bash test/run.sh test-install.sh`
 
 Expected: 新規Codex配置・親symlink拒否・Codex gitignore観点がFAILし、既存107件はPASSする。
 
@@ -348,9 +348,9 @@ done
 
 - [ ] **Step 7: GREENと既存Claude契約を確認する**
 
-Run: `bash test/run.sh install`
+Run: `bash test/run.sh test-install.sh`
 
-Expected: 117/117 PASS。
+Expected: 120/120 PASS。
 
 Run: `bash test/run.sh delegation-policy`
 
@@ -358,7 +358,7 @@ Expected: 14/14 PASS。
 
 - [ ] **Step 8: Task 2をコミットする**
 
-`test/expected-min-count` の総数を544、`test-install.sh`を117へ更新する。
+`test/expected-min-count` の総数を547、`test-install.sh`を120へ更新する。
 
 ```bash
 git add install.sh test/test-install.sh test/expected-min-count
@@ -469,7 +469,7 @@ test_Codexスキルは_install_uninstall_installで再導入できる() {
 
 - [ ] **Step 2: REDを確認する**
 
-Run: `bash test/run.sh uninstall`
+Run: `bash test/run.sh test-uninstall.sh`
 
 Expected: Codex destinationが現状のuninstaller対象外なので新規削除・保護観点がFAILし、既存86件はPASSする。
 
@@ -549,17 +549,17 @@ rmdir "$TARGET/.agents" 2>/dev/null || true
 
 - [ ] **Step 6: GREENと往復を確認する**
 
-Run: `bash test/run.sh uninstall`
+Run: `bash test/run.sh test-uninstall.sh`
 
-Expected: 95/95 PASS。
+Expected: 99/99 PASS。
 
-Run: `bash test/run.sh install`
+Run: `bash test/run.sh test-install.sh`
 
-Expected: 117/117 PASS。
+Expected: 120/120 PASS。
 
 - [ ] **Step 7: Task 3をコミットする**
 
-`test/expected-min-count` の総数を553、`test-uninstall.sh`を95へ更新する。
+`test/expected-min-count` の総数を560、`test-uninstall.sh`を99へ更新する。
 
 ```bash
 git add uninstall.sh test/test-uninstall.sh test/expected-min-count
@@ -666,7 +666,7 @@ Expected: 17/17 PASS。
 
 - [ ] **Step 6: Task 4をコミットする**
 
-`test/expected-min-count` の総数を556、`test-delegation-policy.sh`を17へ更新する。
+`test/expected-min-count` の総数を563、`test-delegation-policy.sh`を17へ更新する。
 
 ```bash
 git add README.md docs/specs/2026-07-31-claude-token-saver-design.md docs/specs/2026-07-31-token-saver-root-dir-design.md test/test-delegation-policy.sh test/expected-min-count
@@ -689,7 +689,7 @@ git commit -m "docs: Codexでの明示実行手順を追加"
 
 **Interfaces:**
 - Consumes: Tasks 1-4の全変更。
-- Produces: 556/556回帰証拠、互換性証拠、実Codex明示実行証拠、レビュー可能な実diff。
+- Produces: 563/563回帰証拠、互換性証拠、実Codex明示実行証拠、レビュー可能な実diff。
 
 - [ ] **Step 1: shell構文と対象テストを実行する**
 
@@ -701,19 +701,19 @@ Run: `bash test/run.sh delegation-policy`
 
 Expected: 17/17 PASS。
 
-Run: `bash test/run.sh install`
+Run: `bash test/run.sh test-install.sh`
 
-Expected: 117/117 PASS。
+Expected: 120/120 PASS。
 
-Run: `bash test/run.sh uninstall`
+Run: `bash test/run.sh test-uninstall.sh`
 
-Expected: 95/95 PASS。
+Expected: 99/99 PASS。
 
 - [ ] **Step 2: 全体回帰を実行する**
 
 Run: `CTS_NO_SKIP=1 bash test/run.sh`
 
-Expected: 556/556 PASS、FAIL 0、SKIP 0、件数下限を満たす。
+Expected: 563/563 PASS、FAIL 0、SKIP 0、件数下限を満たす。
 
 - [ ] **Step 3: PythonとBash 3.2互換性を実行する**
 
