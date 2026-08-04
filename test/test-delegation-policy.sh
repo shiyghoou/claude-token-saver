@@ -4,9 +4,24 @@
 set -u
 
 SKILL="$REPO_ROOT/skills/delegation-policy/SKILL.md"
+OPENAI_METADATA="$REPO_ROOT/skills/delegation-policy/agents/openai.yaml"
 
 _skill_text() {
   cat "$SKILL"
+}
+
+test_Codex_metadataを持つ() {
+  assert_file_exists "$OPENAI_METADATA" "Codex metadata"
+  local body
+  body="$(cat "$OPENAI_METADATA")"
+  assert_contains "$body" "policy:" "policy root"
+}
+
+test_Codexの暗黙起動を禁止する() {
+  local body
+  body="$(cat "$OPENAI_METADATA")"
+  assert_contains "$body" "allow_implicit_invocation: false" "explicit-only policy"
+  assert_not_contains "$body" "allow_implicit_invocation: true" "implicit invocation"
 }
 
 test_frontmatter名と必要時の読み込み条件を持つ() {
