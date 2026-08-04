@@ -364,6 +364,28 @@ test_source_metadata消失時はCodexスキルを残す() {
   assert_contains "$(_gitignore_text)" ".agents/skills/delegation-policy" ".gitignore"
 }
 
+test_導入前のCodex同名userディレクトリはmetadata無しでも保護してClaude側だけ外す() {
+  _setup_target
+  mkdir -p "$TARGET/.agents/skills/session-handoff"
+  printf '導入前からの利用者Codexスキル\n' \
+    >"$TARGET/.agents/skills/session-handoff/SKILL.md"
+  cp "$TARGET/.agents/skills/session-handoff/SKILL.md" \
+    "$TEST_TMP/session-handoff.before"
+  local install_status=0
+  _run_install || install_status=$?
+  assert_eq "0" "$install_status" "install終了コード"
+  CTS_STRICT=1 _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "metadata非対応user残存時のuninstall終了コード"
+  cmp -s "$TEST_TMP/session-handoff.before" \
+    "$TARGET/.agents/skills/session-handoff/SKILL.md" ||
+    _fail "metadata非対応userディレクトリが変更された"
+  assert_file_missing "$TARGET/.claude/skills/session-handoff" "Claude側のCTSスキル"
+  assert_file_missing "$TARGET/.token-saver/installed.json" "完了後の台帳"
+  assert_not_contains "$(_gitignore_text)" "$GITIGNORE_START" "管理.gitignore block"
+  assert_not_contains "$(_gitignore_text)" ".agents/skills/session-handoff" \
+    "user所有Codexスキルの.gitignore"
+}
+
 test_Claude利用者所有残存時はCodexスキルだけ外す() {
   _setup_target
   mkdir -p "$TARGET/.claude/skills/delegation-policy"

@@ -261,6 +261,18 @@ looks_like_our_link() {
 # 設置したものだけを外す。dest が記録どおりでなければ、導入後に導入先が
 # 差し替えたということなので触らない。Claude Code と Codex は別々の
 # destination として検査し、片方の取り残しがもう片方の取り外しを妨げない。
+skill_destination_matches_record() {
+  local src="$1" dest="$2"
+  [ -n "$src" ] || return 1
+  if [ -L "$dest" ]; then
+    [ "$(readlink "$dest")" = "$src" ]
+  elif [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 remove_skill_destination() {
   local name="$1" src="$2" dest="$3" runtime_label="$4"
   if [ -L "$dest" ]; then
@@ -271,7 +283,7 @@ remove_skill_destination() {
       skills_left=1
       return 0
     fi
-    if [ "$(readlink "$dest")" = "$src" ]; then
+    if skill_destination_matches_record "$src" "$dest"; then
       if rm -f "$dest" && [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
         info "  $runtime_label スキルのリンクを外した: $name"
         return 0
@@ -315,8 +327,14 @@ remove_skill() {
     # Codex destination は source metadata があるときだけ所有権を検査する。
     # source clone が消費・変更された場合に、記録だけを根拠に削除してはならない。
     if [ -z "$src" ] || [ ! -f "$src/agents/openai.yaml" ]; then
-      warn "Codex スキル $name のsource metadataを確認できないため残す"
-      skills_left=1
+      # metadata非対応スキルは、install.sh がCodexへ配置できないため、
+      # 既存のuser file/dir/foreign linkを管理残存と数えない。過去にCTSが
+      # 配置した証拠（source一致linkまたはmarker付きcopy）がある場合だけ
+      # fail-closedで警告し、台帳と.gitignoreを残す。
+      if skill_destination_matches_record "$src" "$codex_dest"; then
+        warn "Codex スキル $name のsource metadataを確認できないため残す"
+        skills_left=1
+      fi
     else
       remove_skill_destination "$name" "$src" "$codex_dest" "Codex"
     fi
@@ -337,6 +355,11 @@ recorded_skill_destinations_left() {
     esac
     for dest in "$TARGET/.claude/skills/$name" "$TARGET/.agents/skills/$name"; do
       if [ -e "$dest" ] || [ -L "$dest" ]; then
+        if [ "$dest" = "$TARGET/.agents/skills/$name" ] &&
+           { [ -z "$src" ] || [ ! -f "$src/agents/openai.yaml" ]; } &&
+           ! skill_destination_matches_record "$src" "$dest"; then
+          continue
+        fi
         warn "台帳のスキル $name の導入先が残っているため台帳を残す"
         skills_left=1
       fi
