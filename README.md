@@ -272,7 +272,7 @@ Codex 側の配置先は `.agents/skills/delegation-policy` である。
 
 Stage 4 の token-report / calibration 出力は任意の人間向け参考情報であり、このスキルは snapshot の JSON 構造や `.token-saver/calibration/latest.json` を解析しない。計測値だけで委譲先・モデル・設定を自動選択せず、既存の CLI、設定、台帳、フック、MCP、エージェント設定も変更しない。起動固定費は直接測定していないため、固定の損益分岐点、モデル名、価格、固定トークン数を規則として置かない。
 
-`install.sh` / `uninstall.sh` の既存公開 CLI（`--personal`、`--shared`、`--guess`）と既存の台帳・所有者保護・原子的な書き込み契約は維持する。Codex 対応のために専用の installer 分岐や既存公開 API の変更は行わない。
+`install.sh` / `uninstall.sh` の既存公開 CLI（`--personal`、`--shared`、`--guess`）と既存の台帳・所有者保護・原子的な書き込み契約は維持する。別 installer や delegation-policy 名をハードコードした固有分岐は追加せず、既存の skill loop 内で `agents/openai.yaml` を検出する metadata opt-in 分岐により Codex destination を扱う。公開 CLI と ledger schema は維持する。
 
 ### 移植元の切り替え
 

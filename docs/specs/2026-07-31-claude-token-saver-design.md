@@ -309,7 +309,7 @@ Codex CLI / IDE では `$delegation-policy` と指定して明示実行し、`/s
 - 起動した結果は必ず回収する。`decision`、`reason`、`delegated scope`、`capability tier`、`completion condition`、`collection method` を起動前に定める。
 - Stage 4 の token-report / calibration は人間が読む任意の参考情報に限る。`latest.json` の snapshot schemaを解析せず、計測値から委譲先やモデルを自動選択せず、設定・フック・MCP・エージェント設定を変更しない。
 - 起動固定費は直接測定していないため、固定の損益分岐点、モデル名、価格、固定トークン数を普遍的な規則として置かない。
-- 配布と取り外しは既存の `skills/*/` 自動発見、台帳、所有マーカーの契約を再利用し、専用の installer 分岐を追加しない。
+- 配布と取り外しは既存の `skills/*/` 自動発見、台帳、所有マーカーの契約を再利用する。別 installer や delegation-policy 名をハードコードした固有分岐は追加せず、既存の skill loop 内で `agents/openai.yaml` を検出する metadata opt-in 分岐により Codex destination を扱う。公開 CLI と ledger schema は維持する。
 
 ### 5.5 キャリブレーションと診断（calibrate）
 
@@ -445,7 +445,7 @@ snapshot の条件・現在値・fingerprint が不整合なら適用しない�
 共有する。片方だけ直す事故を防ぐためである。
 
 Codex 対応は既存のスキル自動発見、台帳、所有マーカーを再利用する。`install.sh` / `uninstall.sh` の既存公開 CLI と
-既存 API は変更せず、Codex 専用の installer 分岐も追加しない。
+既存 API は変更しない。別 installer や delegation-policy 名をハードコードした固有分岐は追加せず、既存の skill loop 内で `agents/openai.yaml` を検出する metadata opt-in 分岐により Codex destination を扱う。公開 CLI と ledger schema は維持する。
 
 ### 個人設定と共有設定を分けるCLIスコープ
 

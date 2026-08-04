@@ -136,11 +136,15 @@ test_READMEはCodexの配置と明示実行を案内する() {
 
 test_READMEはCodex対応範囲を限定する() {
   local body
-  body="$(cat "$REPO_ROOT/README.md")"
+  body="$(awk '
+    /^## 委譲判断ガイド（delegation-policy）$/ { in_section=1; print; next }
+    in_section && /^## / { exit }
+    in_section { print }
+  ' "$REPO_ROOT/README.md")"
   assert_contains "$body" "暗黙起動" "explicit-only"
   assert_contains "$body" "Codex用フック" "hook非対応"
-  assert_contains "$body" "handoff" "handoff非対応"
-  assert_contains "$body" "token-report" "計測非対応"
+  assert_contains "$body" "handoff の自動消費" "handoff非対応"
+  assert_contains "$body" "token-report による Codex 使用量計測は提供しない" "計測非対応"
 }
 
 test_設計文書はCodex_adapterの現在状態を示す() {
