@@ -47,7 +47,7 @@ Codexは `<repo>/.codex/hooks.json` をproject-local hookとして読み、`Sess
 }
 ```
 
-`additionalContextLimit` は既存の最大32 KiBの引き継ぎ本文を不意にspillさせないために設定する。hook自身のbyte上限は変更せず、値を0にはしない。仕様根拠は [Codex Hooks公式資料](https://learn.chatgpt.com/docs/hooks) とする。
+`additionalContextLimit` は内側の command hook entry に設定し、既存の最大32 KiBの引き継ぎ本文を不意にspillさせないために使う。hook自身のbyte上限は変更せず、値を0にはしない。仕様根拠は [Codex Hooks公式資料](https://learn.chatgpt.com/docs/hooks) とする。
 
 ## 4. 起動後判断契約
 

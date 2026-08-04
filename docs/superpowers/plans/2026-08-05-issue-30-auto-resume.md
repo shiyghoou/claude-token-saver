@@ -29,15 +29,15 @@
 - Test: `test/test-uninstall.sh`
 - Modify: `test/expected-min-count`
 
-- [ ] 1. `test/test-install.sh` に、`--ledger-key codex_hooks` が `hooks` と別のcommand一覧を保存・更新するテスト、未許可キーを終了64で拒否するテスト、`--additional-context-limit SessionStart=10000` を該当groupへだけ入れるテスト、0・負数・非整数・hook指定の無いeventを終了64で拒否するテストを追加する。
-- [ ] 2. `test/test-uninstall.sh` に、`remove --ledger-key codex_hooks` がCodex記録だけを除去しClaude記録を残すテストと、既定値では従来どおり `hooks` だけを扱うテストを追加する。
-- [ ] 3. `bash test/run.sh install uninstall` を実行し、新オプション未実装による終了64またはassertion failureを確認する。既存ケースの回帰失敗はREDとして受け入れない。
-- [ ] 4. `lib/settings-hooks.py` のCLIを後方互換に拡張する。`install <path> [--ledger PATH] [--ledger-key hooks|codex_hooks] [--matcher EVENT=REGEX] [--additional-context-limit EVENT=POSITIVE_INTEGER] EVENT:COMMAND...` と `remove <path> [--ledger PATH] [--ledger-key hooks|codex_hooks] [--guess]` を受け、既定キーを `hooks` とする。
-- [ ] 5. `recorded_hooks(ledger_path, ledger_key)`、install時の記録、remove時の記録消去を同じkeyで行う。許可キーは `hooks` と `codex_hooks` の2つだけとし、任意の台帳フィールドを操作させない。
-- [ ] 6. matcher groupへevent単位の `additionalContextLimit` を付ける。値は正の10進整数だけを許可し、指定の無いClaude側groupのJSON形を変えない。
-- [ ] 7. `lib/ledger.py` の `has-record` に `codex_hooks` を追加し、`any` は `codex_hooks` と `codex_hooks_created` も管理記録として数える。既存の `skills|hooks|any` は同じ意味を保つ。
-- [ ] 8. focused testを再実行し全件PASSを確認する。新規テスト関数数に合わせて `test/expected-min-count` の対象ファイル値と総数を増やし、runnerが報告する実測値と一致させる。
-- [ ] 9. `git diff --check` と `git diff -- lib/settings-hooks.py lib/ledger.py test/test-install.sh test/test-uninstall.sh test/expected-min-count` を確認し、`git commit -m "feat: Codex hook用の台帳分離を追加"` でコミットする。
+- [x] 1. `test/test-install.sh` に、`--ledger-key codex_hooks` が `hooks` と別のcommand一覧を保存・更新するテスト、未許可キーを終了64で拒否するテスト、`--additional-context-limit SessionStart=10000` を該当command hook entryへだけ入れるテスト、0・負数・非整数・hook指定の無いeventを終了64で拒否するテストを追加する。
+- [x] 2. `test/test-uninstall.sh` に、`remove --ledger-key codex_hooks` がCodex記録だけを除去しClaude記録を残すテストと、既定値では従来どおり `hooks` だけを扱うテストを追加する。
+- [x] 3. `bash test/run.sh install uninstall` を実行し、新オプション未実装による終了64またはassertion failureを確認する。既存ケースの回帰失敗はREDとして受け入れない。
+- [x] 4. `lib/settings-hooks.py` のCLIを後方互換に拡張する。`install <path> [--ledger PATH] [--ledger-key hooks|codex_hooks] [--matcher EVENT=REGEX] [--additional-context-limit EVENT=POSITIVE_INTEGER] EVENT:COMMAND...` と `remove <path> [--ledger PATH] [--ledger-key hooks|codex_hooks] [--guess]` を受け、既定キーを `hooks` とする。
+- [x] 5. `recorded_hooks(ledger_path, ledger_key)`、install時の記録、remove時の記録消去を同じkeyで行う。許可キーは `hooks` と `codex_hooks` の2つだけとし、任意の台帳フィールドを操作させない。
+- [x] 6. 内側の command hook entryへevent単位の `additionalContextLimit` を付ける。値は正の10進整数だけを許可し、指定の無いClaude側entryのJSON形を変えない。
+- [x] 7. `lib/ledger.py` の `has-record` に `codex_hooks` を追加し、`any` は `codex_hooks` と `codex_hooks_created` も管理記録として数える。既存の `skills|hooks|any` は同じ意味を保つ。
+- [x] 8. focused testを再実行し全件PASSを確認する。新規テスト関数数に合わせて `test/expected-min-count` の対象ファイル値と総数を増やし、runnerが報告する実測値と一致させる。
+- [x] 9. `git diff --check` と `git diff -- lib/settings-hooks.py lib/ledger.py test/test-install.sh test/test-uninstall.sh test/expected-min-count` を確認し、`git commit -m "feat: Codex hook用の台帳分離を追加"` でコミットする。
 
 ## Task 2: personal installでCodex project hookを安全に導入する
 

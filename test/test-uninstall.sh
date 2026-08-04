@@ -320,6 +320,92 @@ test_残った_settings_は妥当な_JSON_である() {
     _fail "settings.local.json が妥当な JSON でない"
 }
 
+test_Codex用removeはcodex_hooksだけを外してClaudeの記録を残す() {
+  _setup_target
+  local settings="$TARGET/hooks.json" ledger="$TARGET/ledger.json" rc=0
+  python3 - "$settings" "$ledger" <<'PY'
+import json
+import sys
+
+settings, ledger = sys.argv[1:]
+data = {
+    "hooks": {
+        "SessionStart": [
+            {"hooks": [{"type": "command", "command": "echo claude"}]},
+            {"hooks": [{"type": "command", "command": "echo codex"}]},
+        ]
+    }
+}
+with open(settings, "w", encoding="utf-8") as handle:
+    json.dump(data, handle)
+with open(ledger, "w", encoding="utf-8") as handle:
+    json.dump({"hooks": ["echo claude"], "codex_hooks": ["echo codex"]}, handle)
+PY
+  python3 "$REPO_ROOT/lib/settings-hooks.py" remove "$settings" \
+    --ledger "$ledger" --ledger-key codex_hooks >/dev/null 2>"$TEST_TMP/.err" || rc=$?
+  assert_eq "0" "$rc" "codex_hooks removeの終了コード: $(cat "$TEST_TMP/.err")"
+  python3 - "$settings" "$ledger" <<'PY' || _fail "Codex用removeの所有権分離結果が妥当でない"
+import json
+import sys
+
+settings, ledger = sys.argv[1:]
+with open(settings, encoding="utf-8") as handle:
+    setting_data = json.load(handle)
+with open(ledger, encoding="utf-8") as handle:
+    ledger_data = json.load(handle)
+commands = [
+    hook.get("command")
+    for group in setting_data["hooks"]["SessionStart"]
+    for hook in group["hooks"]
+]
+assert commands == ["echo claude"]
+assert ledger_data == {"hooks": ["echo claude"]}
+PY
+}
+
+test_removeの既定ledger_keyは従来どおりhooksだけを外す() {
+  _setup_target
+  local settings="$TARGET/hooks.json" ledger="$TARGET/ledger.json" rc=0
+  python3 - "$settings" "$ledger" <<'PY'
+import json
+import sys
+
+settings, ledger = sys.argv[1:]
+data = {
+    "hooks": {
+        "SessionStart": [
+            {"hooks": [{"type": "command", "command": "echo claude"}]},
+            {"hooks": [{"type": "command", "command": "echo codex"}]},
+        ]
+    }
+}
+with open(settings, "w", encoding="utf-8") as handle:
+    json.dump(data, handle)
+with open(ledger, "w", encoding="utf-8") as handle:
+    json.dump({"hooks": ["echo claude"], "codex_hooks": ["echo codex"]}, handle)
+PY
+  python3 "$REPO_ROOT/lib/settings-hooks.py" remove "$settings" \
+    --ledger "$ledger" >/dev/null 2>"$TEST_TMP/.err" || rc=$?
+  assert_eq "0" "$rc" "既定hooks removeの終了コード: $(cat "$TEST_TMP/.err")"
+  python3 - "$settings" "$ledger" <<'PY' || _fail "既定hooks removeの結果が妥当でない"
+import json
+import sys
+
+settings, ledger = sys.argv[1:]
+with open(settings, encoding="utf-8") as handle:
+    setting_data = json.load(handle)
+with open(ledger, encoding="utf-8") as handle:
+    ledger_data = json.load(handle)
+commands = [
+    hook.get("command")
+    for group in setting_data["hooks"]["SessionStart"]
+    for hook in group["hooks"]
+]
+assert commands == ["echo codex"]
+assert ledger_data == {"codex_hooks": ["echo codex"]}
+PY
+}
+
 # --- Task 3: Codex destination の fail-closed uninstall ----------------------
 
 test_Codexスキルのlinkを外す() {

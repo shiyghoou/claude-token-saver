@@ -22,6 +22,7 @@
 
 import json
 import os
+import re
 import shlex
 import sys
 
@@ -32,6 +33,7 @@ import ledger  # noqa: E402  (同ディレクトリの小道具)
 
 # 台帳が無いときに、自分のものと推測するフックスクリプトのファイル名。
 OURS = {"handoff-check.sh", "suggest-session-cut.sh"}
+LEDGER_KEYS = {"hooks", "codex_hooks"}
 
 
 def looks_like_ours(command):
@@ -115,17 +117,17 @@ def load(path):
     return data, original
 
 
-def recorded_hooks(ledger_path):
+def recorded_hooks(ledger_path, ledger_key="hooks"):
     """台帳に記録された登録コマンドを返す。記録が無ければ None を返す。
 
     空リスト（「登録すべきフックが1つも無かった」という記録）と、記録そのものが
     無い状態を区別する。前者は「外すものは無い」で正しく、後者は推測しか
     残っていない状態であり、既定では何もしてはならない。
     """
-    if not ledger_path or not ledger.has_record(ledger_path, "hooks"):
+    if not ledger_path or not ledger.has_record(ledger_path, ledger_key):
         return None
     return [
-        h for h in ledger.get_list(ledger.load(ledger_path), "hooks") if isinstance(h, str)
+        h for h in ledger.get_list(ledger.load(ledger_path), ledger_key) if isinstance(h, str)
     ]
 
 
@@ -221,7 +223,7 @@ def save_if_changed(path, data, original):
     return True
 
 
-def cmd_install(path, ledger_path, specs, matchers):
+def cmd_install(path, ledger_path, ledger_key, specs, matchers, additional_limits):
     parsed_specs = []
     events = set()
     for spec in specs:
@@ -235,9 +237,13 @@ def cmd_install(path, ledger_path, specs, matchers):
         if event not in events:
             sys.stderr.write("matcher のイベントがフック指定に無い: %s\n" % event)
             return 64
+    for event in additional_limits:
+        if event not in events:
+            sys.stderr.write("追加コンテキスト上限のイベントがフック指定に無い: %s\n" % event)
+            return 64
 
     data, original = load(path)
-    known = recorded_hooks(ledger_path)
+    known = recorded_hooks(ledger_path, ledger_key)
     candidates = [] if known is not None else guess_candidates(data)
     # 台帳が無い install も推測削除へ落とさない。旧版の残骸は二重登録のまま
     # 残りうるが、利用者のフックを消すより安全である。候補だけを警告する。
@@ -256,7 +262,10 @@ def cmd_install(path, ledger_path, specs, matchers):
         # 空白を含むパスをそのまま入れると、シェルが単語分割して毎セッション
         # rc=127 で失敗する。クォートしてから登録する。
         quoted = shlex.quote(command)
-        group = {"hooks": [{"type": "command", "command": quoted}]}
+        entry = {"type": "command", "command": quoted}
+        if event in additional_limits:
+            entry["additionalContextLimit"] = additional_limits[event]
+        group = {"hooks": [entry]}
         if event in matchers:
             group["matcher"] = matchers[event]
         hooks.setdefault(event, []).append(group)
@@ -266,7 +275,7 @@ def cmd_install(path, ledger_path, specs, matchers):
     # 台帳には、登録した文字列そのものを残す。次回の同定を推測に頼らせない。
     if ledger_path:
         led = ledger.load(ledger_path)
-        led["hooks"] = commands
+        led[ledger_key] = commands
         try:
             ledger.save(ledger_path, led)
         except OSError as e:
@@ -287,14 +296,14 @@ def cmd_install(path, ledger_path, specs, matchers):
     return 2 if candidates else 0
 
 
-def cmd_remove(path, ledger_path, guess=False):
+def cmd_remove(path, ledger_path, ledger_key="hooks", guess=False):
     if not os.path.exists(path):
         print("  settings.local.json が無い")
         return 0
     # 壊れた JSON はここで落とす。fail-closed の判定より先に読むのは、
     # 「記録が無いから何もしない」で壊れたファイルを見逃さないためである。
     data, original = load(path)
-    known = recorded_hooks(ledger_path)
+    known = recorded_hooks(ledger_path, ledger_key)
     if known is None and not guess:
         sys.stderr.write(
             "  警告: 台帳にフックの記録が無いため settings.local.json を変更しない。\n"
@@ -303,6 +312,8 @@ def cmd_remove(path, ledger_path, guess=False):
             "        実行せよ（ファイル名で推測する）。\n"
         )
         return 2
+    if ledger_path and ledger_key == "codex_hooks":
+        ledger.check_writable(ledger_path)
     removed = purge(data, known, guess=guess)
     # 記録があるのに1件も外せないのは、導入後に利用者が差し替えたか、台帳が
     # 古くなった状態である。成功扱いにして台帳を消すと次回は取り外せない。
@@ -310,7 +321,25 @@ def cmd_remove(path, ledger_path, guess=False):
         sys.stderr.write("  警告: 台帳に記録されたフックを外せないため設定を変更していない。\n")
         return 2
     save_if_changed(path, data, original)
+    if ledger_path and known is not None:
+        led = ledger.load(ledger_path)
+        if ledger_key in led:
+            del led[ledger_key]
+            try:
+                ledger.save(ledger_path, led)
+            except OSError:
+                # Claude側の既定キーは、uninstall.sh が処理後に台帳自体を
+                # 取り除ける旧環境の互換性を保つ。Codex側は上の
+                # check_writable で変更前に拒否する。
+                if ledger_key != "hooks":
+                    raise
     print("  フックの登録を %d 件外した" % removed)
+    return 0
+
+
+def cmd_validate(path):
+    """既存設定を読み、構造が妥当であることだけを確認する。"""
+    load(path)
     return 0
 
 
@@ -337,17 +366,25 @@ def cmd_same(path, other):
 def main(argv):
     if len(argv) == 4 and argv[1] == "same":
         return cmd_same(argv[2], argv[3])
+    if len(argv) == 3 and argv[1] == "validate":
+        return cmd_validate(argv[2])
     if len(argv) < 3 or argv[1] not in ("install", "remove"):
         sys.stderr.write(
             "usage: settings-hooks.py {install|remove} <path> "
-            "[--ledger <ledger>] [--matcher EVENT=REGEX] [--guess] [event:command ...]\n"
+            "[--ledger <ledger>] [--ledger-key hooks|codex_hooks] "
+            "[--matcher EVENT=REGEX] "
+            "[--additional-context-limit EVENT=POSITIVE_INTEGER] "
+            "[--guess] [event:command ...]\n"
         )
         return 64
 
     rest = argv[3:]
     ledger_path = ""
+    ledger_key = "hooks"
+    ledger_key_seen = False
     guess = False
     matchers = {}
+    additional_limits = {}
     specs = []
     i = 0
     while i < len(rest):
@@ -357,6 +394,18 @@ def main(argv):
                 sys.stderr.write("--ledger には台帳のパスが要る\n")
                 return 64
             ledger_path = rest[i + 1]
+            i += 2
+            continue
+        if token == "--ledger-key":
+            if (
+                ledger_key_seen
+                or i + 1 >= len(rest)
+                or rest[i + 1] not in LEDGER_KEYS
+            ):
+                sys.stderr.write("--ledger-key は hooks または codex_hooks を1回だけ指定する\n")
+                return 64
+            ledger_key = rest[i + 1]
+            ledger_key_seen = True
             i += 2
             continue
         if token == "--guess":
@@ -377,6 +426,22 @@ def main(argv):
             matchers[event] = matcher
             i += 2
             continue
+        if token == "--additional-context-limit":
+            if argv[1] != "install" or i + 1 >= len(rest):
+                sys.stderr.write("--additional-context-limit は install で EVENT=POSITIVE_INTEGER を指定する\n")
+                return 64
+            event, separator, value = rest[i + 1].partition("=")
+            if (
+                not separator
+                or not event
+                or event in additional_limits
+                or not re.match(r"^[1-9][0-9]*$", value)
+            ):
+                sys.stderr.write("追加コンテキスト上限は正の10進整数で指定する: %r\n" % rest[i + 1])
+                return 64
+            additional_limits[event] = int(value)
+            i += 2
+            continue
         if token.startswith("-"):
             sys.stderr.write("不明なオプションまたは引数: %s\n" % token)
             return 64
@@ -384,11 +449,11 @@ def main(argv):
         i += 1
 
     if argv[1] == "install":
-        return cmd_install(argv[2], ledger_path, specs, matchers)
+        return cmd_install(argv[2], ledger_path, ledger_key, specs, matchers, additional_limits)
     if specs:
         sys.stderr.write("remove にフック指定は渡せない\n")
         return 64
-    return cmd_remove(argv[2], ledger_path, guess)
+    return cmd_remove(argv[2], ledger_path, ledger_key, guess)
 
 
 if __name__ == "__main__":

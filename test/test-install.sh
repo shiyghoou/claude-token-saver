@@ -945,6 +945,137 @@ test_不正なmatcher指定を設定変更前に拒否する() {
   assert_eq "$(cat "$TEST_TMP/ledger.before")" "$(cat "$TARGET/.token-saver/installed.json")" "台帳の未変更"
 }
 
+test_Codex用ledger_keyはClaude用hooks記録と分離する() {
+  _setup_target
+  local settings="$TARGET/codex-hooks.json" ledger="$TARGET/ledger.json"
+  local command="$TARGET/codex hook.sh" out rc=0
+  printf '{"hooks":["claude-command"]}\n' >"$ledger"
+  out="$(python3 "$REPO_ROOT/lib/settings-hooks.py" install "$settings" \
+    --ledger "$ledger" --ledger-key codex_hooks \
+    "SessionStart:$command" 2>&1)" || rc=$?
+  assert_eq "0" "$rc" "codex_hooks installの終了コード: $out"
+  python3 - "$settings" "$ledger" "$command" <<'PY' || _fail "Codex用台帳の分離結果が妥当でない"
+import json
+import shlex
+import sys
+
+settings, ledger, command = sys.argv[1:]
+with open(settings, encoding="utf-8") as handle:
+    setting_data = json.load(handle)
+with open(ledger, encoding="utf-8") as handle:
+    ledger_data = json.load(handle)
+expected = shlex.quote(command)
+assert ledger_data["hooks"] == ["claude-command"]
+assert ledger_data["codex_hooks"] == [expected]
+assert setting_data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == expected
+PY
+}
+
+test_additional_context_limitは指定したeventのgroupだけへ入る() {
+  _setup_target
+  local settings="$TARGET/codex-hooks.json" ledger="$TARGET/ledger.json" rc=0
+  printf '{}\n' >"$ledger"
+  python3 "$REPO_ROOT/lib/settings-hooks.py" install "$settings" \
+    --ledger "$ledger" --ledger-key codex_hooks \
+    --matcher 'SessionStart=startup|clear' \
+    --additional-context-limit SessionStart=10000 \
+    'SessionStart:echo session' 'Stop:echo stop' >/dev/null 2>"$TEST_TMP/.err" || rc=$?
+  assert_eq "0" "$rc" "additionalContextLimitの終了コード: $(cat "$TEST_TMP/.err")"
+  python3 - "$settings" <<'PY' || _fail "event別additionalContextLimitの構造が妥当でない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+session = data["hooks"]["SessionStart"][0]
+stop = data["hooks"]["Stop"][0]
+assert session["matcher"] == "startup|clear"
+session_entry = session["hooks"][0]
+stop_entry = stop["hooks"][0]
+assert session_entry["additionalContextLimit"] == 10000
+assert "additionalContextLimit" not in session
+assert "additionalContextLimit" not in stop_entry
+PY
+}
+
+test_additional_context_limitは正整数以外と未指定eventを変更前に拒否する() {
+  _setup_target
+  local settings="$TARGET/codex-hooks.json" ledger="$TARGET/ledger.json" bad before_settings before_ledger rc out
+  for bad in 0 -1 1.5 nope; do
+    printf '{}\n' >"$settings"
+    printf '{"codex_hooks":[]}\n' >"$ledger"
+    before_settings="$(cat "$settings")"
+    before_ledger="$(cat "$ledger")"
+    rc=0
+    out="$(python3 "$REPO_ROOT/lib/settings-hooks.py" install "$settings" \
+      --ledger "$ledger" --ledger-key codex_hooks \
+      --additional-context-limit "SessionStart=$bad" \
+      'SessionStart:echo session' 2>&1)" || rc=$?
+    assert_eq "64" "$rc" "不正な上限[$bad]の終了コード"
+    assert_contains "$out" "正の10進整数" "不正な上限[$bad]のエラー"
+    assert_eq "$before_settings" "$(cat "$settings")" "不正な上限[$bad]の設定未変更"
+    assert_eq "$before_ledger" "$(cat "$ledger")" "不正な上限[$bad]の台帳未変更"
+  done
+
+  printf '{}\n' >"$settings"
+  printf '{"codex_hooks":[]}\n' >"$ledger"
+  rc=0
+  out="$(python3 "$REPO_ROOT/lib/settings-hooks.py" install "$settings" \
+    --ledger "$ledger" --ledger-key codex_hooks \
+    --additional-context-limit Stop=10000 \
+    'SessionStart:echo session' 2>&1)" || rc=$?
+  assert_eq "64" "$rc" "未指定eventの終了コード"
+  assert_contains "$out" "フック指定に無い" "未指定eventのエラー"
+}
+
+test_許可されないledger_keyは設定変更前に拒否する() {
+  _setup_target
+  local settings="$TARGET/codex-hooks.json" ledger="$TARGET/ledger.json" out rc=0
+  printf '{}\n' >"$settings"
+  printf '{"hooks":["keep"]}\n' >"$ledger"
+  out="$(python3 "$REPO_ROOT/lib/settings-hooks.py" install "$settings" \
+    --ledger "$ledger" --ledger-key arbitrary \
+    'SessionStart:echo session' 2>&1)" || rc=$?
+  assert_eq "64" "$rc" "未知ledger_keyの終了コード"
+  assert_contains "$out" "hooks または codex_hooks" "未知ledger_keyのエラー"
+  assert_eq "$(printf '{}\n')" "$(cat "$settings")" "未知ledger_keyの設定未変更"
+  assert_eq "$(printf '{\"hooks\":[\"keep\"]}\n')" "$(cat "$ledger")" "未知ledger_keyの台帳未変更"
+}
+
+test_明示したledger_keyはhooksでもcodex_hooksでも重複指定を拒否する() {
+  _setup_target
+  local settings="$TARGET/codex-hooks.json" ledger="$TARGET/ledger.json" key out rc before_settings before_ledger
+  for key in hooks codex_hooks; do
+    printf '{}\n' >"$settings"
+    printf '{}\n' >"$ledger"
+    before_settings="$(cat "$settings")"
+    before_ledger="$(cat "$ledger")"
+    rc=0
+    out="$(python3 "$REPO_ROOT/lib/settings-hooks.py" install "$settings" \
+      --ledger "$ledger" --ledger-key "$key" --ledger-key "$key" \
+      'SessionStart:echo session' 2>&1)" || rc=$?
+    assert_eq "64" "$rc" "重複ledger_key[$key]の終了コード"
+    assert_contains "$out" "1回だけ" "重複ledger_key[$key]のエラー"
+    assert_eq "$before_settings" "$(cat "$settings")" "重複ledger_key[$key]の設定未変更"
+    assert_eq "$before_ledger" "$(cat "$ledger")" "重複ledger_key[$key]の台帳未変更"
+  done
+}
+
+test_ledgerのhas_recordはCodexのhook記録を管理対象として数える() {
+  local ledger="$TEST_TMP/ledger.json" rc
+  printf '{"codex_hooks":[]}' >"$ledger"
+  rc=0
+  python3 "$REPO_ROOT/lib/ledger.py" has-record "$ledger" codex_hooks || rc=$?
+  assert_eq "0" "$rc" "空のcodex_hooks記録"
+  rc=0
+  python3 "$REPO_ROOT/lib/ledger.py" has-record "$ledger" any || rc=$?
+  assert_eq "0" "$rc" "codex_hooksのany記録"
+  printf '{"codex_hooks_created":true}' >"$ledger"
+  rc=0
+  python3 "$REPO_ROOT/lib/ledger.py" has-record "$ledger" any || rc=$?
+  assert_eq "0" "$rc" "codex_hooks_createdのany記録"
+}
+
 test_既存の_settings_をバックアップする() {
   _setup_target
   mkdir -p "$TARGET/.claude"
