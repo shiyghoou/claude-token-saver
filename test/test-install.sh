@@ -272,6 +272,48 @@ test_Codex対応スキルを_agentsへリンクする() {
   assert_contains "$(cat "$TARGET/.gitignore")" ".agents/skills/delegation-policy" ".gitignore"
 }
 
+test_Claudeのlegacy風managed_linkを現srcへ張り替える() {
+  _setup_target
+  old_repo="$TEST_TMP/old-repo"
+  old_link="$old_repo/skills/delegation-policy"
+  mkdir -p "$old_link" "$TARGET/.claude/skills"
+  printf '#!/usr/bin/env bash\n' >"$old_repo/install.sh"
+  ln -s "$old_link" "$TARGET/.claude/skills/delegation-policy"
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  assert_eq "$REPO_ROOT/skills/delegation-policy" \
+    "$(readlink "$TARGET/.claude/skills/delegation-policy")" "Claude legacy link"
+  assert_contains "$(cat "$TARGET/.gitignore")" \
+    ".claude/skills/delegation-policy" "Claude .gitignore"
+}
+
+test_Codexの台帳一致linkを現srcへ張り替えsharedで除外する() {
+  _setup_target
+  old_repo="$TEST_TMP/old-repo"
+  old_link="$old_repo/skills/delegation-policy"
+  mkdir -p "$old_link" "$TARGET/.agents/skills" "$TARGET/.token-saver"
+  ln -s "$old_link" "$TARGET/.agents/skills/delegation-policy"
+  python3 - "$TARGET/.token-saver/installed.json" "$old_link" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w") as handle:
+    json.dump({"skills": [{"name": "delegation-policy", "src": sys.argv[2], "mode": "link"}]}, handle)
+    handle.write("\n")
+PY
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "personal終了コード"
+  assert_eq "$REPO_ROOT/skills/delegation-policy" \
+    "$(readlink "$TARGET/.agents/skills/delegation-policy")" "Codex ledger link"
+  assert_file_missing "$TARGET/.gitignore" "personal後の.gitignore"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "shared終了コード"
+  assert_eq "$REPO_ROOT/skills/delegation-policy" \
+    "$(readlink "$TARGET/.agents/skills/delegation-policy")" "shared後のCodex link"
+  assert_contains "$(cat "$TARGET/.gitignore")" \
+    ".agents/skills/delegation-policy" "Codex shared .gitignore"
+}
+
 test_Codex対応スキルをmarker付きcopyで配置する() {
   _setup_target
   CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >/dev/null 2>&1
