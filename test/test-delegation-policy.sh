@@ -83,3 +83,30 @@ test_数値とモデル名を普遍化しない() {
   assert_contains "$body" "価格" "価格非固定"
   assert_contains "$body" "固定トークン数" "トークン数非固定"
 }
+
+test_READMEはdelegation_policyを実装済みと案内する() {
+  assert_contains "$(cat "$REPO_ROOT/README.md")" \
+    "委譲判断ガイド（delegation-policy） | **実装済み**" "状態表"
+}
+
+test_READMEは明示読み込みと判断原則を案内する() {
+  local body
+  body="$(cat "$REPO_ROOT/README.md")"
+  assert_contains "$body" "必要なときだけ" "on-demand"
+  assert_contains "$body" "必ず回収" "結果回収"
+}
+
+test_READMEは移植元を変更せず切り替え手順を示す() {
+  local body
+  body="$(cat "$REPO_ROOT/README.md")"
+  assert_contains "$body" "移植元の切り替え" "移行見出し"
+  assert_contains "$body" "移植元の運用規約" "別Issue"
+  assert_contains "$body" "重複する方針" "重複解消"
+}
+
+test_基礎設計は段階1から5を実装済みとする() {
+  local body
+  body="$(cat "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md")"
+  assert_contains "$body" "段階1〜5は本リポジトリで実装済み" "段階完了"
+  assert_not_contains "$body" "段階5の委譲ガイドは未実装" "旧状態"
+}
