@@ -43,6 +43,8 @@ REPO_ROOT="$(find_target_root)" || {
 explicit_out=0
 expect_out_value=0
 out_path=""
+final_out_path=""
+out_parent=""
 tmp_out=""
 report_path=""
 default_output=0
@@ -53,9 +55,13 @@ calibrate_requested=0
 snapshot_path=""
 snapshot_identity=""
 snapshot_had_regular=0
+original_args=()
+engine_args=()
+arg_index=0
+arg_count=0
+arg=""
 
 cleanup() {
-  rm -f "$marker"
   if [ -n "$tmp_out" ]; then
     rm -f "$tmp_out"
   fi
@@ -96,15 +102,20 @@ if [ "$explicit_out" -eq 0 ]; then
   default_output=1
 fi
 
+original_args=("$@")
+engine_args=()
+arg_index=0
+arg_count=${#original_args[@]}
+while [ "$arg_index" -lt "$arg_count" ]; do
+  engine_args+=("${original_args[$arg_index]}")
+  arg_index=$((arg_index + 1))
+done
+
 if ! command -v python3 >/dev/null 2>&1; then
   printf 'python3 が見つかりません: %s を実行できません\n' "$ENGINE" >&2
   exit 1
 fi
 
-marker="$(mktemp "${TMPDIR:-/tmp}/cts-token-report.XXXXXX")" || {
-  printf '更新検査用の一時ファイルを作成できません\n' >&2
-  exit 1
-}
 trap cleanup EXIT
 
 if [ "$default_output" -eq 1 ]; then
@@ -113,7 +124,56 @@ if [ "$default_output" -eq 1 ]; then
     exit 1
   }
   report_path="$tmp_out"
-  set -- "$@" --out "$report_path"
+  engine_args+=(--out "$report_path")
+elif [ -n "$out_path" ]; then
+  case "$out_path" in
+    /*)
+      final_out_path="$out_path"
+      ;;
+    *)
+      final_out_path="$REPO_ROOT/$out_path"
+      ;;
+  esac
+  out_parent="$(dirname "$final_out_path")"
+  if [ ! -d "$out_parent" ]; then
+    printf 'cannot write report: parent directory does not exist: %s\n' "$out_parent" >&2
+    exit 1
+  fi
+  if [ -L "$final_out_path" ]; then
+    printf 'レポート出力先が symlink です: %s\n' "$out_path" >&2
+    exit 1
+  fi
+  if [ -d "$final_out_path" ]; then
+    printf 'レポート出力先がディレクトリです: %s\n' "$out_path" >&2
+    exit 1
+  fi
+  tmp_out="$(mktemp "$out_parent/.token-report.XXXXXX")" || {
+    printf '一時レポートを作成できません: %s\n' "$out_parent" >&2
+    exit 1
+  }
+  report_path="$tmp_out"
+  engine_args=()
+  arg_index=0
+  arg_count=${#original_args[@]}
+  while [ "$arg_index" -lt "$arg_count" ]; do
+    arg="${original_args[$arg_index]}"
+    case "$arg" in
+      --out)
+        engine_args+=("$arg")
+        arg_index=$((arg_index + 1))
+        if [ "$arg_index" -lt "$arg_count" ]; then
+          engine_args+=("$report_path")
+        fi
+        ;;
+      --out=*)
+        engine_args+=("--out=$report_path")
+        ;;
+      *)
+        engine_args+=("$arg")
+        ;;
+    esac
+    arg_index=$((arg_index + 1))
+  done
 else
   report_path="$out_path"
 fi
@@ -140,7 +200,7 @@ if [ "$calibrate_requested" -eq 1 ]; then
   fi
 fi
 
-(cd "$REPO_ROOT" && python3 -B "$ENGINE" "$@" >/dev/null)
+(cd "$REPO_ROOT" && python3 -B "$ENGINE" ${engine_args[@]+"${engine_args[@]}"} >/dev/null)
 status=$?
 if [ "$status" -ne 0 ]; then
   exit "$status"
@@ -165,22 +225,13 @@ if [ -z "$report_path" ]; then
   exit 1
 fi
 
-if [ ! -e "$report_path" ] && [ ! -L "$report_path" ]; then
+if [ -L "$report_path" ] || [ ! -f "$report_path" ]; then
   printf 'レポートが作成されていません: %s\n' "$report_path" >&2
   exit 1
 fi
 
 if [ ! -s "$report_path" ]; then
   printf 'レポートが空です: %s\n' "$report_path" >&2
-  exit 1
-fi
-
-# 既定出力は launcher がこの実行専用に作った空の mktemp へ書かせているため、
-# 非空・形式検査だけで今回の成果物だと確定できる。秒単位 mtime の環境で -nt を
-# 使うと、marker と engine 出力が同じ秒になり正常な成果物を誤拒否する。
-# 利用者が指定した既存 --out だけは、前回成果物の誤認を防ぐため freshness も見る。
-if [ "$default_output" -eq 0 ] && [ ! "$report_path" -nt "$marker" ]; then
-  printf 'レポートがこの実行で更新されていません: %s\n' "$report_path" >&2
   exit 1
 fi
 
@@ -233,6 +284,19 @@ if [ "$default_output" -eq 1 ]; then
   rm -f "$placement_tmp"
   placement_tmp=""
   report_path="$out_path"
+fi
+
+if [ "$default_output" -eq 0 ] && [ -n "$tmp_out" ]; then
+  if [ -L "$final_out_path" ]; then
+    printf 'レポート出力先が symlink です: %s\n' "$out_path" >&2
+    exit 1
+  fi
+  mv "$report_path" "$final_out_path" || {
+    printf '検証済みレポートを最終出力先へ移動できません: %s\n' "$out_path" >&2
+    exit 1
+  }
+  tmp_out=""
+  report_path="$final_out_path"
 fi
 
 printf '書き出しました: %s\n' "$out_path"
