@@ -87,6 +87,14 @@ _settings_text() {
   cat "$SETTINGS"
 }
 
+_codex_hooks_text() {
+  if [ ! -f "$TARGET/.codex/hooks.json" ]; then
+    printf '(Codex hooks.json は存在しない)\n'
+    return 0
+  fi
+  cat "$TARGET/.codex/hooks.json"
+}
+
 test_フックの登録を外す() {
   _setup_target
   _run_install
@@ -318,6 +326,393 @@ test_残った_settings_は妥当な_JSON_である() {
   [ -f "$SETTINGS" ] || return 0
   python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$SETTINGS" ||
     _fail "settings.local.json が妥当な JSON でない"
+}
+
+test_Codex用removeはcodex_hooksだけを外してClaudeの記録を残す() {
+  _setup_target
+  local settings="$TARGET/hooks.json" ledger="$TARGET/ledger.json" rc=0
+  python3 - "$settings" "$ledger" <<'PY'
+import json
+import sys
+
+settings, ledger = sys.argv[1:]
+data = {
+    "hooks": {
+        "SessionStart": [
+            {"hooks": [{"type": "command", "command": "echo claude"}]},
+            {"matcher": "startup|clear", "hooks": [{
+                "type": "command", "command": "echo codex",
+                "additionalContextLimit": 10000,
+            }]},
+        ]
+    }
+}
+with open(settings, "w", encoding="utf-8") as handle:
+    json.dump(data, handle)
+with open(ledger, "w", encoding="utf-8") as handle:
+    json.dump({"hooks": ["echo claude"], "codex_hooks": ["echo codex"]}, handle)
+PY
+  python3 "$REPO_ROOT/lib/settings-hooks.py" remove "$settings" \
+    --ledger "$ledger" --ledger-key codex_hooks >/dev/null 2>"$TEST_TMP/.err" || rc=$?
+  assert_eq "0" "$rc" "codex_hooks removeの終了コード: $(cat "$TEST_TMP/.err")"
+  python3 - "$settings" "$ledger" <<'PY' || _fail "Codex用removeの所有権分離結果が妥当でない"
+import json
+import sys
+
+settings, ledger = sys.argv[1:]
+with open(settings, encoding="utf-8") as handle:
+    setting_data = json.load(handle)
+with open(ledger, encoding="utf-8") as handle:
+    ledger_data = json.load(handle)
+commands = [
+    hook.get("command")
+    for group in setting_data["hooks"]["SessionStart"]
+    for hook in group["hooks"]
+]
+assert commands == ["echo claude"]
+assert ledger_data == {"hooks": ["echo claude"]}
+PY
+}
+
+test_removeの既定ledger_keyは従来どおりhooksだけを外す() {
+  _setup_target
+  local settings="$TARGET/hooks.json" ledger="$TARGET/ledger.json" rc=0
+  python3 - "$settings" "$ledger" <<'PY'
+import json
+import sys
+
+settings, ledger = sys.argv[1:]
+data = {
+    "hooks": {
+        "SessionStart": [
+            {"hooks": [{"type": "command", "command": "echo claude"}]},
+            {"hooks": [{"type": "command", "command": "echo codex"}]},
+        ]
+    }
+}
+with open(settings, "w", encoding="utf-8") as handle:
+    json.dump(data, handle)
+with open(ledger, "w", encoding="utf-8") as handle:
+    json.dump({"hooks": ["echo claude"], "codex_hooks": ["echo codex"]}, handle)
+PY
+  python3 "$REPO_ROOT/lib/settings-hooks.py" remove "$settings" \
+    --ledger "$ledger" >/dev/null 2>"$TEST_TMP/.err" || rc=$?
+  assert_eq "0" "$rc" "既定hooks removeの終了コード: $(cat "$TEST_TMP/.err")"
+  python3 - "$settings" "$ledger" <<'PY' || _fail "既定hooks removeの結果が妥当でない"
+import json
+import sys
+
+settings, ledger = sys.argv[1:]
+with open(settings, encoding="utf-8") as handle:
+    setting_data = json.load(handle)
+with open(ledger, encoding="utf-8") as handle:
+    ledger_data = json.load(handle)
+commands = [
+    hook.get("command")
+    for group in setting_data["hooks"]["SessionStart"]
+    for hook in group["hooks"]
+]
+assert commands == ["echo codex"]
+assert ledger_data == {"codex_hooks": ["echo codex"]}
+PY
+}
+
+test_個人uninstallはCodex管理entryだけ外し同group利用者hookとClaudeを独立保持する() {
+  _setup_target
+  _run_install
+  python3 - "$TARGET/.codex/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    data = json.load(handle)
+data["hooks"]["SessionStart"][0]["hooks"].append(
+    {"type": "command", "command": "echo 利用者Codex"}
+)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, ensure_ascii=False)
+PY
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "Codex同居hookの終了コード"
+  assert_not_contains "$(_hook_commands SessionStart)" "handoff-check.sh" "Claude hook"
+  assert_file_exists "$TARGET/.codex/hooks.json" "利用者hookを含むCodex hooks.json"
+  python3 - "$TARGET/.codex/hooks.json" <<'PY' || _fail "Codex同居hookの取り外し結果が妥当でない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+commands = [
+    entry.get("command")
+    for group in data["hooks"].get("SessionStart", [])
+    for entry in group.get("hooks", [])
+]
+assert commands == ["echo 利用者Codex"]
+PY
+  python3 - "$TARGET/.token-saver/installed.json" <<'PY' || _fail "Codex同居hookの台帳整理が妥当でない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    ledger = json.load(handle)
+assert "codex_hooks" not in ledger
+assert ledger["codex_hooks_created"] is True
+assert ledger["codex_dir_created"] is True
+PY
+  assert_contains "$(_gitignore_text)" ".token-saver/" "Codex同居hookの管理対象.gitignore"
+}
+
+test_Codex利用者command差し替えは残し警告と台帳を保持する() {
+  _setup_target
+  _run_install
+  python3 - "$TARGET/.codex/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    data = json.load(handle)
+for group in data["hooks"]["SessionStart"]:
+    for entry in group["hooks"]:
+        if "handoff-check.sh" in entry.get("command", ""):
+            entry["command"] = "echo 差し替えた利用者hook"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, ensure_ascii=False)
+PY
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "Codex差し替えの終了コード"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "差し替え" "Codex差し替えの警告"
+  assert_file_exists "$TARGET/.codex/hooks.json" "差し替えたCodex hooks.json"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "差し替え時の台帳"
+  assert_contains "$(_codex_hooks_text)" "差し替えた利用者hook" "差し替えたCodex hook"
+  python3 - "$TARGET/.token-saver/installed.json" "$REPO_ROOT/scripts/handoff-check.sh" <<'PY' || _fail "Codex差し替え時の元台帳recordが保持されていない"
+import json
+import shlex
+import sys
+
+ledger_path, command = sys.argv[1:]
+with open(ledger_path, encoding="utf-8") as handle:
+    ledger = json.load(handle)
+assert ledger["codex_hooks"] == [shlex.quote(command)]
+assert ledger["codex_hooks_created"] is True
+assert ledger["codex_dir_created"] is True
+PY
+  assert_contains "$(_gitignore_text)" ".token-saver/" "Codex差し替え時の管理対象.gitignore"
+}
+
+test_Codex_hooks_json差し替え後の再installは古い作成所有権を失効させ利用者ファイルを残す() {
+  _setup_target
+  _run_install
+  printf '%s\n' '{"hooks":{}}' >"$TARGET/.codex/hooks.json"
+
+  local install_status=0
+  bash "$INSTALL" "$TARGET" >/dev/null 2>&1 || install_status=$?
+  assert_eq "0" "$install_status" "Codex差し替え後の再install終了コード"
+  python3 - "$TARGET/.token-saver/installed.json" <<'PY' || _fail "差し替え後のCodex所有フラグが失効していない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    ledger = json.load(handle)
+assert ledger["codex_hooks_created"] is False
+assert ledger["codex_dir_created"] is False
+PY
+
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "Codex差し替え再install後のuninstall終了コード"
+  assert_file_exists "$TARGET/.codex/hooks.json" "差し替えた利用者Codex hooks.json"
+  assert_file_exists "$TARGET/.codex" "差し替え後の利用者Codexディレクトリ"
+  python3 - "$TARGET/.codex/hooks.json" <<'PY' || _fail "差し替え後のCodex利用者ファイルが妥当でない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+assert data == {}
+PY
+  assert_not_contains "$(_codex_hooks_text)" "handoff-check.sh" \
+    "差し替え後のmanaged Codex hook"
+  if [ -f "$TARGET/.token-saver/installed.json" ]; then
+    python3 - "$TARGET/.token-saver/installed.json" <<'PY' || _fail "差し替え後のCodex台帳整理が妥当でない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    ledger = json.load(handle)
+assert "codex_hooks" not in ledger
+assert ledger["codex_hooks_created"] is False
+assert ledger["codex_dir_created"] is False
+PY
+  else
+    assert_file_missing "$TARGET/.token-saver/installed.json" "差し替え後の不要な台帳"
+  fi
+  assert_not_contains "$(_gitignore_text)" ".codex/hooks.json" \
+    "差し替え後のCodex hooks.json除外"
+}
+
+test_Codex台帳欠損時は推測削除しない() {
+  _setup_target
+  _run_install
+  python3 - "$TARGET/.token-saver/installed.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    data = json.load(handle)
+del data["codex_hooks"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, ensure_ascii=False)
+PY
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "Codex台帳欠損の終了コード"
+  assert_file_exists "$TARGET/.codex/hooks.json" "台帳欠損時のCodex hooks.json"
+  assert_contains "$(_codex_hooks_text)" "handoff-check.sh" "台帳欠損時のCodex hook"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "台帳欠損時の台帳"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "台帳にフックの記録が無い" "Codex台帳欠損の警告"
+  python3 - "$TARGET/.token-saver/installed.json" <<'PY' || _fail "Codex台帳欠損時のstale recordが残っている"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    ledger = json.load(handle)
+assert "codex_hooks" not in ledger
+assert ledger["codex_hooks_created"] is True
+assert ledger["codex_dir_created"] is True
+PY
+  assert_contains "$(_gitignore_text)" ".token-saver/" "Codex台帳欠損時の管理対象.gitignore"
+}
+
+test_導入者作成の空Codex_hooks_jsonと_codexだけ削除する() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "Codex空hooksの終了コード"
+  assert_file_missing "$TARGET/.codex/hooks.json" "導入者作成のCodex hooks.json"
+  assert_file_missing "$TARGET/.codex" "導入者作成の空Codexディレクトリ"
+  assert_file_missing "$TARGET/.token-saver/installed.json" "Codex作成フラグを含む台帳"
+}
+
+test_導入前から在った空Codex_hooks_jsonは保持する() {
+  _setup_target
+  mkdir -p "$TARGET/.codex"
+  printf '{}\n' >"$TARGET/.codex/hooks.json"
+  _run_install
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "既存空Codex hooksの終了コード"
+  assert_file_exists "$TARGET/.codex/hooks.json" "導入前から在ったCodex hooks.json"
+  assert_eq '{}' "$(tr -d ' \t\n\r' <"$TARGET/.codex/hooks.json")" "既存空Codex hooks.jsonの内容"
+  assert_file_exists "$TARGET/.codex" "導入前から在ったCodexディレクトリ"
+  assert_file_missing "$TARGET/.token-saver/installed.json" "既存空Codex hooks後の台帳"
+}
+
+test_Codex未知キーがあればJSONと台帳を保持する() {
+  _setup_target
+  mkdir -p "$TARGET/.codex"
+  printf '{"custom":{"keep":true}}\n' >"$TARGET/.codex/hooks.json"
+  _run_install
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "Codex未知キーの終了コード"
+  assert_file_exists "$TARGET/.codex/hooks.json" "未知キーを含むCodex hooks.json"
+  assert_contains "$(_codex_hooks_text)" '"custom"' "Codex未知キー"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "Codex未知キー時の台帳"
+  assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "Codex" "Codex未知キーの警告"
+  python3 - "$TARGET/.token-saver/installed.json" <<'PY' || _fail "Codex未知キー時の所有メタデータが安全側で保持されていない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    ledger = json.load(handle)
+assert "codex_hooks" not in ledger
+assert ledger["codex_hooks_created"] is False
+assert ledger["codex_dir_created"] is False
+PY
+  assert_contains "$(_gitignore_text)" ".token-saver/" "Codex未知キー時の管理対象.gitignore"
+}
+
+test_Codex管理対象symlinkは変更前に拒否する() {
+  _setup_target
+  _run_install
+  local outside="$TEST_TMP/codex-uninstall-outside"
+  mkdir -p "$outside"
+
+  rm -rf "$TARGET/.codex"
+  printf '外部parent\n' >"$outside/marker"
+  ln -s "$outside" "$TARGET/.codex"
+  _run_uninstall
+  assert_ne "0" "$UNINSTALL_STATUS" "Codex parent symlinkの終了コード"
+  assert_contains "$(_hook_commands SessionStart)" "handoff-check.sh" "Codex parent symlink時のClaude hook"
+  assert_eq "外部parent" "$(cat "$outside/marker")" "Codex parent symlinkの外部原状"
+
+  rm -f "$TARGET/.codex"
+  mkdir -p "$TARGET/.codex"
+  printf '外部hooks\n' >"$outside/hooks.json"
+  ln -s "$outside/hooks.json" "$TARGET/.codex/hooks.json"
+  _run_uninstall
+  assert_ne "0" "$UNINSTALL_STATUS" "Codex hooks symlinkの終了コード"
+  assert_contains "$(_hook_commands SessionStart)" "handoff-check.sh" "Codex hooks symlink時のClaude hook"
+  assert_eq "外部hooks" "$(cat "$outside/hooks.json")" "Codex hooks symlinkの外部原状"
+}
+
+test_shared_uninstallはCodex個人hookを変更しない() {
+  _setup_target
+  _run_install
+  local before
+  before="$(cat "$TARGET/.codex/hooks.json")"
+  _run_uninstall_args --shared
+  assert_eq "0" "$UNINSTALL_STATUS" "shared Codex uninstallの終了コード"
+  assert_eq "$before" "$(cat "$TARGET/.codex/hooks.json")" "shared Codex hooks.json"
+  assert_contains "$(_hook_commands SessionStart)" "handoff-check.sh" "shared Claude hook"
+}
+
+test_Codexはinstall_uninstall_installで1件へ戻る() {
+  _setup_target
+  _run_install
+  _run_uninstall
+  local install_status=0
+  bash "$INSTALL" "$TARGET" >/dev/null 2>&1 || install_status=$?
+  assert_eq "0" "$install_status" "Codex往復再installの終了コード"
+  python3 - "$TARGET/.codex/hooks.json" <<'PY' || _fail "Codex往復再installの重複結果が妥当でない"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+entries = [
+    entry
+    for group in data["hooks"].get("SessionStart", [])
+    for entry in group.get("hooks", [])
+    if "handoff-check.sh" in entry.get("command", "")
+]
+assert len(entries) == 1
+PY
+}
+
+test_Codex不正JSONはClaude側も変更前に拒否する() {
+  _setup_target
+  mkdir -p "$TARGET/.claude" "$TARGET/.codex" "$TARGET/.token-saver"
+  python3 - "$SETTINGS" "$TARGET/.codex/hooks.json" "$TARGET/.token-saver/installed.json" \
+    "$REPO_ROOT/scripts/handoff-check.sh" <<'PY'
+import json
+import shlex
+import sys
+
+settings_path, codex_path, ledger_path, command = sys.argv[1:]
+quoted = shlex.quote(command)
+with open(settings_path, "w", encoding="utf-8") as handle:
+    json.dump({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": quoted}]}]}}, handle)
+with open(ledger_path, "w", encoding="utf-8") as handle:
+    json.dump({"hooks": [quoted], "codex_hooks": [quoted], "codex_hooks_created": True}, handle)
+with open(codex_path, "w", encoding="utf-8") as handle:
+    handle.write('{"hooks":\n')
+PY
+  local before
+  before="$(cat "$SETTINGS")"
+  _run_uninstall
+  assert_ne "0" "$UNINSTALL_STATUS" "Codex不正JSONの終了コード"
+  assert_eq "$before" "$(cat "$SETTINGS")" "Codex不正JSON時のClaude設定"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "Codex不正JSON時の台帳"
 }
 
 # --- Task 3: Codex destination の fail-closed uninstall ----------------------
@@ -1119,6 +1514,39 @@ PY
   cmds="$(_hook_commands SessionStart)"
   assert_contains "$cmds" "同居する利用者のフック" "SessionStart のコマンド"
   assert_not_contains "$cmds" "handoff-check.sh" "SessionStart のコマンド"
+}
+
+test_Codexの別event同commandは全体を利用者hookとして残す() {
+  _setup_target
+  _run_install
+  python3 - "$TARGET/.codex/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path) as handle:
+    data = json.load(handle)
+managed = next(
+    entry
+    for group in data["hooks"]["SessionStart"]
+    for entry in group["hooks"]
+    if "handoff-check.sh" in entry.get("command", "")
+)
+data["hooks"].setdefault("Stop", []).append({"hooks": [{
+    "type": "command", "command": managed["command"]
+}]})
+with open(path, "w") as handle:
+    json.dump(data, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
+  _run_uninstall
+  assert_file_exists "$TARGET/.codex/hooks.json" "別event同commandのhooks.json"
+  assert_file_exists "$TARGET/.codex" "別event同commandの.codex"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "別event同commandの台帳"
+  assert_contains "$(cat "$TARGET/.codex/hooks.json")" "handoff-check.sh" \
+    "別event同commandの利用者hook残存"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".codex/hooks.json" \
+    "別event同commandのmanaged除外保持"
 }
 
 test_START_が2つあれば利用者の行を飲み込まず警告する() {

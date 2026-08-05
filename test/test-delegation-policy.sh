@@ -142,9 +142,11 @@ test_READMEはCodex対応範囲を限定する() {
     in_section { print }
   ' "$REPO_ROOT/README.md")"
   assert_contains "$body" "暗黙起動を禁止する。" "explicit-only"
-  assert_contains "$body" "Codex用フックは提供しない。" "hook非対応"
-  assert_contains "$body" "handoff の自動消費は提供しない。" "handoff非対応"
-  assert_contains "$body" "token-report による Codex 使用量計測は提供しない。" "計測非対応"
+  assert_contains "$body" "handoffの自動消費はClaude CodeとCodexの共通SessionStart hookが担当するが、" "共通handoff hook"
+  assert_contains "$body" "token-reportによる" "Codex計測の境界"
+  assert_contains "$body" "Codex使用量計測は提供しない。" "計測非対応"
+  assert_not_contains "$body" "Codex用フックは提供しない。" "旧hook非対応"
+  assert_not_contains "$body" "handoff の自動消費は提供しない。" "旧handoff非対応"
 }
 
 test_設計文書はCodex_adapterの現在状態を示す() {

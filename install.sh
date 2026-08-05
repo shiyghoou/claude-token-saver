@@ -64,6 +64,8 @@ TARGET="$(cd -- "$target_arg" 2>/dev/null && pwd -P)" || {
 
 SETTINGS="$TARGET/.claude/settings.local.json"
 BACKUP="$SETTINGS.cts-backup"
+CODEX_DIR="$TARGET/.codex"
+CODEX_HOOKS="$CODEX_DIR/hooks.json"
 GITIGNORE="$TARGET/.gitignore"
 # 何を設置したかの台帳。uninstall.sh はこれを正として取り外す。
 # 記録が無いと、利用者が自分で張った同名のリンクまで巻き込んで消してしまう。
@@ -162,6 +164,8 @@ cts_reject_managed_symlinks() {
     "$TARGET/.agents/skills" \
     "$TARGET/.claude" \
     "$TARGET/.claude/skills" \
+    "$TARGET/.codex" \
+    "$TARGET/.codex/hooks.json" \
     "$TARGET/$(cts_legacy_handoff_rel)" \
     "$TARGET/$(cts_legacy_handoff_rel)/pending" \
     "$TARGET/$(cts_legacy_handoff_rel)/consumed" \
@@ -176,11 +180,51 @@ cts_reject_managed_symlinks() {
   done
 }
 
+# 台帳の Codex managed entry が現在の hooks.json に残っている場合だけ、
+# installer が hooks.json を作成した所有権を継承する。ファイル差し替え後に
+# 古い作成フラグだけを信じると、uninstall が利用者の空の hooks.json と
+# .codex を消してしまうため、台帳と実ファイルを毎回突き合わせる。
+cts_codex_hooks_match_ledger() {
+  local ledger_path="$1"
+  [ -f "$CODEX_HOOKS" ] && [ ! -L "$CODEX_HOOKS" ] || return 1
+  [ -f "$ledger_path" ] && [ ! -L "$ledger_path" ] || return 1
+  [ -d "$CODEX_DIR" ] && [ ! -L "$CODEX_DIR" ] || return 1
+  python3 "$CTS_HOME/lib/settings-hooks.py" validate-codex "$CODEX_HOOKS" \
+    --ledger "$ledger_path" >/dev/null 2>&1
+}
+
+cts_codex_hooks_is_tracked() {
+  local relative_path="${CODEX_HOOKS#"$TARGET/"}"
+  git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  git -C "$TARGET" ls-files --error-unmatch -- "$relative_path" >/dev/null 2>&1
+}
+
+cts_codex_hooks_owned_for_gitignore() {
+  local ledger_path="$1"
+  [ "$(python3 "$CTS_HOME/lib/ledger.py" get-flag "$ledger_path" codex_hooks_created)" = 1 ] ||
+    return 1
+  cts_codex_hooks_match_ledger "$ledger_path" || return 1
+  cts_codex_hooks_is_tracked && return 1
+  return 0
+}
+
 command -v python3 >/dev/null 2>&1 ||
   die "python3 が必要である（settings.local.json を壊さずに編集するため）。フック自体は python3 に依存しない。"
 
 if [ "$do_personal" = 1 ]; then
   cts_reject_managed_symlinks
+  if [ -e "$CODEX_DIR" ] && [ ! -d "$CODEX_DIR" ]; then
+    die ".codex がディレクトリでないため変更しない: $CODEX_DIR"
+  fi
+  if [ -e "$CODEX_HOOKS" ] && [ ! -f "$CODEX_HOOKS" ]; then
+    die ".codex/hooks.json が通常ファイルでないため変更しない: $CODEX_HOOKS"
+  fi
+  python3 "$CTS_HOME/lib/settings-hooks.py" validate "$CODEX_HOOKS" ||
+    die ".codex/hooks.json が妥当なJSONでないため変更しない"
+  python3 "$CTS_HOME/lib/ledger.py" check-writable "$LEDGER" ||
+    die "台帳に安全に書き込めない"
+  python3 "$CTS_HOME/lib/ledger.py" check-writable "$CODEX_HOOKS" ||
+    die ".codex/hooks.json に安全に書き込めない"
   python3 "$CTS_HOME/lib/ledger.py" check-writable "$SETTINGS" ||
     die "settings.local.json に安全に書き込めない"
 fi
@@ -194,9 +238,23 @@ info "claude-token-saver を導入する: $TARGET"
 installed_skills=()
 claude_installed_skills=()
 codex_installed_skills=()
+codex_hook_installed=0
+codex_hooks_created=0
+codex_dir_created=0
+codex_hooks_created_this_run=0
+codex_dir_created_this_run=0
+if [ "$do_personal" = 1 ]; then
+  if [ ! -e "$CODEX_HOOKS" ] && [ ! -L "$CODEX_HOOKS" ]; then
+    codex_hooks_created_this_run=1
+  fi
+  if [ ! -e "$CODEX_DIR" ] && [ ! -L "$CODEX_DIR" ]; then
+    codex_dir_created_this_run=1
+  fi
+fi
 gitignore_existed=1
 [ -e "$GITIGNORE" ] || [ -L "$GITIGNORE" ] || gitignore_existed=0
 legacy_ledger="$TARGET/$(cts_legacy_ledger_rel)"
+codex_hooks_ignore=0
 
 if [ "$do_personal" = 1 ]; then
 
@@ -273,6 +331,27 @@ if [ -f "$legacy_ledger" ]; then
     mv "$legacy_ledger" "$LEDGER" || die "台帳を移行できない"
     migrated=$((migrated + 1))
     applied+=("旧パスの台帳を $LEDGER へ移行")
+  fi
+fi
+
+# 旧台帳が新パスへ移った後で、はじめてCodexの所有フラグを読む。先に新台帳
+# （まだ無い）を読んで false を書き戻すと、旧版が作成した hooks.json と
+# .codex の所有権を失い、uninstall が空の利用者ファイルを残す契約を壊す。
+# 新旧が競合した場合は移行せず、新台帳だけを読む。
+if [ "$do_personal" = 1 ]; then
+  codex_hooks_created=0
+  codex_dir_created=0
+  if python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" codex_hooks_created | grep -qx 1; then
+    codex_hooks_created=1
+  fi
+  if python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" codex_dir_created | grep -qx 1; then
+    codex_dir_created=1
+  fi
+  if [ "$codex_hooks_created" = 1 ] && ! cts_codex_hooks_match_ledger "$LEDGER"; then
+    # 現在のstrict managed entryと台帳が一致しない場合は、hooks.jsonだけでなく
+    # その親ディレクトリの作成所有権も安全側へ失効させる。
+    codex_hooks_created=0
+    codex_dir_created=0
   fi
 fi
 
@@ -493,6 +572,37 @@ if [ "${#hook_specs[@]}" -gt 0 ]; then
   applied+=("settings.local.json へフックを登録")
 fi
 
+if [ -f "$CTS_HOME/scripts/handoff-check.sh" ]; then
+  python3 "$CTS_HOME/lib/settings-hooks.py" install "$CODEX_HOOKS" \
+    --ledger "$LEDGER" \
+    --ledger-key codex_hooks \
+    --matcher "SessionStart=startup|clear" \
+    --additional-context-limit "SessionStart=10000" \
+    "SessionStart:$CTS_HOME/scripts/handoff-check.sh"
+  codex_status=$?
+  case "$codex_status" in
+    0) ;;
+    2) warnings+=(".codex/hooks.json に台帳無しの推測候補があるため、候補を削除せずフックを登録した") ;;
+    *) die ".codex/hooks.json またはCodex用台帳を更新できない" ;;
+  esac
+  if [ "$codex_hooks_created_this_run" = 1 ]; then
+    codex_hooks_created=1
+  fi
+  if [ "$codex_dir_created_this_run" = 1 ]; then
+    codex_dir_created=1
+  fi
+  python3 "$CTS_HOME/lib/ledger.py" set-flag "$LEDGER" codex_hooks_created "$codex_hooks_created" ||
+    die "Codex hooks.jsonの所有フラグを台帳へ記録できない"
+  python3 "$CTS_HOME/lib/ledger.py" set-flag "$LEDGER" codex_dir_created "$codex_dir_created" ||
+    die ".codexの所有フラグを台帳へ記録できない"
+  codex_hook_installed=1
+  if cts_codex_hooks_owned_for_gitignore "$LEDGER"; then
+    codex_hooks_ignore=1
+  fi
+  applied+=(".codex/hooks.json へCodex SessionStartフックを登録")
+  info "  Codex の project hook を登録した。Codex の /hooks で定義を確認し、trust せよ。"
+fi
+
 # --- 3. スキルのリンク -------------------------------------------------------
 
 # 実体はクローン先に1つだけ置く。複数プロジェクトへ導入しても更新は git pull 1回で全体へ届く。
@@ -565,6 +675,15 @@ if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
         ;;
     esac
   done < <(python3 "$CTS_HOME/lib/ledger.py" list-skills "$shared_ledger")
+
+  shared_codex_ledger="$TARGET/$(cts_ledger_rel)"
+  if ! python3 "$CTS_HOME/lib/ledger.py" has-record "$shared_codex_ledger" codex_hooks &&
+     python3 "$CTS_HOME/lib/ledger.py" has-record "$legacy_ledger" codex_hooks; then
+    shared_codex_ledger="$legacy_ledger"
+  fi
+  if cts_codex_hooks_owned_for_gitignore "$shared_codex_ledger"; then
+    codex_hooks_ignore=1
+  fi
 fi
 
 # --- 4. .gitignore -----------------------------------------------------------
@@ -580,6 +699,9 @@ if [ "$do_shared" = 1 ]; then
 # （導入先が自前で持っているもの）を無視すると、その版管理を静かに壊す。
 {
   printf '%s/\n' "$(cts_base_rel)"
+  if [ "$codex_hooks_ignore" = 1 ]; then
+    printf '.codex/hooks.json\n'
+  fi
   for name in ${claude_installed_skills[@]+"${claude_installed_skills[@]}"}; do
     printf '.claude/skills/%s\n' "$name"
   done

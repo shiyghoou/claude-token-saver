@@ -11,7 +11,7 @@
 #   ledger.py set-value  <ledger> token_calibrate_source <value>
 #   ledger.py get-value  <ledger> token_report_source
 #   ledger.py check-writable <path>               # atomic write 前の安全確認
-#   ledger.py has-record <ledger> <skills|hooks|any>   # 記録が在れば 0、無ければ 1
+#   ledger.py has-record <ledger> <skills|hooks|codex_hooks|any>   # 記録が在れば 0、無ければ 1
 #
 # 台帳が無いと uninstall.sh は「自分が置いたもの」を推測するしかなく、
 # 利用者が自分で張った同名のリンクまで巻き込んで消してしまう。設置した側が
@@ -135,11 +135,16 @@ def has_record(path, kind):
         return isinstance(data.get("skills"), list)
     if kind == "hooks":
         return isinstance(data.get("hooks"), list)
+    if kind == "codex_hooks":
+        return isinstance(data.get("codex_hooks"), list)
     # any: 認識できるキーが1つでも在れば、この導入先へ install した記録である。
     return (
         isinstance(data.get("skills"), list)
         or isinstance(data.get("hooks"), list)
+        or isinstance(data.get("codex_hooks"), list)
         or "gitignore_created" in data
+        or "codex_hooks_created" in data
+        or "codex_dir_created" in data
         or isinstance(data.get("token_report_source"), str)
         or isinstance(data.get("token_calibrate_source"), str)
     )
@@ -292,7 +297,9 @@ def main(argv):
         if cmd == "check-writable" and not rest:
             check_writable(path)
             return 0
-        if cmd == "has-record" and len(rest) == 1 and rest[0] in ("skills", "hooks", "any"):
+        if cmd == "has-record" and len(rest) == 1 and rest[0] in (
+            "skills", "hooks", "codex_hooks", "any"
+        ):
             return cmd_has_record(path, rest[0])
     except OSError as e:
         sys.stderr.write("台帳を書けない (%s): %s\n" % (path, e))

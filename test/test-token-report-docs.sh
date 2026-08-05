@@ -8,7 +8,7 @@ _skill_path() {
 }
 
 _readme() {
-  sed -n '1,260p' "$REPO_ROOT/README.md"
+  sed -n '1,320p' "$REPO_ROOT/README.md"
 }
 
 _design_token_report_section() {

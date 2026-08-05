@@ -14,7 +14,7 @@ _skill() {
 }
 
 _design() {
-  sed -n '1,560p' "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md"
+  sed -n '1,580p' "$REPO_ROOT/docs/specs/2026-07-31-claude-token-saver-design.md"
 }
 
 _design_suggest_section() {
