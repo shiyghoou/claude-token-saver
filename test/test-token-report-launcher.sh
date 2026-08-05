@@ -57,6 +57,8 @@ def main():
                     handle.write("- canary: " + os.environ.get("CTS_ENGINE_CANARY", "default") + "\n")
                 else:
                     handle.write("")
+            if os.environ.get("CTS_REPORT_MTIME") == "rollback":
+                os.utime(out_path, (1, 1))
         except OSError as exc:
             print(f"cannot write report: {exc}", file=sys.stderr)
             return 1
@@ -122,6 +124,17 @@ _run_launcher() {
   )
 }
 
+_run_launcher_from_subdir() {
+  subdir="$1"
+  shift
+  (
+    cd "$FIXTURE_REPO/$subdir" &&
+    PATH="$FIXTURE_BIN:/usr/bin:/bin" \
+      CTS_LAUNCHER_LOG="$FIXTURE_LOG" \
+      "$BASH" "$FIXTURE_SCRIPTS/token-report.sh" "$@"
+  )
+}
+
 _install_path_wrapper() {
   tool="$1"
   target="$(command -v "$tool")"
@@ -178,7 +191,107 @@ test_explicit_outを使い親ディレクトリを勝手に作らない() {
   assert_eq "1" "$status" "explicit out の終了コード"
   assert_file_missing "$out"
   assert_file_missing "$TEST_TMP/missing/out"
+  assert_file_missing "$FIXTURE_LOG" "親未作成時に起動されたengineログ"
   assert_contains "$err" "cannot write report" "親未作成エラー"
+}
+
+test_clock_rollback後のexplicit_outでも今回レポートを採用する() {
+  _fixture
+  out="$TEST_TMP/rollback-report.md"
+  printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- canary: old\n' >"$out"
+  CTS_ENGINE_CANARY=new CTS_REPORT_MTIME=rollback \
+    _run_launcher --out "$out" >"$TEST_TMP/launcher.out" 2>"$TEST_TMP/launcher.err"
+  status=$?
+  report="$(cat "$out")"
+  output="$(cat "$TEST_TMP/launcher.out")"
+  assert_eq "0" "$status" "clock rollback後のexplicit out終了コード"
+  assert_contains "$report" "canary: new" "clock rollback後の最終レポート"
+  assert_not_contains "$report" "canary: old" "clock rollback後に残った旧レポート"
+  assert_contains "$output" "書き出しました: $out" "clock rollback後の成功表示"
+}
+
+test_explicit_outはengineへ最終パスでなくprivate_tempを渡す() {
+  _fixture
+  parent="$TEST_TMP/explicit-out"
+  mkdir -p "$parent"
+  out="$parent/report.md"
+  CTS_ENGINE_CANARY=private-temp \
+    _run_launcher --days 3 --out "$out" --top 7 >"$TEST_TMP/launcher.out" 2>"$TEST_TMP/launcher.err"
+  status=$?
+  args="$(cat "$FIXTURE_LOG")"
+  report="$(cat "$out")"
+  private_files="$(find "$parent" -maxdepth 1 -name '.token-report.*' -print)"
+  assert_eq "0" "$status" "explicit out private tempの終了コード"
+  assert_contains "$args" $'--out\n'"$parent/.token-report." "engineへ渡したprivate temp"
+  assert_not_contains "$args" "$out" "engineへ最終パスを渡していない"
+  assert_contains "$report" "canary: private-temp" "private temp経由の最終レポート"
+  assert_empty "$private_files" "成功後に残ったexplicit out用private temp"
+}
+
+test_out_equalsもengineへprivate_tempを渡す() {
+  _fixture
+  parent="$TEST_TMP/explicit-out-equals"
+  mkdir -p "$parent"
+  out="$parent/report.md"
+  CTS_ENGINE_CANARY=equals \
+    _run_launcher --days 5 --out="$out" --all-projects --paths --top 9 \
+      >"$TEST_TMP/launcher.out" 2>"$TEST_TMP/launcher.err"
+  status=$?
+  args="$(cat "$FIXTURE_LOG")"
+  report="$(cat "$out")"
+  private_files="$(find "$parent" -maxdepth 1 -name '.token-report.*' -print)"
+  assert_eq "0" "$status" "out= private tempの終了コード"
+  assert_contains "$args" $'--days\n5\n--out='"$parent/.token-report." "out=形式と引数順序"
+  assert_contains "$args" $'--all-projects\n--paths\n--top\n9' "out=後続引数の順序"
+  assert_not_contains "$args" "$out" "out=でengineへ最終パスを渡していない"
+  assert_contains "$report" "canary: equals" "out= private temp経由の最終レポート"
+  assert_empty "$private_files" "成功後に残ったout=用private temp"
+}
+
+test_relative_out_VALUEはrepo_root基準で解決する() {
+  _fixture
+  mkdir -p "$FIXTURE_REPO/work" "$FIXTURE_REPO/relative"
+  out="$FIXTURE_REPO/relative/path.md"
+  CTS_ENGINE_CANARY=relative-value \
+    _run_launcher_from_subdir work --out relative/path.md \
+      >"$TEST_TMP/launcher.out" 2>"$TEST_TMP/launcher.err"
+  status=$?
+  args="$(cat "$FIXTURE_LOG")"
+  report="$(cat "$out")"
+  assert_eq "0" "$status" "relative --out VALUEの終了コード"
+  assert_contains "$report" "canary: relative-value" "repo root基準のrelativeレポート"
+  assert_contains "$args" $'--out\n'"$FIXTURE_REPO/relative/.token-report." \
+    "relative --out VALUEのengine private temp"
+  assert_not_contains "$args" "relative/path.md" "engineへrelative最終パスを渡していない"
+  assert_contains "$(cat "$TEST_TMP/launcher.out")" \
+    "書き出しました: relative/path.md" "relative --out VALUEの成功表示"
+  assert_file_missing "$FIXTURE_REPO/work/relative/path.md" "呼出元subdirへのrelative出力"
+  assert_empty "$(find "$FIXTURE_REPO/relative" -maxdepth 1 -name '.token-report.*' -print)" \
+    "relative --out VALUEのprivate temp"
+}
+
+test_relative_out_equalsはrepo_root基準で解決する() {
+  _fixture
+  mkdir -p "$FIXTURE_REPO/work" "$FIXTURE_REPO/relative-equals"
+  out="$FIXTURE_REPO/relative-equals/path.md"
+  CTS_ENGINE_CANARY=relative-equals \
+    _run_launcher_from_subdir work --days 4 --out=relative-equals/path.md --top 6 \
+      >"$TEST_TMP/launcher.out" 2>"$TEST_TMP/launcher.err"
+  status=$?
+  args="$(cat "$FIXTURE_LOG")"
+  report="$(cat "$out")"
+  assert_eq "0" "$status" "relative --out=VALUEの終了コード"
+  assert_contains "$report" "canary: relative-equals" "repo root基準のrelative out=レポート"
+  assert_contains "$args" $'--days\n4\n--out='"$FIXTURE_REPO/relative-equals/.token-report." \
+    "relative --out=VALUEのengine private temp"
+  assert_contains "$args" $'--out='"$FIXTURE_REPO/relative-equals/.token-report." \
+    "relative --out=VALUEの形式"
+  assert_not_contains "$args" "relative-equals/path.md" "engineへrelative out=最終パスを渡していない"
+  assert_contains "$(cat "$TEST_TMP/launcher.out")" \
+    "書き出しました: relative-equals/path.md" "relative --out=VALUEの成功表示"
+  assert_file_missing "$FIXTURE_REPO/work/relative-equals/path.md" "呼出元subdirへのrelative out=出力"
+  assert_empty "$(find "$FIXTURE_REPO/relative-equals" -maxdepth 1 -name '.token-report.*' -print)" \
+    "relative --out=VALUEのprivate temp"
 }
 
 test_daysとall_projectsとpathsをengineへ渡す() {
@@ -213,18 +326,30 @@ test_calibrateを渡し今回生成のsnapshotを検査する() {
 
 test_calibrateでsnapshotが未生成なら既定レポートを残さず失敗する() {
   _fixture
-  CTS_SNAPSHOT_MODE=missing _run_launcher --calibrate >/dev/null 2>"$TEST_TMP/launcher.err"
+  out="$TEST_TMP/calibrate-missing-report.md"
+  printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- old\n' >"$out"
+  cp "$out" "$TEST_TMP/calibrate-missing-before.md"
+  CTS_SNAPSHOT_MODE=missing _run_launcher --calibrate --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
   status=$?
   assert_ne "0" "$status" "snapshot未生成の終了コード"
-  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "snapshot未生成時のレポート"
+  cmp -s "$out" "$TEST_TMP/calibrate-missing-before.md" ||
+    _fail "snapshot未生成時に既存のexplicitレポートが変更された"
+  assert_empty "$(find "$TEST_TMP" -maxdepth 1 -name '.token-report.*' -print)" \
+    "snapshot未生成時のprivate temp"
 }
 
 test_calibrateでsymlink_snapshotを拒否する() {
   _fixture
-  CTS_SNAPSHOT_MODE=symlink _run_launcher --calibrate >/dev/null 2>"$TEST_TMP/launcher.err"
+  out="$TEST_TMP/calibrate-symlink-report.md"
+  printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- old\n' >"$out"
+  cp "$out" "$TEST_TMP/calibrate-symlink-before.md"
+  CTS_SNAPSHOT_MODE=symlink _run_launcher --calibrate --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
   status=$?
   assert_ne "0" "$status" "symlink snapshot の終了コード"
-  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "symlink snapshot時のレポート"
+  cmp -s "$out" "$TEST_TMP/calibrate-symlink-before.md" ||
+    _fail "symlink snapshot時に既存のexplicitレポートが変更された"
+  assert_empty "$(find "$TEST_TMP" -maxdepth 1 -name '.token-report.*' -print)" \
+    "symlink snapshot時のprivate temp"
 }
 
 test_calibrateで前回snapshotだけなら既定レポートを残さず失敗する() {
@@ -233,10 +358,16 @@ test_calibrateで前回snapshotだけなら既定レポートを残さず失敗�
   mkdir -p "$snapshot_dir"
   printf '{"fixture": "stale"}' >"$snapshot_dir/latest.json"
   touch -t 200001010000 "$snapshot_dir/latest.json"
-  CTS_SNAPSHOT_MODE=missing _run_launcher --calibrate >/dev/null 2>"$TEST_TMP/launcher.err"
+  out="$TEST_TMP/calibrate-stale-report.md"
+  printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- old\n' >"$out"
+  cp "$out" "$TEST_TMP/calibrate-stale-before.md"
+  CTS_SNAPSHOT_MODE=missing _run_launcher --calibrate --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
   status=$?
   assert_ne "0" "$status" "stale snapshot の終了コード"
-  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "stale snapshot時のレポート"
+  cmp -s "$out" "$TEST_TMP/calibrate-stale-before.md" ||
+    _fail "stale snapshot時に既存のexplicitレポートが変更された"
+  assert_empty "$(find "$TEST_TMP" -maxdepth 1 -name '.token-report.*' -print)" \
+    "stale snapshot時のprivate temp"
 }
 
 test_calibrateで未来mtimeの既存snapshotを再利用しない() {
@@ -245,18 +376,31 @@ test_calibrateで未来mtimeの既存snapshotを再利用しない() {
   mkdir -p "$snapshot_dir"
   printf '{"fixture": "future-stale"}' >"$snapshot_dir/latest.json"
   touch -t 299912312359 "$snapshot_dir/latest.json"
-  CTS_SNAPSHOT_MODE=missing _run_launcher --calibrate >/dev/null 2>"$TEST_TMP/launcher.err"
+  out="$TEST_TMP/calibrate-future-report.md"
+  printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- old\n' >"$out"
+  cp "$out" "$TEST_TMP/calibrate-future-before.md"
+  CTS_SNAPSHOT_MODE=missing _run_launcher --calibrate --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
   status=$?
   assert_ne "0" "$status" "未来mtime snapshotの終了コード"
-  assert_file_missing "$FIXTURE_REPO/.token-saver/token-reports" "未来mtime snapshot時のレポート"
+  cmp -s "$out" "$TEST_TMP/calibrate-future-before.md" ||
+    _fail "未来mtime snapshot時に既存のexplicitレポートが変更された"
+  assert_empty "$(find "$TEST_TMP" -maxdepth 1 -name '.token-report.*' -print)" \
+    "未来mtime snapshot時のprivate temp"
 }
 
 test_計測器が非ゼロならlauncherも非ゼロにする() {
   _fixture
+  out="$TEST_TMP/engine-error-report.md"
+  printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- old\n' >"$out"
+  cp "$out" "$TEST_TMP/engine-error-before.md"
   CTS_ENGINE_MODE=touchless CTS_ENGINE_EXIT=17 \
-    _run_launcher >/dev/null 2>"$TEST_TMP/launcher.err"
+    _run_launcher --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
   status=$?
   assert_eq "17" "$status" "計測器エラー伝播"
+  cmp -s "$out" "$TEST_TMP/engine-error-before.md" ||
+    _fail "計測器非ゼロ時に既存のexplicitレポートが変更された"
+  assert_empty "$(find "$TEST_TMP" -maxdepth 1 -name '.token-report.*' -print)" \
+    "計測器非ゼロ時のprivate temp"
 }
 
 test_計測器が非ゼロなら既定出力ディレクトリを残さない() {
@@ -270,23 +414,71 @@ test_計測器が非ゼロなら既定出力ディレクトリを残さない() 
 
 test_成功rcでも空レポートなら失敗にする() {
   _fixture
-  CTS_ENGINE_MODE=empty _run_launcher >/dev/null 2>"$TEST_TMP/launcher.err"
+  out="$TEST_TMP/empty-report.md"
+  printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- old\n' >"$out"
+  cp "$out" "$TEST_TMP/empty-before.md"
+  CTS_ENGINE_MODE=empty _run_launcher --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
   status=$?
   err="$(cat "$TEST_TMP/launcher.err")"
   assert_ne "0" "$status" "空レポート拒否"
   assert_contains "$err" "空" "空レポートの理由"
+  cmp -s "$out" "$TEST_TMP/empty-before.md" ||
+    _fail "空レポート時に既存のexplicitレポートが変更された"
+  assert_empty "$(find "$TEST_TMP" -maxdepth 1 -name '.token-report.*' -print)" \
+    "空レポート時のprivate temp"
 }
 
 test_前回の既存レポートだけで成功扱いにしない() {
   _fixture
   out="$TEST_TMP/stale-report.md"
   printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- stale\n' >"$out"
-  touch -t 200001010000 "$out"
+  cp "$out" "$TEST_TMP/stale-before.md"
+  touch -t 299912312359 "$out"
   CTS_ENGINE_MODE=touchless _run_launcher --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
   status=$?
-  err="$(cat "$TEST_TMP/launcher.err")"
   assert_ne "0" "$status" "freshness 検査"
-  assert_contains "$err" "更新" "stale report の理由"
+  cmp -s "$out" "$TEST_TMP/stale-before.md" ||
+    _fail "touchless engine時に未来mtimeの既存レポートが変更された"
+  assert_empty "$(find "$TEST_TMP" -maxdepth 1 -name '.token-report.*' -print)" \
+    "touchless engine時のprivate temp"
+}
+
+test_symlinkのexplicit_outを拒否し参照先を変更しない() {
+  _fixture
+  parent="$TEST_TMP/symlink-out"
+  mkdir -p "$parent"
+  target="$parent/target.md"
+  out="$parent/report.md"
+  printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- target-old\n' >"$target"
+  cp "$target" "$TEST_TMP/symlink-before.md"
+  ln -s "$target" "$out"
+  CTS_ENGINE_CANARY=new _run_launcher --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  assert_ne "0" "$status" "symlink explicit out拒否"
+  [ -L "$out" ] || _fail "explicit outのsymlinkが置き換えられた"
+  cmp -s "$target" "$TEST_TMP/symlink-before.md" ||
+    _fail "explicit out symlinkの参照先が変更された"
+  assert_file_missing "$FIXTURE_LOG" "symlink拒否後に起動されたengineログ"
+  assert_empty "$(find "$parent" -maxdepth 1 -name '.token-report.*' -print)" \
+    "symlink拒否後のprivate temp"
+}
+
+test_explicit_outの最終mv失敗でも既存出力を保持する() {
+  _fixture
+  parent="$TEST_TMP/mv-out"
+  mkdir -p "$parent"
+  out="$parent/report.md"
+  printf '# Claude Code トークン計測レポート\n\n## 計測条件\n\n- old\n' >"$out"
+  cp "$out" "$TEST_TMP/mv-before.md"
+  _install_failing_wrapper mv CTS_MV_FAIL
+  CTS_ENGINE_CANARY=new CTS_MV_FAIL=1 \
+    _run_launcher --out "$out" >/dev/null 2>"$TEST_TMP/launcher.err"
+  status=$?
+  assert_ne "0" "$status" "explicit out最終mv失敗"
+  cmp -s "$out" "$TEST_TMP/mv-before.md" ||
+    _fail "最終mv失敗時に既存のexplicitレポートが変更された"
+  assert_empty "$(find "$parent" -maxdepth 1 -name '.token-report.*' -print)" \
+    "最終mv失敗後のprivate temp"
 }
 
 test_python3が無ければ理由を表示して失敗する() {
