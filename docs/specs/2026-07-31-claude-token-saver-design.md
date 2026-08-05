@@ -428,23 +428,28 @@ snapshot の条件・現在値・fingerprint が不整合なら適用しない�
    導入先が自前で置いた実ディレクトリには触らない。
 3. `SessionStart` に `handoff-check.sh` を `matcher: "startup|clear"` 付きで、`Stop` に `suggest-session-cut.sh` を登録する。
    Codex project hookが使える導入先では `.codex/hooks.json` にも同じcommandを登録する。
-   **登録は「自分のエントリを全除去してから1件入れ直す」形にする。** コマンド文字列の完全一致で
-   冪等性を取ると、シンボリックリンク経由・相対パス経由・クローンの移動でパスの綴りが変わったときに
-   二重登録され、存在しないコマンドを毎セッション実行することになる。同定は basename で行う。
+   **登録は「自分のエントリを全除去してから1件入れ直す」形にする。** Claude側は従来どおり台帳の
+   command文字列を正とし、シンボリックリンク経由・相対パス経由・クローンの移動でパスの綴りが変わったときに
+   二重登録されないようにする。Codex側はcommand文字列だけで同定せず、strict predicateを使う。
    `CTS_HOME` は `pwd -P` で物理パスへ解決する。既存のユーザー独自フック（別コマンド、`matcher` 付き）は保持する。
    **コマンド文字列はシェルクォートする。** クローンのパスに空白があると、そのままではフックが恒久的に壊れる。
    **実体のあるスクリプトだけを登録する。** 存在しないコマンドを登録すると毎セッション失敗する。
    `suggest-session-cut.sh` の実体がある版では Stop フックも登録され、更新後に再実行すれば追加される。
    Codex側のsymlink、不正JSON、hook構造の不正は変更前に拒否する。導入後は `/hooks` で
    `SessionStart` 定義を確認し、利用者がtrustする。再installやclone移動で定義が変わると再確認が必要になり得る。
+   Codexのmanaged entryは、台帳の唯一のJSON-decoded commandが `SessionStart` の
+   `matcher: "startup|clear"` groupにある唯一の `type: "command"` entryで、
+   `additionalContextLimit: 10000` と一致する場合だけである。別event、group metadata差分、
+   matcher/type/limit変更・欠損、完全重複は所有権不一致としてinstall/shared/removeを変更しない。
 4. `.gitignore` の `# claude-token-saver` ブロックを**毎回再生成する**。存在の有無だけを見て
    追記済みなら何もしない作りにすると、段階が進んでスキルやレポート出力先が増えても既存の導入先へ永久に届かない。
-   ブロックの中身は `.token-saver/`、レポート出力先、installerが新規作成し台帳と現JSONが一致していて未追跡の
+   ブロックの中身は `.token-saver/`、レポート出力先、installerが新規作成しstrictな台帳と現JSONの一致があり未追跡の
    `.codex/hooks.json`、および**実際に設置したスキル**のリンクパス。スキルのリンクは絶対パスを指す環境依存の産物であり、
    版管理へ入れると他の開発者のクローンで壊れたリンクになる。設置しなかったスキル（導入先が自前で持つもの）や既存・追跡済み・利用者所有のCodex hooks.jsonを
    書いてはならない。書くと、そのスキルへの変更が git から見えなくなる。
 5. 設置したもの（スキル名と設置方式、登録したフックのコマンド、Codex hooks.jsonの作成所有権、`.gitignore` を新規作成したか）を
-   `.token-saver/installed.json` へ記録する。**台帳を持つのは `uninstall.sh` に推測をさせないためである。**
+   `.token-saver/installed.json` へ記録する。旧台帳がある個人installは移行後に新台帳を唯一の権威としてflagsを読む。
+   新旧競合では新台帳を優先し、shared-onlyは台帳を変更しない。**台帳を持つのは `uninstall.sh` に推測をさせないためである。**
    「リンク先が `skills/<同名>` を指している」といった推測で判定すると、利用者が自分で張った無関係な
    リンクを巻き込んで削除する。台帳が無い旧環境向けのフォールバックは明示的な opt-in（`--guess`）とし、
    既定では通さない（下記の fail-closed）。
@@ -468,7 +473,7 @@ Codex 対応は既存のスキル自動発見、台帳、所有マーカーを�
 引数なしは後方互換のため個人設定と共有設定の両方を扱う。明示的なスコープは相互排他的である。
 
 - `install.sh --personal` は `.claude/settings.local.json`、フック、スキル、`.token-saver/`、台帳だけを更新し、`.gitignore` を作成・変更しない。
-- `install.sh --shared` は `.gitignore` だけを更新する。現在の台帳にスキル記録が無ければ旧台帳を読み取り、Codex hooksの作成所有権も新旧台帳から読み取る。どちらにも記録が無ければ `.token-saver/` だけを書き、スキルやCodex hooks.jsonを推測しない。台帳や個人ファイルは作成・変更しない。
+- `install.sh --shared` は `.gitignore` だけを更新する。現在の台帳にスキル記録が無ければ旧台帳を読み取り、Codex hooksの作成所有権も新旧台帳からstrictに読み取る。どちらにも記録が無ければ `.token-saver/` だけを書き、スキルやCodex hooks.jsonを推測しない。台帳や個人ファイルは作成・変更しない。
 - `uninstall.sh --personal` は個人側だけを外し、`.gitignore` を残す。
 - `uninstall.sh --shared` は `.gitignore` の管理ブロックだけを扱い、台帳、settings、フック、スキル、entrypoint、状態を削除しない。記録済みスキル、token-report entrypoint、handoff、状態ファイル、Codex利用者hookが残る場合は、未追跡ファイルを露出させないためブロックを残す。所有者が不明な空の `.gitignore` 自体も削除しない。
 - `uninstall.sh --guess` は従来どおり個人側の推測経路であり、`--shared --guess` は拒否する。

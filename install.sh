@@ -189,49 +189,8 @@ cts_codex_hooks_match_ledger() {
   [ -f "$CODEX_HOOKS" ] && [ ! -L "$CODEX_HOOKS" ] || return 1
   [ -f "$ledger_path" ] && [ ! -L "$ledger_path" ] || return 1
   [ -d "$CODEX_DIR" ] && [ ! -L "$CODEX_DIR" ] || return 1
-  python3 - "$CODEX_HOOKS" "$ledger_path" <<'PY'
-import json
-import sys
-
-hooks_path, ledger_path = sys.argv[1:]
-try:
-    with open(hooks_path, encoding="utf-8-sig", errors="surrogateescape") as handle:
-        hooks_data = json.load(handle)
-    with open(ledger_path, encoding="utf-8-sig", errors="surrogateescape") as handle:
-        ledger_data = json.load(handle)
-except (OSError, UnicodeError, ValueError):
-    sys.exit(1)
-
-if not isinstance(hooks_data, dict) or not isinstance(ledger_data, dict):
-    sys.exit(1)
-records = ledger_data.get("codex_hooks")
-if not isinstance(records, list) or not records or any(
-    not isinstance(command, str) for command in records
-):
-    sys.exit(1)
-hook_groups = hooks_data.get("hooks")
-if not isinstance(hook_groups, dict):
-    sys.exit(1)
-
-commands = []
-for groups in hook_groups.values():
-    if not isinstance(groups, list):
-        continue
-    for group in groups:
-        if not isinstance(group, dict):
-            continue
-        entries = group.get("hooks")
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if isinstance(entry, dict) and isinstance(entry.get("command"), str):
-                commands.append(entry["command"])
-
-for command in records:
-    if commands.count(command) < 1:
-        sys.exit(1)
-sys.exit(0)
-PY
+  python3 "$CTS_HOME/lib/settings-hooks.py" validate-codex "$CODEX_HOOKS" \
+    --ledger "$ledger_path" >/dev/null 2>&1
 }
 
 cts_codex_hooks_is_tracked() {
@@ -285,23 +244,11 @@ codex_dir_created=0
 codex_hooks_created_this_run=0
 codex_dir_created_this_run=0
 if [ "$do_personal" = 1 ]; then
-  if python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" codex_hooks_created | grep -qx 1; then
-    codex_hooks_created=1
-  fi
-  if python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" codex_dir_created | grep -qx 1; then
-    codex_dir_created=1
-  fi
   if [ ! -e "$CODEX_HOOKS" ] && [ ! -L "$CODEX_HOOKS" ]; then
     codex_hooks_created_this_run=1
   fi
   if [ ! -e "$CODEX_DIR" ] && [ ! -L "$CODEX_DIR" ]; then
     codex_dir_created_this_run=1
-  fi
-  if [ "$codex_hooks_created" = 1 ] && ! cts_codex_hooks_match_ledger "$LEDGER"; then
-    # 現在の managed entry と台帳が一致しない場合は、hooks.jsonだけでなく
-    # その親ディレクトリの作成所有権も安全側へ失効させる。
-    codex_hooks_created=0
-    codex_dir_created=0
   fi
 fi
 gitignore_existed=1
@@ -384,6 +331,27 @@ if [ -f "$legacy_ledger" ]; then
     mv "$legacy_ledger" "$LEDGER" || die "台帳を移行できない"
     migrated=$((migrated + 1))
     applied+=("旧パスの台帳を $LEDGER へ移行")
+  fi
+fi
+
+# 旧台帳が新パスへ移った後で、はじめてCodexの所有フラグを読む。先に新台帳
+# （まだ無い）を読んで false を書き戻すと、旧版が作成した hooks.json と
+# .codex の所有権を失い、uninstall が空の利用者ファイルを残す契約を壊す。
+# 新旧が競合した場合は移行せず、新台帳だけを読む。
+if [ "$do_personal" = 1 ]; then
+  codex_hooks_created=0
+  codex_dir_created=0
+  if python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" codex_hooks_created | grep -qx 1; then
+    codex_hooks_created=1
+  fi
+  if python3 "$CTS_HOME/lib/ledger.py" get-flag "$LEDGER" codex_dir_created | grep -qx 1; then
+    codex_dir_created=1
+  fi
+  if [ "$codex_hooks_created" = 1 ] && ! cts_codex_hooks_match_ledger "$LEDGER"; then
+    # 現在のstrict managed entryと台帳が一致しない場合は、hooks.jsonだけでなく
+    # その親ディレクトリの作成所有権も安全側へ失効させる。
+    codex_hooks_created=0
+    codex_dir_created=0
   fi
 fi
 

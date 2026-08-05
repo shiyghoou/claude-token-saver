@@ -86,9 +86,16 @@ pendingゼロ時だけは従来の「無出力」を変更し、上記判断契�
 - Claude Code: 台帳キー `hooks`
 - Codex: 台帳キー `codex_hooks`
 
-`install.sh` はpersonal scopeでのみCodex hookを扱う。`.codex` または `.codex/hooks.json` がsymlink、JSONが不正、最上位やhooks構造が不正、台帳を書けない場合は変更前に失敗する。既存のdescription、未知キー、他event、同一group内の利用者hookを保持する。再installでは台帳に記録した旧commandだけを除去して1件へ戻す。
+`install.sh` はpersonal scopeでのみCodex hookを扱う。`.codex` または `.codex/hooks.json` がsymlink、JSONが不正、最上位やhooks構造が不正、台帳を書けない場合は変更前に失敗する。既存のdescription、未知キー、他event、同一group内の利用者hookを保持する。再installでは台帳に記録した旧commandだけを除去して1件へ戻す。ただしCodexの除去・所有権判定はcommand存在だけでは行わず、共通predicateで次の構造を要求する。
 
-台帳にはCodexへ実際に記録したcommand文字列と、installerが `hooks.json` を新規作成したかを保存する。再install時に台帳のmanaged entryが現在のhooks.jsonと完全一致しなければ、hooks.jsonと必要な`.codex`の作成所有権を失効させる。`uninstall.sh` は `codex_hooks` と完全一致するentryだけを外す。差し替え、台帳欠損、削除不能、追跡済みファイルでは利用者所有として残し、台帳と警告を保持する。installerが作ったファイルが空オブジェクトになった場合だけ削除し、既存ファイルは再整形以外の不要な変更を行わない。
+- 台帳の `codex_hooks` は文字列1件である。
+- そのJSON-decoded commandが `SessionStart` の `matcher: "startup|clear"` groupにある唯一のentryである。
+- entryのキーは `type`、`command`、`additionalContextLimit` だけで、typeは `command`、limitは整数 `10000` である。
+- 同じcommandの別event、別group metadata、limit欠損・変更、type変更、完全重複があれば所有権不一致としてfail-closedにする。
+
+このpredicateは `install.sh` のmanaged `.gitignore` 判定と `uninstall.sh` のCodex purgeで共有する。同一groupの別command、未知top-level、commandを持たない他eventは保持し、exactなmanaged entryが唯一1件のときだけそのentryを外す。
+
+台帳にはCodexへ実際に記録したcommand文字列と、installerが `hooks.json` を新規作成したかを保存する。personal installでは旧台帳を新台帳へ移行してからflagsを読み、新旧が競合する場合は新台帳だけを権威とする。shared-onlyは新旧台帳を読み取り専用で扱う。再install時にstrict predicateで台帳のmanaged entryが現在のhooks.jsonと完全一致しなければ、hooks.jsonと必要な`.codex`の作成所有権を失効させる。`uninstall.sh` は `codex_hooks` と完全一致するentryだけを外す。差し替え、台帳欠損、削除不能、追跡済みファイルでは利用者所有として残し、台帳と警告を保持する。installerが作ったファイルが空オブジェクトになった場合だけ削除し、既存ファイルは再整形以外の不要な変更を行わない。
 
 共有managed `.gitignore` には、installerが新規作成し、台帳のmanaged entryが現在ファイルへ完全一致し、かつ未追跡である`.codex/hooks.json`だけを追加する。既存・追跡済み・利用者所有のhooks.jsonは無条件にignoreしない。`--shared` は新旧台帳を読み取り専用で確認し、この所有条件を満たす場合だけ行を反映する。残存するCodex利用者hookや状態があるuninstallではmanaged block全体を保持する。
 
@@ -120,7 +127,9 @@ READMEとsession-handoff skillに次を記載する。
 - 既存hooks.jsonの未知キー、他event、他hookを保持する。
 - 新規作成したhooks.jsonだけをmanaged `.gitignore`へ追加し、既存・追跡済み・利用者所有ファイルは除外しない。
 - 再installで重複しない。
+- CodexのStop/別event同command、matcher/type/limit変更・欠損、group metadata変更、完全重複を、ignore・flags・remove結果までfail-closedで検証する。同group別commandはmanaged entryだけ外す。
 - ClaudeとCodexの台帳キー・削除を独立させる。
+- 旧台帳のみのpersonal migration、new/legacy競合の新台帳優先、shared-onlyの新旧台帳byte不変を検証する。
 - invalid JSON、symlink親、symlink本体、台帳欠損、差し替え、差し替え後の再install、削除不能、追跡済みファイルをfail-closedで検証する。
 - install→uninstall→installとclone移動後の更新を検証する。
 - trust案内が成功メッセージとREADMEにあることを検証する。
@@ -139,9 +148,9 @@ READMEとsession-handoff skillに次を記載する。
 
 ## 10. 実装・検証結果
 
-- Task 2（Codex project hookの安全な導入）: install focused 137/137 PASS。新規・既存・追跡済みhooks.jsonのmanaged `.gitignore` 境界、shared-onlyの台帳読取、未知キー・symlink・trust案内を確認した。
-- Task 3（Codex hookの安全なinstall/uninstall）: uninstall focused 114/114 PASS。旧readonly ledgerの一時コピー経路、未知キー・利用者hook・差し替え時の保持、差し替え再installでの所有権失効、残存時のmanaged `.gitignore` block保持を確認した。
+- Task 2（Codex project hookの安全な導入）: install focused 142/142 PASS。新規・既存・追跡済みhooks.jsonのmanaged `.gitignore` 境界、strict構造不一致時のflags失効、旧台帳migration、new/legacy競合、shared-only byte不変を確認した。
+- Task 3（Codex hookの安全なinstall/uninstall）: uninstall focused 115/115 PASS、settings-hooks strict unit-equivalent 9/9 PASS。旧readonly ledgerの一時コピー経路、未知キー・利用者hook・差し替え時の保持、別event同command・matcher/type/limit変更・欠損・metadata差分・重複のfail-closed、残存時のmanaged `.gitignore` block保持を確認した。
 - Task 4（起動後判断契約）: handoff-check focused 98/98 PASS。pendingゼロのstartup/clear、本文fence外の契約、stdout失敗時rollback、`.token-saver`／handoff／pending親symlinkの外部内容を読まないfail-closed、canonical project root境界を確認した。
-- 全体テスト: `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` は 602 PASS / 0 FAIL / 0 SKIP、終了コード0。
+- 全体テスト: `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` は 617 PASS / 0 FAIL / 0 SKIP、終了コード0。
 - runtime: Python互換性、Bash 3.2 e2e、Codex CLIの隔離fixtureでSessionStart contextの到達とpendingからconsumedへの消費を確認した。
 - 通常文書ではtrust bypassを案内せず、Codexの初回確認は `/hooks` から利用者が行う契約を維持した。

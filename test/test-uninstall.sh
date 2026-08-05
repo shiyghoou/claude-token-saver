@@ -340,7 +340,10 @@ data = {
     "hooks": {
         "SessionStart": [
             {"hooks": [{"type": "command", "command": "echo claude"}]},
-            {"hooks": [{"type": "command", "command": "echo codex"}]},
+            {"matcher": "startup|clear", "hooks": [{
+                "type": "command", "command": "echo codex",
+                "additionalContextLimit": 10000,
+            }]},
         ]
     }
 }
@@ -1511,6 +1514,39 @@ PY
   cmds="$(_hook_commands SessionStart)"
   assert_contains "$cmds" "同居する利用者のフック" "SessionStart のコマンド"
   assert_not_contains "$cmds" "handoff-check.sh" "SessionStart のコマンド"
+}
+
+test_Codexの別event同commandは全体を利用者hookとして残す() {
+  _setup_target
+  _run_install
+  python3 - "$TARGET/.codex/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path) as handle:
+    data = json.load(handle)
+managed = next(
+    entry
+    for group in data["hooks"]["SessionStart"]
+    for entry in group["hooks"]
+    if "handoff-check.sh" in entry.get("command", "")
+)
+data["hooks"].setdefault("Stop", []).append({"hooks": [{
+    "type": "command", "command": managed["command"]
+}]})
+with open(path, "w") as handle:
+    json.dump(data, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
+  _run_uninstall
+  assert_file_exists "$TARGET/.codex/hooks.json" "別event同commandのhooks.json"
+  assert_file_exists "$TARGET/.codex" "別event同commandの.codex"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "別event同commandの台帳"
+  assert_contains "$(cat "$TARGET/.codex/hooks.json")" "handoff-check.sh" \
+    "別event同commandの利用者hook残存"
+  assert_contains "$(cat "$TARGET/.gitignore")" ".codex/hooks.json" \
+    "別event同commandのmanaged除外保持"
 }
 
 test_START_が2つあれば利用者の行を飲み込まず警告する() {

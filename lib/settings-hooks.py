@@ -3,6 +3,7 @@
 #
 #   settings-hooks.py install <path> --ledger <ledger> [--matcher EVENT=REGEX] <event>:<command> ...
 #   settings-hooks.py remove  <path> [--ledger <ledger>] [--guess]
+#   settings-hooks.py validate-codex <path> --ledger <ledger>
 #   settings-hooks.py same    <path> <other>   # 2つの設定がデータとして同値か
 #
 # 終了コード: 0=処理した / 1=失敗（何も変更していない） / 2=警告（何も変更していない）
@@ -34,6 +35,9 @@ import ledger  # noqa: E402  (同ディレクトリの小道具)
 # 台帳が無いときに、自分のものと推測するフックスクリプトのファイル名。
 OURS = {"handoff-check.sh", "suggest-session-cut.sh"}
 LEDGER_KEYS = {"hooks", "codex_hooks"}
+CODEX_EVENT = "SessionStart"
+CODEX_MATCHER = "startup|clear"
+CODEX_ADDITIONAL_CONTEXT_LIMIT = 10000
 
 
 def looks_like_ours(command):
@@ -133,11 +137,98 @@ def recorded_hooks(ledger_path, ledger_key="hooks"):
     ]
 
 
-def purge(data, known, guess=False):
+def codex_managed_positions(data, known):
+    """厳格なCodex managed entryの位置を1件だけ返す。失敗時はNone。
+
+    Codex側はcommand文字列だけで所有権を推測してはならない。同じ文字列を
+    利用者が別eventへ移した場合や、matcher/type/limitを変えた場合に、
+    uninstallが利用者のhookを消すためである。groupとentryの余分なmetadataも
+    所有権の証拠にならないため、installerが生成する構造そのものを要求する。
+    同じcommandの出現が1件を超えたときも、どれがmanagedか確定できないので
+    fail-closedにする。
+    """
+    if not isinstance(known, list) or len(known) != 1 or not isinstance(known[0], str):
+        return None
+    command = known[0]
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        return None
+
+    positions = []
+    command_count = 0
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            continue
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            for entry_index, entry in enumerate(group["hooks"]):
+                if not isinstance(entry, dict) or entry.get("command") != command:
+                    continue
+                command_count += 1
+                exact_group = (
+                    event == CODEX_EVENT
+                    and set(group.keys()) == {"matcher", "hooks"}
+                    and group.get("matcher") == CODEX_MATCHER
+                )
+                exact_entry = (
+                    set(entry.keys()) == {"type", "command", "additionalContextLimit"}
+                    and entry.get("type") == "command"
+                    and isinstance(entry.get("additionalContextLimit"), int)
+                    and not isinstance(entry.get("additionalContextLimit"), bool)
+                    and entry.get("additionalContextLimit") == CODEX_ADDITIONAL_CONTEXT_LIMIT
+                )
+                if exact_group and exact_entry:
+                    positions.append((event, group_index, entry_index))
+
+    if command_count != 1 or len(positions) != 1:
+        return None
+    return positions
+
+
+def _purge_positions(data, positions):
+    """指定位置だけをCodex設定から外し、外した件数を返す。"""
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return 0
+    wanted = set(positions)
+    removed = 0
+    for event in list(hooks):
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        event_removed = 0
+        kept_groups = []
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                kept_groups.append(group)
+                continue
+            inner = group["hooks"]
+            kept = [
+                entry
+                for entry_index, entry in enumerate(inner)
+                if (event, group_index, entry_index) not in wanted
+            ]
+            event_removed += len(inner) - len(kept)
+            if kept:
+                group["hooks"] = kept
+                kept_groups.append(group)
+        removed += event_removed
+        if kept_groups:
+            hooks[event] = kept_groups
+        elif event_removed:
+            del hooks[event]
+    if not hooks and removed:
+        del data["hooks"]
+    return removed
+
+
+def purge(data, known, guess=False, ledger_key="hooks"):
     """自分のフック登録をすべて外し、外した件数を返す。
 
-    known が None でなければ（＝台帳に記録が在れば）、それとの完全一致だけを
-    外す。台帳がある以上、自分が書いていないものへ手を出す理由が無い。
+    known が None でなければ（＝台帳に記録が在れば）、Claude側はそれとの完全一致だけを
+    外す。台帳がある以上、自分が書いていないものへ手を出す理由が無い。Codex側は
+    command一致ではなく codex_managed_positions() のstrict構造一致だけを外す。
     記録が無いときは、guess を明示されたときだけ推測へ落ちる。
 
     グループ単位ではなくフック単位で外す。matcher 付きのグループに利用者が
@@ -146,6 +237,12 @@ def purge(data, known, guess=False):
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         return 0
+
+    if ledger_key == "codex_hooks":
+        positions = codex_managed_positions(data, known)
+        if positions is None:
+            return 0
+        return _purge_positions(data, positions)
 
     def is_ours(entry):
         if not isinstance(entry, dict):
@@ -255,7 +352,7 @@ def cmd_install(path, ledger_path, ledger_key, specs, matchers, additional_limit
                 "  警告: 台帳が無いため推測候補のフックを変更していない: %s [%s]\n"
                 % (event, command)
             )
-    removed = purge(data, known, guess=False)
+    removed = purge(data, known, guess=False, ledger_key=ledger_key)
 
     added = []
     commands = []
@@ -316,7 +413,7 @@ def cmd_remove(path, ledger_path, ledger_key="hooks", guess=False):
         return 2
     if ledger_path and ledger_key == "codex_hooks":
         ledger.check_writable(ledger_path)
-    removed = purge(data, known, guess=guess)
+    removed = purge(data, known, guess=guess, ledger_key=ledger_key)
     # 記録があるのに1件も外せないのは、導入後に利用者が差し替えたか、台帳が
     # 古くなった状態である。成功扱いにして台帳を消すと次回は取り外せない。
     if not removed:
@@ -345,6 +442,13 @@ def cmd_validate(path):
     return 0
 
 
+def cmd_validate_codex(path, ledger_path):
+    """Codex台帳と現在のhooks.jsonがstrict managed構造で一致するか確認する。"""
+    data, _ = load(path)
+    known = recorded_hooks(ledger_path, "codex_hooks")
+    return 0 if codex_managed_positions(data, known) is not None else 1
+
+
 def cmd_same(path, other):
     """2つの設定ファイルがデータとして同値なら 0 を返す。
 
@@ -370,6 +474,8 @@ def main(argv):
         return cmd_same(argv[2], argv[3])
     if len(argv) == 3 and argv[1] == "validate":
         return cmd_validate(argv[2])
+    if len(argv) == 5 and argv[1] == "validate-codex" and argv[3] == "--ledger":
+        return cmd_validate_codex(argv[2], argv[4])
     if len(argv) < 3 or argv[1] not in ("install", "remove"):
         sys.stderr.write(
             "usage: settings-hooks.py {install|remove} <path> "
@@ -377,6 +483,7 @@ def main(argv):
             "[--matcher EVENT=REGEX] "
             "[--additional-context-limit EVENT=POSITIVE_INTEGER] "
             "[--guess] [event:command ...]\n"
+            "       settings-hooks.py validate-codex <path> --ledger <ledger>\n"
         )
         return 64
 

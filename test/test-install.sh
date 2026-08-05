@@ -1307,6 +1307,199 @@ test_sharedスコープはCodex作成所有権を台帳から読んでmanaged除
     "shared installのCodex作成所有権由来のmanaged除外"
 }
 
+test_Codexの構造不一致は再導入後も利用者hookと所有権を失わない() {
+  local variant survived created dir_created
+  TARGET="$TEST_TMP/target"
+  for variant in stop matcher type limit missing-limit metadata duplicate; do
+    rm -rf "$TARGET"
+    _setup_target
+    _run_install_args --personal
+    assert_eq "0" "$INSTALL_STATUS" "${variant} fixtureの初回personal install"
+    python3 - "$TARGET/.codex/hooks.json" "$variant" <<'PY'
+import copy
+import json
+import sys
+
+path, variant = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    data = json.load(handle)
+group = next(group for group in data["hooks"]["SessionStart"] if any(
+    "handoff-check.sh" in entry.get("command", "")
+    for entry in group["hooks"]
+))
+entry = next(entry for entry in group["hooks"] if "handoff-check.sh" in entry.get("command", ""))
+if variant == "stop":
+    data["hooks"].setdefault("Stop", []).append({"hooks": [{
+        "type": "command", "command": entry["command"]
+    }]})
+elif variant == "matcher":
+    group["matcher"] = "other"
+elif variant == "type":
+    entry["type"] = "url"
+elif variant == "limit":
+    entry["additionalContextLimit"] = 9999
+elif variant == "missing-limit":
+    del entry["additionalContextLimit"]
+elif variant == "metadata":
+    group["description"] = "利用者が追加したgroup metadata"
+elif variant == "duplicate":
+    group["hooks"].append(copy.deepcopy(entry))
+else:
+    raise SystemExit("unknown variant: %s" % variant)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
+    _run_install_args --personal
+    assert_eq "0" "$INSTALL_STATUS" "${variant} fixtureの再personal install"
+    created="$(python3 "$REPO_ROOT/lib/ledger.py" get-flag \
+      "$TARGET/.token-saver/installed.json" codex_hooks_created)"
+    dir_created="$(python3 "$REPO_ROOT/lib/ledger.py" get-flag \
+      "$TARGET/.token-saver/installed.json" codex_dir_created)"
+    assert_eq "0" "$created" "${variant}のCodex hook作成所有権失効"
+    assert_eq "0" "$dir_created" "${variant}の.codex作成所有権失効"
+    survived="$(python3 - "$TARGET/.codex/hooks.json" "$variant" <<'PY'
+import json
+import sys
+
+path, variant = sys.argv[1:]
+with open(path, encoding="utf-8-sig") as handle:
+    data = json.load(handle)
+entries = [
+    entry
+    for groups in data.get("hooks", {}).values()
+    if isinstance(groups, list)
+    for group in groups
+    if isinstance(group, dict) and isinstance(group.get("hooks"), list)
+    for entry in group["hooks"]
+    if isinstance(entry, dict) and "handoff-check.sh" in entry.get("command", "")
+]
+session = data.get("hooks", {}).get("SessionStart", [])
+if variant == "stop":
+    ok = any("handoff-check.sh" in entry.get("command", "")
+             for group in data.get("hooks", {}).get("Stop", [])
+             for entry in group.get("hooks", []))
+elif variant == "matcher":
+    ok = any(group.get("matcher") == "other" for group in session)
+elif variant == "type":
+    ok = any(entry.get("type") == "url" for entry in entries)
+elif variant == "limit":
+    ok = any(entry.get("additionalContextLimit") == 9999 for entry in entries)
+elif variant == "missing-limit":
+    ok = any("additionalContextLimit" not in entry for entry in entries)
+elif variant == "metadata":
+    ok = any(group.get("description") == "利用者が追加したgroup metadata" for group in session)
+elif variant == "duplicate":
+    ok = sum(1 for entry in entries if entry.get("type") == "command") >= 2
+else:
+    ok = False
+print("yes" if ok else "no")
+PY
+)"
+    assert_eq "yes" "$survived" "${variant}の利用者差し替えhook保持"
+    _run_install_args --shared
+    assert_eq "0" "$INSTALL_STATUS" "${variant} fixtureのshared install"
+    assert_not_contains "$(cat "$TARGET/.gitignore")" ".codex/hooks.json" \
+      "${variant}のmanaged Codex除外"
+    bash "$REPO_ROOT/uninstall.sh" --personal "$TARGET" >/dev/null 2>&1 || true
+    assert_file_exists "$TARGET/.codex/hooks.json" "${variant}の差し替え後hooks.json"
+    assert_file_exists "$TARGET/.codex" "${variant}の差し替え後.codex"
+    assert_file_exists "$TARGET/.token-saver/installed.json" "${variant}の取り残し台帳"
+  done
+}
+
+test_Codexの同group別commandは所有権除外とremoveを維持する() {
+  _setup_target
+  _run_install_args --personal
+  python3 - "$TARGET/.codex/hooks.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path) as handle:
+    data = json.load(handle)
+for group in data["hooks"]["SessionStart"]:
+    if any("handoff-check.sh" in entry.get("command", "") for entry in group["hooks"]):
+        group["hooks"].append({"type": "command", "command": "echo 利用者hook"})
+        break
+with open(path, "w") as handle:
+    json.dump(data, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "同group別commandの再install"
+  assert_eq "1" "$(python3 "$REPO_ROOT/lib/ledger.py" get-flag \
+    "$TARGET/.token-saver/installed.json" codex_hooks_created)" "同group別commandのhook所有権"
+  _run_install_args --shared
+  assert_contains "$(cat "$TARGET/.gitignore")" ".codex/hooks.json" "同group別commandのmanaged除外"
+  bash "$REPO_ROOT/uninstall.sh" --personal "$TARGET" >/dev/null 2>&1 || true
+  assert_file_exists "$TARGET/.codex/hooks.json" "同group別commandのhooks.json"
+  assert_contains "$(cat "$TARGET/.codex/hooks.json")" "echo 利用者hook" \
+    "同group利用者hookの保持"
+  assert_not_contains "$(cat "$TARGET/.codex/hooks.json")" "handoff-check.sh" \
+    "同group managed hookのremove"
+}
+
+test_旧台帳のCodex所有フラグを移行後に読み直してuninstallできる() {
+  _setup_target
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "legacy fixtureの初回personal install"
+  mkdir -p "$TARGET/.claude/.token-saver"
+  mv "$TARGET/.token-saver/installed.json" "$TARGET/.claude/.token-saver/installed.json"
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "legacy-only migrationのpersonal install"
+  assert_file_exists "$TARGET/.token-saver/installed.json" "移行後の新台帳"
+  assert_file_missing "$TARGET/.claude/.token-saver/installed.json" "移行後の旧台帳"
+  assert_eq "1" "$(python3 "$REPO_ROOT/lib/ledger.py" get-flag \
+    "$TARGET/.token-saver/installed.json" codex_hooks_created)" "移行後Codex hook所有権"
+  assert_eq "1" "$(python3 "$REPO_ROOT/lib/ledger.py" get-flag \
+    "$TARGET/.token-saver/installed.json" codex_dir_created)" "移行後.codex所有権"
+  _run_install_args --shared
+  assert_contains "$(cat "$TARGET/.gitignore")" ".codex/hooks.json" "移行後sharedのCodex除外"
+  bash "$REPO_ROOT/uninstall.sh" "$TARGET" >/dev/null 2>&1 || true
+  assert_file_missing "$TARGET/.codex/hooks.json" "移行後uninstallのhooks.json"
+  assert_file_missing "$TARGET/.codex" "移行後uninstallの.codex"
+}
+
+test_新旧台帳競合では新台帳だけを権威にする() {
+  _setup_target
+  _run_install_args --personal
+  mkdir -p "$TARGET/.claude/.token-saver"
+  cp "$TARGET/.token-saver/installed.json" "$TARGET/.claude/.token-saver/installed.json"
+  python3 "$REPO_ROOT/lib/ledger.py" set-flag "$TARGET/.token-saver/installed.json" \
+    codex_hooks_created 0 >/dev/null
+  python3 "$REPO_ROOT/lib/ledger.py" set-flag "$TARGET/.token-saver/installed.json" \
+    codex_dir_created 0 >/dev/null
+  cp "$TARGET/.claude/.token-saver/installed.json" "$TEST_TMP/legacy.before"
+  _run_install_args --personal
+  assert_eq "0" "$INSTALL_STATUS" "新旧台帳競合のinstall終了コード"
+  assert_contains "$INSTALL_OUT$INSTALL_ERR" "新旧" "新旧台帳競合の警告"
+  assert_eq "0" "$(python3 "$REPO_ROOT/lib/ledger.py" get-flag \
+    "$TARGET/.token-saver/installed.json" codex_hooks_created)" "新台帳のCodex flags"
+  assert_eq "0" "$(python3 "$REPO_ROOT/lib/ledger.py" get-flag \
+    "$TARGET/.token-saver/installed.json" codex_dir_created)" "新台帳の.codex flags"
+  cmp -s "$TEST_TMP/legacy.before" "$TARGET/.claude/.token-saver/installed.json" ||
+    _fail "競合時に旧台帳を変更した"
+  _run_install_args --shared
+  assert_not_contains "$(cat "$TARGET/.gitignore")" ".codex/hooks.json" \
+    "新台帳false時のCodex除外"
+}
+
+test_shared専用は新旧台帳をbyte単位で変更しない() {
+  _setup_target
+  _run_install_args --personal
+  mkdir -p "$TARGET/.claude/.token-saver"
+  cp "$TARGET/.token-saver/installed.json" "$TARGET/.claude/.token-saver/installed.json"
+  cp "$TARGET/.token-saver/installed.json" "$TEST_TMP/new.before"
+  cp "$TARGET/.claude/.token-saver/installed.json" "$TEST_TMP/legacy.before"
+  _run_install_args --shared
+  assert_eq "0" "$INSTALL_STATUS" "shared-onlyの終了コード"
+  cmp -s "$TEST_TMP/new.before" "$TARGET/.token-saver/installed.json" ||
+    _fail "shared-onlyが新台帳を変更した"
+  cmp -s "$TEST_TMP/legacy.before" "$TARGET/.claude/.token-saver/installed.json" ||
+    _fail "shared-onlyが旧台帳を変更した"
+}
+
 test_既存の_settings_をバックアップする() {
   _setup_target
   mkdir -p "$TARGET/.claude"

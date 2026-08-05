@@ -48,6 +48,10 @@ cd <導入したいリポジトリ>
 4. `.gitignore` の `# claude-token-saver` ブロックを（再）生成する。中身は `.token-saver/`、
    installerが新規作成し、台帳と現JSONが一致していて未追跡の `.codex/hooks.json`、および**実際に設置したスキル**のリンクパス。
    既存・追跡済み・利用者所有のCodex hooks.jsonは無条件にignoreしない。
+   Codexの所有権はcommand文字列だけでは判定せず、台帳のcommandが `SessionStart` の
+   `matcher: "startup|clear"` groupにある唯一の `type: "command"` entryで、
+   JSON-decoded commandと `additionalContextLimit: 10000` が完全一致する場合だけ認める。
+   同じcommandの別event・別metadata・重複・差し替えはfail-closedである。
 5. 導入先から計測と明示適用を実行する `.token-saver/token-report.sh` / `.token-saver/token-calibrate.sh` を設置する
 6. 設置したものを `.token-saver/installed.json`（台帳）へ記録する
 
@@ -117,7 +121,9 @@ claimをrollbackし、成功後だけconsumeする。
 以前の版は引き継ぎを `.claude/.handoff/`、台帳を `.claude/.token-saver/` に置いていた。
 `install.sh` が台帳を読む前に新パスへ移すため、手動での移行は要らない。移行先に同名の
 ファイルがある場合は上書きせず旧側に残し、警告する（引き継ぎは作業の記録であり、失うと
-事故の調査ができないため）。
+事故の調査ができないため）。個人installは旧台帳を新台帳へ移した後に新台帳だけを
+権威としてCodex所有flagsを読む。新旧が競合する場合は新台帳を優先し、shared-onlyは
+新旧どちらの台帳も読み取り専用で扱う。
 
 **台帳を持つのは、`uninstall.sh` に推測をさせないためである。** 「リンク先が `skills/<同名>` を指している」
 といった推測で判定すると、利用者が自分で張った無関係なリンクを巻き込んで削除する。
@@ -331,6 +337,11 @@ fail-closed により利用者のフックが残ったまま外せなくなる�
 空・壊れた JSON・スキーマ違いの台帳を「在る」と数えると、記録ゼロを「設置物ゼロ」と取り違えて
 利用者のフックを推測で削除し、`settings.local.json` ごと消してしまう。
 
+Codexのremoveも同じstrict predicateを共有する。exactなmanaged entryが唯一1件のときだけ
+それを外し、同groupの別command・未知top-level・別eventの利用者hookは残す。同じcommandが
+別eventにある、matcher/type/limitが違う、limitが欠ける、完全重複がある場合は何も消さず、
+Codex hooks.json・台帳・managed `.gitignore` を残す。
+
 そのため、記録が無いときは次のようになる。
 
 - `settings.local.json` は変更しない（自分のフックも残る）
@@ -381,7 +392,7 @@ Python 3.6.15、3.8.20、3.12.3 で `python -B test/python-compatibility.py` の
 バージョンに限るもので、Python 3.6 未満や未検証の将来版を保証しない。
 
 全体テストは実行環境 Python 3.12.3 で `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` を実行し、
-成功 602 件 / 失敗 0 件 / スキップ 0 件、総 602 件・ファイル別 17 件分の実行件数下限を満たし、
+成功 617 件 / 失敗 0 件 / スキップ 0 件、総 617 件・ファイル別 18 件分の実行件数下限を満たし、
 終了コード 0 だった。これは互換性スモークとは別の全体テスト結果である。
 `python-compatibility` job は matrix の Python 3.6.15 / 3.8.20 で実行し、
 Docker イメージの取得・起動・スモークのいずれかが非 0 なら、その失敗を握り潰さず CI の失敗へ伝播させる。

@@ -21,6 +21,13 @@ description: Use when the session is about to be cut or cleared, when the user a
 
 `--personal` は `.claude/settings.local.json`、Codexの `.codex/hooks.json`、フック、スキル、`.token-saver/`、台帳だけを扱い、`.gitignore` を変更しない。`--shared` は `.gitignore` だけを扱い、既存台帳に記録されたスキルと、installer作成・現JSON一致・未追跡のCodex hooks.jsonだけを除外へ反映する。既存・追跡済み・利用者所有のhooks.jsonを推測でignoreしない。台帳が無い場合にスキルやhooks.jsonを推測しない。引数なしは従来どおり両方を扱う。
 
+Codexの「現JSON一致」はcommand文字列だけを意味しない。台帳の唯一のcommandが、
+`SessionStart` の `matcher: "startup|clear"` groupにある唯一の `type: "command"` entryで、
+JSON-decoded commandと `additionalContextLimit: 10000` が完全一致するときだけ所有物とする。
+別event、異なるmatcher/type/limit、limit欠損、group metadata差分、完全重複は所有権不一致として
+何も削除しない。初回installで旧台帳を読む場合は移行後に新台帳を唯一の権威としてflagsを読み、
+shared-onlyは新旧台帳を変更しない。
+
 取り外しも同じスコープを指定できる。
 
 ```bash

@@ -4,7 +4,7 @@
 
 **Goal:** Claude Code と Codex の `startup` / `clear` で同じ安全な継続判断契約を注入し、継続可能ならローカル作業だけを再開し、継続が無ければ根拠付き候補を提示できるようにする。
 
-**Architecture:** 既存の `scripts/handoff-check.sh` を唯一のSessionStart実体として維持する。Claude Codeの `.claude/settings.local.json` とCodexの `.codex/hooks.json` は同じJSON編集器を使うが、台帳キーを `hooks` / `codex_hooks` に分離し、install/uninstallの所有権を独立させる。Codexのmanaged `.gitignore` 行はinstaller作成・未追跡・台帳と現JSONの完全一致を満たす場合だけ生成する。hookは外部状態を変更せず、最初のモデル要求へ安全な判断契約だけを渡す。
+**Architecture:** 既存の `scripts/handoff-check.sh` を唯一のSessionStart実体として維持する。Claude Codeの `.claude/settings.local.json` とCodexの `.codex/hooks.json` は同じJSON編集器を使うが、台帳キーを `hooks` / `codex_hooks` に分離し、install/uninstallの所有権を独立させる。Codexのmanaged `.gitignore` 行はinstaller作成・未追跡・strictな構造predicateと台帳の完全一致を満たす場合だけ生成する。hookは外部状態を変更せず、最初のモデル要求へ安全な判断契約だけを渡す。
 
 **Tech Stack:** POSIX shell、Bash 3.2互換shell、Python 3.6互換標準ライブラリ、JSON、Codex CLI 0.146.0以降、既存shell test runner。
 
@@ -71,6 +71,7 @@
 - [x] 6. focused testをGREENにし、`test/expected-min-count` を更新する。
 - [x] 7. `git diff --check` と対象diffを確認し、`git commit -m "feat: Codex hookを安全に取り外す"` でコミットする。
 - [x] 8. Fresh review追補: ledgerのmanaged entryと現在hooks.jsonが一致しない差し替えでは、hooks.jsonと必要な`.codex`の作成所有権を失効させ、再install→uninstallでも利用者ファイルを残す。追跡済みの空ファイルも削除しない。
+- [x] 9. Fresh Sol review追補: `codex_hooks` は `SessionStart` / `startup|clear` / `type: command` / JSON-decoded command / `additionalContextLimit: 10000` と唯一出現を共有predicateで照合し、別event・metadata変更・欠損・重複はinstall/shared/removeをfail-closedにする。旧台帳はpersonal migration後にflagsを読み、新旧競合は新台帳優先、shared-onlyはbyte不変で扱う。
 
 ## Task 4: startup/clearへ安全な継続判断契約を注入する
 
@@ -103,10 +104,10 @@
 - [x] 1. README、session-handoff skill、基礎設計へClaude Code/Codex両対応、`startup|clear` の判断順序、自動再開できる範囲、継続なしの候補提示、無入力の完全自動起動ではなく最初のモデル要求で動くこと、Codex `/hooks` trust、clone移動・再install・uninstallを記載する。
 - [x] 2. 設計書の状態を「実装済み・検証待ち」へ更新し、実装上の差異があれば理由と最終契約を追記する。設計の安全境界を弱める差異は認めない。
 - [x] 3. proseの単語一致だけを目的にしたテストは増やさず、install出力とhook実行結果という利用者可視契約を既存fixtureで検証する。
-- [x] 4. `bash test/run.sh test-install`、`bash test/run.sh test-uninstall`、`bash test/run.sh test-handoff-check`、`bash -n install.sh uninstall.sh scripts/handoff-check.sh`、`python3 -B test/python-compatibility.py` を実行し全件PASSを確認する。
+- [x] 4. `bash test/run.sh test-install`、`bash test/run.sh test-uninstall`、`bash test/run.sh test-settings-hooks`、`bash test/run.sh test-handoff-check`、`bash -n install.sh uninstall.sh scripts/handoff-check.sh`、`python3 -B test/python-compatibility.py` を実行し全件PASSを確認する。
 - [x] 5. Bash 3.2が利用可能なら `timeout 600s bash test/bash32-e2e.sh` を実行する。利用不能なら探索コマンドと理由を証跡へ残し、通常Bash結果で代替したと明記する。
 - [x] 6. 隔離した一時Git fixtureへinstallし、current Codex CLIをread-onlyかつtimeout付きで起動する。fixtureだけでhook trust bypassを使い、`startup` stdoutの一意なcanaryが最初のdeveloper contextへ届くことを確認する。実repoや利用者設定は変更しない。
-- [x] 7. `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` を実行し、602 PASS / 0 FAIL / 0 SKIPを確認する。skipが環境依存で不可避なら、通常全件結果とskip理由を個別に記録し、失敗をskipへ書き換えない。
+- [x] 7. `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` を実行し、617 PASS / 0 FAIL / 0 SKIPを確認する。skipが環境依存で不可避なら、通常全件結果とskip理由を個別に記録し、失敗をskipへ書き換えない。
 - [x] 8. `git status --short`、`git diff --stat`、実diff、`git diff --check`を確認し、通常checkoutとIssue #31ファイルを変更していないことを確認する。
 - [x] 9. 設計書の状態を「実装・検証済み」へ更新し、今回のレビュー追補と文書・テスト変更を1つのローカルcommitへまとめる。
 
