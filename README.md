@@ -99,6 +99,8 @@ Claude Code と Codex は、同じ `scripts/handoff-check.sh` と同じ
 `pending/` をatomicにclaimし、stdoutの送信成功後だけ `consumed/` へcommitするため、
 両方を同時に起動しても同じ本文を二重に消費しない。`resume`、`compact`、`fork`、
 不明値、壊れたJSONでは無出力・未消費である。
+同じpendingを同時にclaimした敗者も、cleanup後にstartup/clearの判断契約を1回だけ返す。
+本文を出すのはclaimに勝った1プロセスだけである。
 
 Codexでは、導入後に `/hooks` を開いて定義を確認し、利用者がtrustする。hookは
 アプリを開いただけでモデル要求を生成しないため、完全な無入力自動実行ではなく、
@@ -392,7 +394,7 @@ Python 3.6.15、3.8.20、3.12.3 で `python -B test/python-compatibility.py` の
 バージョンに限るもので、Python 3.6 未満や未検証の将来版を保証しない。
 
 全体テストは実行環境 Python 3.12.3 で `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` を実行し、
-成功 617 件 / 失敗 0 件 / スキップ 0 件、総 617 件・ファイル別 18 件分の実行件数下限を満たし、
+成功 618 件 / 失敗 0 件 / スキップ 0 件、総 618 件・ファイル別 18 件分の実行件数下限を満たし、
 終了コード 0 だった。これは互換性スモークとは別の全体テスト結果である。
 `python-compatibility` job は matrix の Python 3.6.15 / 3.8.20 で実行し、
 Docker イメージの取得・起動・スモークのいずれかが非 0 なら、その失敗を握り潰さず CI の失敗へ伝播させる。

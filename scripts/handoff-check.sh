@@ -527,6 +527,9 @@ if [ "${#claim_stage[@]}" -eq 0 ] &&
    [ "$carried" -eq 0 ]; then
   rm -f "$spool" 2>/dev/null || true
   rmdir "$snapshot_dir" "$inflight_dir" 2>/dev/null || true
+  # 競合相手が先にclaimした敗者も、pendingゼロ時と同じ起動後判断契約を返す。
+  # cleanup後に無出力で抜けると、同じstartupの起動ごとに契約回数が揺れる。
+  cts_print_decision_contract || true
   exit 0
 fi
 

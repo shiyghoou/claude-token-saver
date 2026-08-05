@@ -202,3 +202,5 @@ ID はフックが起動ごとに発行する使い捨ての識別子で、値�
   作ってから標準出力へ送る。標準出力の送信が成功した場合だけ `consumed/` へcommitする。
   標準出力が閉じた場合や HUP・INT・TERM・PIPE を受けた場合は、未commitの引き継ぎを
   `pending/` へ戻す。これにより、読み手が途中で終了しても本文だけが消費済みにならない。
+  同じpendingを並行claimして敗れたプロセスは、cleanup後にstartup/clearの判断契約を
+  1回だけ出す。本文の注入とconsumedへのcommitはclaimに勝ったプロセスだけが行う。

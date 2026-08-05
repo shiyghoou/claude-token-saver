@@ -850,6 +850,65 @@ test_並行実行しても本文は一度しか注入されない() {
   assert_eq "1" "$total" "本文の注入回数"
 }
 
+# claim の mv を少し遅らせ、4プロセスが同じ pending を列挙したあとに
+# 競合する窓を作る。敗者も startup の判断契約を1回だけ返さなければならない。
+test_並行claimの敗者も判断契約を1回だけ出す() {
+  _setup_project
+  local shadow real_mv payload round i total contracts pending_entries consumed_entries entry
+  shadow="$TEST_TMP/delayed-mv"
+  real_mv="$(command -v mv)"
+  mkdir -p "$shadow"
+  printf '#!/bin/sh\ncase "$*" in\n  *".inflight."*) sleep 0.02 ;;\nesac\nexec %s "$@"\n' \
+    "$real_mv" >"$shadow/mv"
+  chmod +x "$shadow/mv"
+  payload="$(_startup_payload)"
+
+  for round in $(seq 1 40); do
+    rm -rf "$PROJ/.token-saver/handoff"
+    mkdir -p "$PROJ/.token-saver/handoff/pending" \
+             "$PROJ/.token-saver/handoff/consumed"
+    _write_pending "2026-08-05-race-$round.md" "並行claim canary $round"
+    for i in 1 2 3 4; do
+      printf '%s' "$payload" |
+        PATH="$shadow:$PATH" bash "$HOOK" \
+          >"$TEST_TMP/race-$round-$i.out" \
+          2>"$TEST_TMP/race-$round-$i.err" &
+    done
+    wait
+
+    total=0
+    for i in 1 2 3 4; do
+      contracts="$(grep -c '^起動後の継続判断契約:$' \
+        "$TEST_TMP/race-$round-$i.out" || true)"
+      assert_eq "1" "$contracts" "round ${round} process ${i}の契約回数"
+      assert_empty "$(cat "$TEST_TMP/race-$round-$i.err")" \
+        "round ${round} process ${i}の標準エラー"
+      total=$((total + $(grep -c "並行claim canary $round" \
+        "$TEST_TMP/race-$round-$i.out" || true)))
+    done
+    assert_eq "1" "$total" "round ${round}の本文注入回数"
+
+    pending_entries=0
+    for entry in "$PROJ/.token-saver/handoff/pending"/* \
+                 "$PROJ/.token-saver/handoff/pending"/.[!.]* \
+                 "$PROJ/.token-saver/handoff/pending"/..?*; do
+      if [ -e "$entry" ] || [ -L "$entry" ]; then
+        pending_entries=$((pending_entries + 1))
+      fi
+    done
+    assert_eq "0" "$pending_entries" "round ${round}のpending残存"
+    consumed_entries=0
+    for entry in "$PROJ/.token-saver/handoff/consumed"/* \
+                 "$PROJ/.token-saver/handoff/consumed"/.[!.]* \
+                 "$PROJ/.token-saver/handoff/consumed"/..?*; do
+      if [ -e "$entry" ] || [ -L "$entry" ]; then
+        consumed_entries=$((consumed_entries + 1))
+      fi
+    done
+    assert_eq "1" "$consumed_entries" "round ${round}のconsumed件数"
+  done
+}
+
 # 負けた側は「消費できなかった」と言ってはいけない。勝った側が正しく消費して
 # いるので、示したパスはもう存在せず、モデルが無いファイルを探し回る。
 test_他が先に消費した引き継ぎには警告を出さない() {

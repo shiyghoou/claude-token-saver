@@ -70,6 +70,7 @@ hook自身が出す指示は本文の区切り外に置き、次の順序を固�
 - `resume` / `compact` / `fork` / 不明値 / 壊れたJSONではpendingを消費しない。
 - 1件8 KiB、合計32 KiB、最大5件の上限を維持する。
 - symlink、hard link、FIFO、置き場外参照、stdout切断、並行起動をfail-closedで扱う。
+- claim競合の敗者はcleanup後にstartup/clearの判断契約を1回だけ返し、本文注入とconsumedへのcommitはclaim勝者だけが行う。
 - 本文は実行ごとに変わる識別子で囲い、前セッションの非信頼な記録と明示する。
 - stdout送信が完了したclaimだけをconsumedへcommitし、失敗分はpendingへ戻す。
 - 何が起きてもSessionStartを妨げない終了コード0と空stderrを維持する。
@@ -150,7 +151,7 @@ READMEとsession-handoff skillに次を記載する。
 
 - Task 2（Codex project hookの安全な導入）: install focused 142/142 PASS。新規・既存・追跡済みhooks.jsonのmanaged `.gitignore` 境界、strict構造不一致時のflags失効、旧台帳migration、new/legacy競合、shared-only byte不変を確認した。
 - Task 3（Codex hookの安全なinstall/uninstall）: uninstall focused 115/115 PASS、settings-hooks strict unit-equivalent 9/9 PASS。旧readonly ledgerの一時コピー経路、未知キー・利用者hook・差し替え時の保持、別event同command・matcher/type/limit変更・欠損・metadata差分・重複のfail-closed、残存時のmanaged `.gitignore` block保持を確認した。
-- Task 4（起動後判断契約）: handoff-check focused 98/98 PASS。pendingゼロのstartup/clear、本文fence外の契約、stdout失敗時rollback、`.token-saver`／handoff／pending親symlinkの外部内容を読まないfail-closed、canonical project root境界を確認した。
-- 全体テスト: `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` は 617 PASS / 0 FAIL / 0 SKIP、終了コード0。
+- Task 4（起動後判断契約）: handoff-check focused 99/99 PASS。pendingゼロのstartup/clear、本文fence外の契約、stdout失敗時rollback、claim競合の4並行×40 roundで各契約1回・本文全体1回・stderr空・pending空・consumed1件、`.token-saver`／handoff／pending親symlinkの外部内容を読まないfail-closed、canonical project root境界を確認した。
+- 全体テスト: `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` は 618 PASS / 0 FAIL / 0 SKIP、終了コード0。
 - runtime: Python互換性、Bash 3.2 e2e、Codex CLIの隔離fixtureでSessionStart contextの到達とpendingからconsumedへの消費を確認した。
 - 通常文書ではtrust bypassを案内せず、Codexの初回確認は `/hooks` から利用者が行う契約を維持した。

@@ -89,6 +89,7 @@
 - [x] 7. focused testをGREENにし、`test/expected-min-count` を更新する。
 - [x] 8. `git diff --check` と対象diffを確認し、`git commit -m "feat: 引き継ぎ後の安全な継続判断を追加"` でコミットする。
 - [x] 9. Fresh review追補: `.token-saver`／`handoff`／`pending` symlinkをpayload列挙より先に拒否し、canonicalized handoff実体がcanonicalized project root内にあることを確認する。外部canaryは無出力・未消費で保持する。
+- [x] 10. Fresh Sol review追補: claim競合で敗れたstartup/clearもcleanup後に固定判断契約を1回だけ出し、本文は勝者1回だけ注入する。遅延mv fixtureの4並行×40 roundでstderr空、pending空、consumed1件を回帰検証する。
 
 ## Task 5: 利用手順とruntime契約を完成させる
 
@@ -107,7 +108,7 @@
 - [x] 4. `bash test/run.sh test-install`、`bash test/run.sh test-uninstall`、`bash test/run.sh test-settings-hooks`、`bash test/run.sh test-handoff-check`、`bash -n install.sh uninstall.sh scripts/handoff-check.sh`、`python3 -B test/python-compatibility.py` を実行し全件PASSを確認する。
 - [x] 5. Bash 3.2が利用可能なら `timeout 600s bash test/bash32-e2e.sh` を実行する。利用不能なら探索コマンドと理由を証跡へ残し、通常Bash結果で代替したと明記する。
 - [x] 6. 隔離した一時Git fixtureへinstallし、current Codex CLIをread-onlyかつtimeout付きで起動する。fixtureだけでhook trust bypassを使い、`startup` stdoutの一意なcanaryが最初のdeveloper contextへ届くことを確認する。実repoや利用者設定は変更しない。
-- [x] 7. `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` を実行し、617 PASS / 0 FAIL / 0 SKIPを確認する。skipが環境依存で不可避なら、通常全件結果とskip理由を個別に記録し、失敗をskipへ書き換えない。
+- [x] 7. `timeout 1500s env CTS_NO_SKIP=1 bash test/run.sh` を実行し、618 PASS / 0 FAIL / 0 SKIPを確認する。skipが環境依存で不可避なら、通常全件結果とskip理由を個別に記録し、失敗をskipへ書き換えない。
 - [x] 8. `git status --short`、`git diff --stat`、実diff、`git diff --check`を確認し、通常checkoutとIssue #31ファイルを変更していないことを確認する。
 - [x] 9. 設計書の状態を「実装・検証済み」へ更新し、今回のレビュー追補と文書・テスト変更を1つのローカルcommitへまとめる。
 
