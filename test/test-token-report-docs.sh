@@ -187,3 +187,17 @@ ${section}"
   assert_not_contains "$combined" "PR #" "PR 漏れ"
   assert_not_contains "$combined" "提出先" "提出先 漏れ"
 }
+
+test_固定コスト未測定とtotalTokens主指標を文書から除く() {
+  readme="$(cat "$REPO_ROOT/README.md")"
+  skill="$(_skill)"
+  design="$(_design_token_report_section)"
+  combined="${readme}
+${skill}
+${design}"
+  assert_not_contains "$combined" "直接測定していない" "未測定文言除去"
+  assert_not_contains "$combined" "toolUseResult.totalTokens" "totalTokens 主指標除去"
+  assert_contains "$readme" "message.usage" "README sub 実測"
+  assert_contains "$skill" "起動固定コスト" "SKILL 固定コスト"
+  assert_contains "$design" "完全母集団ではない" "設計のカバレッジ限界"
+}
