@@ -39,6 +39,9 @@ import json
 import errno
 import os
 import sys
+
+# 導入先から呼ばれる道具である。クローンに __pycache__ を書き散らさない。
+sys.dont_write_bytecode = True
 import tempfile
 
 

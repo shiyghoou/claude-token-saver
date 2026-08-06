@@ -18,6 +18,9 @@
 
 set -uo pipefail
 
+# lib/*.py を呼んでもクローンへ __pycache__ を残さない
+export PYTHONDONTWRITEBYTECODE=1
+
 # 台帳の行プロトコルのフィールド区切り（US, 0x1f）。lib/ledger.py と合わせる。
 # tab を使ってはならない。tab は IFS の空白文字であるため read が連続する
 # 区切りを畳み、空フィールドが次のフィールドの値へ化ける。

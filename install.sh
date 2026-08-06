@@ -10,6 +10,9 @@
 
 set -uo pipefail
 
+# lib/*.py を呼んでもクローンへ __pycache__ を残さない
+export PYTHONDONTWRITEBYTECODE=1
+
 # 物理パスで解決する。シンボリックリンク経由で呼ばれたときに綴りの違う
 # パスが登録され、実パス経由の再実行で二重登録になるのを防ぐ。
 CTS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"

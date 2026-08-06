@@ -779,7 +779,17 @@ _clone_repo() {
   cp -R "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh" "$dest/"
   local d
   for d in scripts skills lib commands; do
-    [ -d "$REPO_ROOT/$d" ] && cp -R "$REPO_ROOT/$d" "$dest/"
+    [ -d "$REPO_ROOT/$d" ] || continue
+    # 作業ツリーに誤って残った __pycache__ を被験クローンへ持ち込まない。
+    # install 本体が汚染するかの検証を壊さないための隔離である。
+    mkdir -p "$dest/$d"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --exclude '__pycache__' --exclude '*.pyc' "$REPO_ROOT/$d/" "$dest/$d/"
+    else
+      cp -R "$REPO_ROOT/$d/." "$dest/$d/"
+      find "$dest/$d" -depth -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+      find "$dest/$d" -type f -name '*.pyc' -delete 2>/dev/null || true
+    fi
   done
   return 0
 }
@@ -1548,10 +1558,16 @@ test_設置したものを台帳へ記録する() {
 test_クローンに__pycache__を書き散らさない() {
   _setup_target
   local clone="$TEST_TMP/clone"
+  # 作業ツリー側の誤残を持ち込ませないことと、install 実行後に生成しないことの両方を見る。
+  mkdir -p "$REPO_ROOT/lib/__pycache__"
+  printf 'pollute\n' >"$REPO_ROOT/lib/__pycache__/cts-test-pollute.pyc"
+  # 失敗時も残さない。並列実行では各ランナーが別 repo root を持つ前提である。
+  trap 'rm -rf "$REPO_ROOT/lib/__pycache__"' RETURN
   _clone_repo "$clone"
+  assert_file_missing "$clone/lib/__pycache__" "clone へ持ち込まない"
   bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
   # 導入先から呼ばれる道具である。利用者のクローンに生成物を残さない。
-  assert_file_missing "$clone/lib/__pycache__"
+  assert_file_missing "$clone/lib/__pycache__" "install 後も生成しない"
 }
 
 test_利用者が張った同名スキルのリンクは上書きしない() {
@@ -2259,6 +2275,22 @@ test_スラッシュコマンドパッケージをリンクする() {
   assert_file_exists "$TARGET/.claude/commands/token-saver/report.md"
   assert_file_exists "$TARGET/.claude/commands/token-saver/calibrate.md"
   assert_file_exists "$TARGET/.claude/commands/token-saver/suggest-session-cut.md"
+}
+
+
+test_スラッシュコマンド定義は薄いentrypoint指示である() {
+  local body
+  body="$(cat "$REPO_ROOT/commands/token-saver/report.md")"
+  assert_contains "$body" "./.token-saver/token-report.sh" "report entrypoint"
+  assert_not_contains "$body" "measure-token-usage.py" "report に計測本体を埋め込まない"
+
+  body="$(cat "$REPO_ROOT/commands/token-saver/calibrate.md")"
+  assert_contains "$body" "./.token-saver/token-calibrate.sh --apply" "calibrate entrypoint"
+  assert_not_contains "$body" "apply_token_calibration" "calibrate に適用ロジックを埋め込まない"
+
+  body="$(cat "$REPO_ROOT/commands/token-saver/suggest-session-cut.md")"
+  assert_contains "$body" "suggest-session-cut.sh" "suggest-session-cut 実体"
+  assert_not_contains "$body" "def " "suggest-session-cut に Python 定義を埋め込まない"
 }
 
 test_スラッシュコマンドを台帳とgitignoreへ記録する() {
