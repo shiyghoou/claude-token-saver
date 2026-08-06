@@ -250,7 +250,8 @@ test_同一message_idの重複を一度だけ集計する() {
   _run_report --days 1 >/dev/null 2>&1
   report="$(_report)"
   assert_contains "$report" "3,616" "重複排除後の合計"
-  assert_contains "$report" "重複排除した行: 1" "重複行数"
+  # main 側1 + subagents 側1（同一 message.id の二重行）
+  assert_contains "$report" "重複排除した行: 2" "重複行数"
 }
 
 test_id無し行の重複を代替キーで抑える() {

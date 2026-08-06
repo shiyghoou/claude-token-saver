@@ -372,6 +372,7 @@ rows.append(assistant(
       "input": {"argument": "MCP_UNKNOWN_INPUT_SECRET"}},
      {"type": "tool_use", "id": "agent-call", "name": "Agent",
       "input": {"subagent_type": "diagnostic-agent",
+                "agentId": "agent-diagnostic-1",
                 "prompt": "PROMPT_BODY_SENTINEL"}}],
 ))
 rows.append({
@@ -391,7 +392,9 @@ rows.append({
     "type": "user",
     "timestamp": stamp(),
     "sessionId": "session-normal-a",
-    "toolUseResult": {"agentType": "diagnostic-agent", "totalTokens": 120},
+    "toolUseResult": {"agentType": "diagnostic-agent",
+                      "agentId": "agent-diagnostic-1",
+                      "totalTokens": 120},
     "message": {"role": "user", "content": "tool result detail"},
 })
 
@@ -462,6 +465,26 @@ rows.append({
 with open(os.path.join(project, "diagnostics.jsonl"), "w", encoding="utf-8") as handle:
     for row in rows:
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+sub_dir = os.path.join(project, "diagnostics", "subagents")
+os.makedirs(sub_dir, exist_ok=True)
+with open(os.path.join(sub_dir, "agent-diagnostic-1.jsonl"), "w", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "type": "assistant",
+        "timestamp": stamp(),
+        "agentId": "agent-diagnostic-1",
+        "message": {
+            "id": "sub-diagnostic-1",
+            "model": "sub-model",
+            "usage": {
+                "input_tokens": 10,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 5,
+            },
+            "content": [],
+        },
+    }, ensure_ascii=False) + "\n")
 
 with open(os.path.join(repo, ".claude", "token-saver.json"), "w", encoding="utf-8") as handle:
     json.dump({
