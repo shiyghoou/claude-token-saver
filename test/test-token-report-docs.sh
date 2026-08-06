@@ -8,7 +8,8 @@ _skill_path() {
 }
 
 _readme() {
-  sed -n '1,320p' "$REPO_ROOT/README.md"
+  # calibrate 節の「概算診断」境界まで含める（320 行だと直前で切れて契約検査が偽陰性になる）
+  sed -n '1,340p' "$REPO_ROOT/README.md"
 }
 
 _design_token_report_section() {

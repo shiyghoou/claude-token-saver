@@ -627,3 +627,24 @@ test_入力と設定とリポジトリを変更しない() {
   pyc="$(find "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" \( -name '*.pyc' -o -name '__pycache__' \) 2>/dev/null)"
   assert_empty "$pyc" "pyc残留"
 }
+
+# ランチャーは symlink の --out を拒否する。エンジン直呼びでも参照先を切り詰めない。
+test_engineの--outがsymlinkなら参照先を切り詰めない() {
+  _fixture
+  local target="$TEST_TMP/engine-out-target.md" link="$TEST_TMP/engine-out-link.md"
+  printf 'preserved-engine-out\n' >"$target"
+  ln -s "$target" "$link"
+  cp "$target" "$TEST_TMP/engine-out-before.md"
+
+  status=0
+  ( cd "$FIXTURE_REPO" && HOME="$FIXTURE_HOME" \
+      python3 -B "$REPO_ROOT/scripts/measure-token-usage.py" --out "$link" --days 1 ) \
+    >"$TEST_TMP/engine-out.stdout" 2>"$TEST_TMP/engine-out.stderr" || status=$?
+
+  assert_ne "0" "$status" "symlink --out の終了コード"
+  [ -L "$link" ] || _fail "engineが--outのsymlinkを置き換えた"
+  cmp -s "$target" "$TEST_TMP/engine-out-before.md" ||
+    _fail "engineの--out symlink参照先が変更された"
+  assert_contains "$(cat "$target")" "preserved-engine-out" "参照先の内容"
+  assert_contains "$(cat "$TEST_TMP/engine-out.stderr")" "symlink" "symlink拒否の標準エラー"
+}

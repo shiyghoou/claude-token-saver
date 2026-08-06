@@ -274,3 +274,82 @@ test_生きたシンボリックリンクを一括消費する() {
     "リンク先の本文" "consumedのsymlink"
   assert_file_exists "$target" "リンク先の実体"
 }
+
+_setup_empty_project() {
+  PROJ="$TEST_TMP/empty-proj"
+  mkdir -p "$PROJ"
+  export CLAUDE_PROJECT_DIR="$PROJ"
+}
+
+# pending 外の任意パスを consumed へ移せると、手元の被害ファイルが消える。
+test_pending外のパス指定は拒否し被害ファイルを動かさない() {
+  _setup_project
+  local victim="$TEST_TMP/victim-outside.md"
+  printf '動かしてはいけない本文\n' >"$victim"
+  _run_consume "$victim"
+  assert_ne "0" "$CONSUME_STATUS" "終了コード"
+  assert_file_exists "$victim" "pending外の被害ファイル"
+  assert_contains "$(cat "$victim")" "動かしてはいけない本文" "被害ファイルの内容"
+  assert_file_missing "$PROJ/.token-saver/handoff/consumed/victim-outside.md"
+  assert_empty "$(ls -A "$PROJ/.token-saver/handoff/consumed" 2>/dev/null || true)" \
+    "consumed へ何も移さない"
+}
+
+# 親 symlink を許すと、外部置き場のファイルが一括消費で消費されうる。
+test_token_saver親symlinkでは消費を拒否し外部を動かさない() {
+  _setup_empty_project
+  local outside="$TEST_TMP/external-token-saver"
+  mkdir -p "$outside/handoff/pending" "$outside/handoff/consumed"
+  printf 'TOKEN-SAVER-SYMLINK-CANARY\n' >"$outside/handoff/pending/note.md"
+  ln -s "$outside" "$PROJ/.token-saver"
+
+  _run_consume
+  assert_ne "0" "$CONSUME_STATUS" "一括の終了コード"
+  assert_file_exists "$outside/handoff/pending/note.md" "一括後の外部pending"
+  assert_file_missing "$outside/handoff/consumed/note.md" "一括後の外部consumed"
+  assert_eq "$outside" "$(readlink "$PROJ/.token-saver")" ".token-saver symlinkの向き先"
+
+  _run_consume "$outside/handoff/pending/note.md"
+  assert_ne "0" "$CONSUME_STATUS" "明示パスの終了コード"
+  assert_file_exists "$outside/handoff/pending/note.md" "明示後の外部pending"
+  assert_file_missing "$outside/handoff/consumed/note.md" "明示後の外部consumed"
+  assert_contains "$(cat "$outside/handoff/pending/note.md")" \
+    "TOKEN-SAVER-SYMLINK-CANARY" "親symlink経由の被害ファイル"
+}
+
+test_handoff親symlinkでは消費を拒否し外部を動かさない() {
+  _setup_empty_project
+  local outside="$TEST_TMP/external-handoff"
+  mkdir -p "$PROJ/.token-saver" "$outside/pending" "$outside/consumed"
+  printf 'HANDOFF-SYMLINK-CANARY\n' >"$outside/pending/note.md"
+  ln -s "$outside" "$PROJ/.token-saver/handoff"
+
+  _run_consume
+  assert_ne "0" "$CONSUME_STATUS" "一括の終了コード"
+  assert_file_exists "$outside/pending/note.md" "一括後の外部pending"
+  assert_file_missing "$outside/consumed/note.md" "一括後の外部consumed"
+
+  _run_consume "$outside/pending/note.md"
+  assert_ne "0" "$CONSUME_STATUS" "明示パスの終了コード"
+  assert_file_exists "$outside/pending/note.md" "明示後の外部pending"
+  assert_file_missing "$outside/consumed/note.md" "明示後の外部consumed"
+}
+
+test_pending親symlinkでは消費を拒否し外部を動かさない() {
+  _setup_project
+  local outside="$TEST_TMP/external-pending"
+  rm -rf "$PROJ/.token-saver/handoff/pending"
+  mkdir -p "$outside"
+  printf 'PENDING-SYMLINK-CANARY\n' >"$outside/note.md"
+  ln -s "$outside" "$PROJ/.token-saver/handoff/pending"
+
+  _run_consume
+  assert_ne "0" "$CONSUME_STATUS" "一括の終了コード"
+  assert_file_exists "$outside/note.md" "一括後の外部pending"
+  assert_file_missing "$PROJ/.token-saver/handoff/consumed/note.md" "一括後のconsumed"
+
+  _run_consume "$outside/note.md"
+  assert_ne "0" "$CONSUME_STATUS" "明示パスの終了コード"
+  assert_file_exists "$outside/note.md" "明示後の外部ファイル"
+  assert_contains "$(cat "$outside/note.md")" "PENDING-SYMLINK-CANARY" "被害ファイルの内容"
+}

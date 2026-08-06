@@ -7,6 +7,7 @@ environment variables, or other secret-bearing content into the output.
 """
 
 import argparse
+import errno
 import hashlib
 import html
 import json
@@ -327,6 +328,44 @@ def write_calibration_snapshot(snapshot):
                 os.unlink(temp_path)
             except OSError:
                 pass
+
+
+def write_report_out(path, report):
+    """Write Markdown report without following a final-path symlink.
+
+    Matches the launcher fail-closed contract: refuse symlink outs and use
+    O_NOFOLLOW when the platform provides it so a TOCTOU replace cannot open
+    the link target.
+    """
+    if os.path.lexists(path) and os.path.islink(path):
+        print(f"レポート出力先が symlink です: {path}", file=sys.stderr)
+        return False
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o644)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or (os.path.lexists(path) and os.path.islink(path)):
+            print(f"レポート出力先が symlink です: {path}", file=sys.stderr)
+            return False
+        print(f"書き出しに失敗しました: {exc}", file=sys.stderr)
+        return False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write(report)
+            handle.write("\n")
+    except OSError as exc:
+        print(f"書き出しに失敗しました: {exc}", file=sys.stderr)
+        return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    return True
 
 
 def parse_ts(value):
@@ -2171,12 +2210,7 @@ def main():
     )
 
     if args.out:
-        try:
-            with open(args.out, "w", encoding="utf-8") as handle:
-                handle.write(report)
-                handle.write("\n")
-        except OSError as exc:
-            print(f"書き出しに失敗しました: {exc}", file=sys.stderr)
+        if not write_report_out(args.out, report):
             return 1
         print(f"書き出しました: {args.out}")
     else:
