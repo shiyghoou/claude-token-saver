@@ -342,6 +342,26 @@ def is_token_count(value):
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def safe_agent_id(value):
+    if not isinstance(value, str) or not value or len(value) > 200:
+        return None
+    if (
+        any(ch in value for ch in "\"'{}[]\\`|/")
+        or has_unsafe_text(value)
+        or credential_shaped(value)
+        or path_shaped_metadata(value)
+    ):
+        return None
+    return value
+
+
+def agent_id_from_sub_path(path):
+    base = os.path.basename(path)
+    if base.endswith(".jsonl"):
+        base = base[: -len(".jsonl")]
+    return safe_agent_id(base)
+
+
 def safe_int(value):
     if not is_token_count(value):
         return 0
@@ -744,16 +764,16 @@ class Scan:
         self.read_paths = Counter()
         self.read_ext = Counter()
         self.agent_calls = Counter()
-        self.agent_results = Counter()
-        self.agent_tokens = defaultdict(int)
-        self.agent_models = defaultdict(Counter)
+        self.agent_id_types = {}  # agentId -> type str
         self.agent_usage = defaultdict(Usage)
         self.agent_usage_total = Usage()
-        self.agent_max = defaultdict(int)
-        self.agent_total = 0
+        self.agent_log_counts = Counter()  # type -> log files attributed
+        self.agent_fixed_costs = []  # list[int]
         self.main_tool_results = []
         self.compact_events = []
         self.sub_files = 0
+        self.sub_files_with_usage = 0
+        self.sub_unresolved_logs = 0
         self.sub_mcp_calls = Counter()
         self.scanned_dirs = []
         self.fell_back = False
@@ -957,6 +977,9 @@ def scan_transcripts(paths, since):
                                 sanitize_name(tool_input.get("subagent_type")) or "(既定)"
                             )
                             scan.agent_calls[subagent] += 1
+                            agent_id = safe_agent_id(tool_input.get("agentId"))
+                            if agent_id and agent_id not in scan.agent_id_types:
+                                scan.agent_id_types[agent_id] = subagent
                         elif name in ("Read", "NotebookRead"):
                             target = tool_input.get("file_path") or tool_input.get(
                                 "notebook_path"
@@ -980,25 +1003,11 @@ def scan_transcripts(paths, since):
                     mark_matching_tool_results(scan, session_key, request_id)
 
                 result = entry.get("toolUseResult")
-                if (
-                    isinstance(result, dict)
-                    and is_token_count(result.get("totalTokens"))
-                    and result.get("agentType")
-                ):
-                    tokens = result["totalTokens"]
-                    subagent = sanitize_name(result.get("agentType")) or "(不明)"
-                    scan.agent_total += tokens
-                    scan.agent_tokens[subagent] += tokens
-                    scan.agent_results[subagent] += 1
-                    scan.agent_max[subagent] = max(scan.agent_max[subagent], tokens)
-                    model = sanitize_model(result.get("resolvedModel")) or "(不明)"
-                    scan.agent_models[subagent][model] += 1
-                    usage = result.get("usage")
-                    if isinstance(usage, dict):
-                        one = Usage()
-                        one.add_raw(usage)
-                        scan.agent_usage[subagent] += one
-                        scan.agent_usage_total += one
+                if isinstance(result, dict):
+                    agent_id = safe_agent_id(result.get("agentId"))
+                    if agent_id and agent_id not in scan.agent_id_types:
+                        subagent = sanitize_name(result.get("agentType")) or "(不明)"
+                        scan.agent_id_types[agent_id] = subagent
     return scan
 
 
