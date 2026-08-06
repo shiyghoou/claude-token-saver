@@ -353,3 +353,17 @@ test_pending親symlinkでは消費を拒否し外部を動かさない() {
   assert_file_exists "$outside/note.md" "明示後の外部ファイル"
   assert_contains "$(cat "$outside/note.md")" "PENDING-SYMLINK-CANARY" "被害ファイルの内容"
 }
+
+# pending 配下に見える相対パスでも、解決後が置き場外なら動かさない。
+test_pending配下に見せかけた相対逃逸パスは拒否する() {
+  _setup_project
+  local victim="$PROJ/.token-saver/escape-victim.md"
+  printf '逃逸させてはいけない\n' >"$victim"
+  _run_consume "$PROJ/.token-saver/handoff/pending/../../escape-victim.md"
+  assert_ne "0" "$CONSUME_STATUS" "終了コード"
+  assert_file_exists "$victim" "逃逸先の被害ファイル"
+  assert_contains "$(cat "$victim")" "逃逸させてはいけない" "被害ファイルの内容"
+  assert_file_missing "$PROJ/.token-saver/handoff/consumed/escape-victim.md"
+  assert_empty "$(ls -A "$PROJ/.token-saver/handoff/consumed" 2>/dev/null || true)" \
+    "consumed へ何も移さない"
+}

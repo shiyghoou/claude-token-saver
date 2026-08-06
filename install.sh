@@ -99,16 +99,23 @@ warn() {
   printf '  警告: %s\n' "$*"
 }
 
-# 台帳が無い旧環境向けの推測。リンク先が「どこかのクローンの skills/<同名>」で
-# あり、その親に install.sh が実在するときだけ自分のものとみなす。
-# basename と親ディレクトリ名だけで判定すると、利用者が社内共有の skills/ へ
-# 張ったリンクまで自分のものと誤認する。
+# 台帳が無い旧環境向けの推測。リンク先が CTS クローンの skills/<同名> または
+# commands/<同名> を指すときだけ自分のものとみなす。
+# install.sh があるだけでは不十分（社内共有リポジトリや無関係なクローンを
+# 誤認するため）。指紋は uninstall.sh と lib/ledger.py の同居とする。
+cts_clone_fingerprint_ok() {
+  local home="$1"
+  [ -f "$home/install.sh" ] || return 1
+  [ -f "$home/uninstall.sh" ] || return 1
+  [ -f "$home/lib/ledger.py" ] || return 1
+}
+
 looks_like_our_link() {
   local link="$1" name="$2" home
   [ "$(basename "$link")" = "$name" ] || return 1
   [ "$(basename "$(dirname "$link")")" = "skills" ] || return 1
   home="$(dirname "$(dirname "$link")")"
-  [ -f "$home/install.sh" ]
+  cts_clone_fingerprint_ok "$home"
 }
 
 cts_place_skill() {
@@ -167,7 +174,7 @@ looks_like_our_command_link() {
   [ "$(basename "$link")" = "$name" ] || return 1
   [ "$(basename "$(dirname "$link")")" = "commands" ] || return 1
   home="$(dirname "$(dirname "$link")")"
-  [ -f "$home/install.sh" ]
+  cts_clone_fingerprint_ok "$home"
 }
 
 cts_place_command() {
