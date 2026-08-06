@@ -234,9 +234,7 @@ launcher は engine の `--days` / `--all-projects` / `--paths` / `--top` / `--o
 - 同じ `message.id` の usage は一度だけ数える
 - `message.id` を持たない行は `requestId` と usage 内容で代替キーを作って重複排除する
 - `<session>/subagents/` の詳細ログは別枠で扱い、親の合計へ二重計上しない
-- サブエージェント消費の主合計は `<session>/subagents/**/*.jsonl` の `message.usage` のみとし、親 JSONL の結果回収トークン合計は合計に使わない
-- 起動固定コストは各サブログの初回 assistant 入力から実測し、usage 合計へ二重加算しない
-- 期間内のサブエージェント集合は完全母集団ではない。欠測分は平均値で補完しない
+- サブエージェント消費の主合計は `<session>/subagents/**/*.jsonl` の `message.usage` のみとし、親 JSONL の結果回収トークン合計は合計に使わない。起動固定コストは初回 assistant 入力から実測し usage 合計へ二重加算しない。期間内のサブエージェント集合は完全母集団ではない。欠測分は平均値で補完しない
 - 現在のリポジトリに対応する project key が見つからないときは、警告付きで全プロジェクトへフォールバックする
 
 既知の限界は README と SKILL に明記し、数値を一般法則として書かない。
