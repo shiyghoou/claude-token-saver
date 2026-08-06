@@ -303,6 +303,61 @@ test_subagent本文をレポートへ出さない() {
   assert_not_contains "$report" "秘密の orphan 本文" "orphan 本文秘匿"
 }
 
+test_型joinと不明バケツ() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  # plot 行: 起動1 / ログ1 / usage 10,001
+  assert_contains "$report" "plot-adversarial-reviewer" "join type"
+  assert_contains "$report" "| plot-adversarial-reviewer | 1 | 1 |" "起動とログ列"
+  assert_contains "$report" "10,001" "typed usage"
+  # orphan → (不明)
+  assert_contains "$report" "| (不明) | 0 | 1 |" "不明はログのみ"
+  assert_contains "$report" "224" "不明 usage"
+  # (既定) と (不明) を混同しない（この fixture では (既定) 起動は 0）
+  assert_not_contains "$report" "| (既定) | 0 | 1 |" "不明を既定へ落とさない"
+}
+
+test_起動数が親Agent_tool_useと一致する() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "| plot-adversarial-reviewer | 1 |" "plot 起動1"
+  assert_contains "$report" "| lint-reviewer | 1 | 0 |" "lint 起動1ログ0"
+  assert_contains "$report" "サブエージェント起動: 2" "起動合計"
+}
+
+test_起動固定コストの中央値最小最大標本数を出す() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "起動固定コスト" "固定コスト節"
+  assert_contains "$report" "中央値" "中央値"
+  assert_contains "$report" "最小" "最小"
+  assert_contains "$report" "最大" "最大"
+  assert_contains "$report" "標本数: 2" "標本数"
+  # 9909 と 222 → 中央値は既存 median_non_negative_integer で (222+9909)//2 = 5065
+  assert_contains "$report" "9,909" "最大または標本"
+  assert_contains "$report" "222" "最小"
+  assert_contains "$report" "5,065" "中央値"
+}
+
+test_固定コストを合算へ二重加算しない() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  # 10,225 + 9,909 + 222 = 20,356 を合計として出さない
+  assert_not_contains "$report" "20,356" "固定コスト二重加算禁止"
+  assert_contains "$report" "10,225" "usage 合計のみ"
+}
+
+test_カバレッジと欠測注意を出す() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "サブエージェント起動: 2" "起動数"
+  assert_contains "$report" "読めたログ:" "ログ本数"
+  assert_contains "$report" "うち usage あり" "usage 本数"
+  assert_contains "$report" "型未解決ログ:" "未解決"
+  assert_contains "$report" "完全母集団ではない" "欠測注意"
+  assert_contains "$report" "欠測分は平均値で補完しない" "補完禁止"
+}
+
 test_期間外の行を除外し_days_0で全期間を読む() {
   _run_report --days 1 >/dev/null 2>&1
   recent="$(_report)"
