@@ -56,9 +56,10 @@ rows.append({"type": "assistant", "timestamp": stamp(9), "sessionId": "session",
                   {"file_path": repo + "-sibling/SECRET_SIBLING_PATH"}},
                  {"type": "tool_use", "name": "Read", "input":
                   {"file_path": "relative/SECRET_RELATIVE_PATH"}},
-                 {"type": "tool_use", "name": "Agent", "input":
-                  {"subagent_type": "plot-adversarial-reviewer",
-                   "prompt": "秘密の prompt sentinel"}},
+                 {"type": "tool_use", "id": "toolu-agent-plot", "name": "Agent",
+                  "input": {"subagent_type": "plot-adversarial-reviewer",
+                            "agentId": "agent-plot-1",
+                            "prompt": "秘密の prompt sentinel"}},
                  {"type": "tool_use", "name": "mcp__example_server__ping", "input": {}},
                  {"type": "tool_use", "name": "mcp__unknown_server__run", "input": {}},
                  {"type": "tool_use", "name": "mcp__broken", "input": {}}]}})
@@ -72,9 +73,10 @@ for _ in range(3):
                  "message": {"model": "claude-sonnet-5", "usage": usage(2, 20, 200, 3),
                              "content": []}})
 
-# toolUseResult の分類値、usage、prompt、content は出力してはいけない。
+# plot の結果（totalTokens は残すが合計非採用。agentId で join）
 rows.append({"type": "user", "timestamp": stamp(8), "sessionId": "session",
              "toolUseResult": {"agentType": "plot-adversarial-reviewer",
+                               "agentId": "agent-plot-1",
                                "resolvedModel": "claude-opus-4-8[1m]",
                                "totalTokens": 12345, "usage": usage(5, 300, 3000, 40),
                                "prompt": "秘密の tool result prompt",
@@ -82,15 +84,19 @@ rows.append({"type": "user", "timestamp": stamp(8), "sessionId": "session",
              "message": {"role": "user", "content": "秘密の本文 sentinel"}})
 
 # --top の一覧制限を検証するための 0 token 補助データ。
+# message-extra 内の Agent（ログ無し起動 → カバレッジ欠測用）
 rows.append({"type": "assistant", "timestamp": stamp(6), "sessionId": "session",
              "message": {"id": "message-extra", "model": "claude-haiku-5",
                          "usage": usage(0, 0, 0, 0), "content": [
                  {"type": "tool_use", "name": "Read", "input":
                   {"file_path": repo + "/second-visible.md"}},
-                 {"type": "tool_use", "name": "Agent", "input":
-                  {"subagent_type": "lint-reviewer"}}]}})
+                 {"type": "tool_use", "id": "toolu-agent-lint", "name": "Agent",
+                  "input": {"subagent_type": "lint-reviewer",
+                            "agentId": "agent-lint-missing"}}]}})
+# lint の結果（totalTokens 0）も agentId を付ける
 rows.append({"type": "user", "timestamp": stamp(5), "sessionId": "session",
              "toolUseResult": {"agentType": "lint-reviewer",
+                               "agentId": "agent-lint-missing",
                                "resolvedModel": "claude-sonnet-5",
                                "totalTokens": 0, "usage": usage(0, 0, 0, 0)},
              "message": {"role": "user", "content": "suppressed helper body"}})
@@ -106,12 +112,35 @@ with open(os.path.join(project, "session.jsonl"), "w", encoding="utf-8") as fh:
     fh.write('{"type":"assistant","message":{"content":"not-a-list"}}\n')
     fh.write('{broken jsonl\n')
 
-with open(os.path.join(project, "session", "subagents", "a.jsonl"), "w", encoding="utf-8") as fh:
-    fh.write(json.dumps({"type": "assistant", "timestamp": stamp(8),
-                         "message": {"id": "subagent-only", "model": "sub-model",
-                                     "usage": usage(9, 900, 9000, 90),
-                                     "content": [{"type": "text", "text": "秘密の subagent 本文"}]}},
-                         ensure_ascii=False) + "\n")
+# 結合できるサブログ（固定コスト標本1 + usage 合計）
+plot_path = os.path.join(project, "session", "subagents", "agent-plot-1.jsonl")
+with open(plot_path, "w", encoding="utf-8") as fh:
+    # 同一 message.id の2行 → 重複排除後1回だけ
+    for block in ({"type": "thinking", "thinking": "秘密の subagent 本文"},
+                  {"type": "text", "text": "秘密の subagent 本文"}):
+        fh.write(json.dumps({
+            "type": "assistant", "timestamp": stamp(8), "agentId": "agent-plot-1",
+            "message": {"id": "sub-msg-1", "model": "sub-model",
+                        "usage": usage(9, 900, 9000, 90),
+                        "content": [block]},
+        }, ensure_ascii=False) + "\n")
+    # 2本目の usage（合計確認・固定コストは先頭だけ）
+    fh.write(json.dumps({
+        "type": "assistant", "timestamp": stamp(7), "agentId": "agent-plot-1",
+        "message": {"id": "sub-msg-2", "model": "sub-model",
+                    "usage": usage(1, 0, 0, 1),
+                    "content": []},
+    }, ensure_ascii=False) + "\n")
+
+# 型未解決の孤立ログ（親マップに無い agentId）
+orphan_path = os.path.join(project, "session", "subagents", "agent-orphan.jsonl")
+with open(orphan_path, "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({
+        "type": "assistant", "timestamp": stamp(6),
+        "message": {"id": "sub-orphan", "model": "orphan-model",
+                    "usage": usage(2, 20, 200, 2),
+                    "content": [{"type": "text", "text": "秘密の orphan 本文"}]},
+    }, ensure_ascii=False) + "\n")
 
 settings = {
     "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{
@@ -232,19 +261,46 @@ test_id無し行の重複を代替キーで抑える() {
   assert_contains "$report" "代替キーで重複排除した行: 2" "代替キーの重複数"
 }
 
+test_subagentsのmessage_usageを別枠合計に載せる() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "message.usage" "実測根拠の明示"
+  assert_contains "$report" "10,225" "subagents usage 合計"
+  assert_contains "$report" "plot-adversarial-reviewer" "join 済み type"
+  assert_contains "$report" "(不明)" "未解決バケツ"
+}
+
+test_toolUseResultのtotalTokensをsub合計へ入れない() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_not_contains "$report" "12,345" "totalTokens 非採用"
+  assert_not_contains "$report" "toolUseResult.totalTokens" "totalTokens 主指標ラベル禁止"
+  # toolUseResult.usage (5+300+3000+40=3345) を足した偽合計も禁止
+  assert_not_contains "$report" "13,570" "toolUseResult.usage 非加算"
+  assert_contains "$report" "10,225" "jsonl usage のみ"
+}
+
 test_subagentsの詳細usageを親の合計へ混ぜない() {
   _run_report --days 1 >/dev/null 2>&1
   report="$(_report)"
-  assert_not_contains "$report" "13,615" "親への二重計上"
-  assert_contains "$report" "subagents/" "subagents別枠"
+  assert_contains "$report" "main 合計: **3,616**" "main 不変"
+  assert_not_contains "$report" "main 合計: **13,841**" "main+sub 混入禁止"
+  assert_contains "$report" "subagents/" "subagents 別枠言及"
 }
 
-test_サブエージェントをagentTypeとresolvedModelで分類する() {
+test_subagent内の同一message_idは一度だけ集計する() {
   _run_report --days 1 >/dev/null 2>&1
   report="$(_report)"
-  assert_contains "$report" "plot-adversarial-reviewer" "agentType"
-  assert_contains "$report" "claude-opus-4-8[1m]" "resolvedModel"
-  assert_contains "$report" "12,345" "toolUseResult totalTokens"
+  # 重複を足すと 10,225 + 9,999 = 20,224 になる
+  assert_not_contains "$report" "20,224" "sub 内二重計上禁止"
+  assert_contains "$report" "10,225" "重複排除後合計"
+}
+
+test_subagent本文をレポートへ出さない() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_not_contains "$report" "秘密の subagent 本文" "sub 本文秘匿"
+  assert_not_contains "$report" "秘密の orphan 本文" "orphan 本文秘匿"
 }
 
 test_期間外の行を除外し_days_0で全期間を読む() {
