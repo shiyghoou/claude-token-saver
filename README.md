@@ -252,7 +252,8 @@ Stop payload と設定ファイルは末尾まで完全な JSON として検証�
 見られる主なもの:
 
 - 対象期間ごとの input / cache_creation / cache_read / output の合計
-- モデル別 usage、subagent_type ごとの起動数と `toolUseResult.totalTokens`
+- モデル別 usage、subagent_type ごとの起動数 / ログ本数 / `message.usage` 合計
+- サブエージェントのカバレッジ注意と起動固定コスト（中央値・最小・最大・標本数）
 - MCP の設定済みサーバ名と実利用回数
 - `--paths` 指定時の Read パス要約（repo 外は `(repo外)` に伏せる）
 
@@ -309,7 +310,7 @@ Codex 側の配置先は `.agents/skills/delegation-policy` である。
 
 判断は、非コスト理由（並列化、ツール制限、専門知識の分離、独立した敵対的レビュー）を先に確認し、作業の重さと残りの会話期間、起動・指示受け渡し・結果の読解・統合の固定費、能力帯と境界、完了条件と回収計画の順に見る。起動した結果は必ず回収し、メイン側で検証・統合する。判断結果は `decision`、`reason`、`delegated scope`、`capability tier`、`completion condition`、`collection method` を含める。
 
-Stage 4 の token-report / calibration 出力は任意の人間向け参考情報であり、このスキルは snapshot の JSON 構造や `.token-saver/calibration/latest.json` を解析しない。計測値だけで委譲先・モデル・設定を自動選択せず、既存の CLI、設定、台帳、フック、MCP、エージェント設定も変更しない。起動固定費は直接測定していないため、固定の損益分岐点、モデル名、価格、固定トークン数を規則として置かない。
+Stage 4 の token-report / calibration 出力は任意の人間向け参考情報であり、このスキルは snapshot の JSON 構造や `.token-saver/calibration/latest.json` を解析しない。計測値だけで委譲先・モデル・設定を自動選択せず、既存の CLI、設定、台帳、フック、MCP、エージェント設定も変更しない。token-report が出す起動固定コストの実測値をその環境・期間の参考にしてよいが、固定の損益分岐点、モデル名、価格、固定トークン数を規則として置かない。
 
 `install.sh` / `uninstall.sh` の既存公開 CLI（`--personal`、`--shared`、`--guess`）と既存の台帳・所有者保護・原子的な書き込み契約は維持する。別 installer や delegation-policy 名をハードコードした固有分岐は追加せず、既存の skill loop 内で `agents/openai.yaml` を検出する metadata opt-in 分岐により Codex destination を扱う。公開 CLI と ledger schema は維持する。
 
@@ -526,7 +527,8 @@ GitのHEAD・branch・status、Issue、PRを照合する。引き継ぎが古い
 
 段階2以降の実装で明記する予定の限界を、先に書いておく。
 
-- **サブエージェント起動時の固定コストは直接測定していない。** メインセッション開始時の中央値を代理指標として用いている。
+- **サブエージェント起動固定コストは各 `subagents/*.jsonl` の初回 assistant 入力から実測する。** 値はその環境・期間の参考であり、普遍の損益分岐点ではない。usage 合計へ二重加算しない。
+- サブエージェント消費の主合計は `subagents/*.jsonl` の `message.usage` である。親 JSONL の結果回収トークン合計は同期回収分に偏るため使わない。期間内集合は完全母集団ではない。
 - `cache_read_input_tokens` は課金上の重みが不明である。内訳のまま扱い、加重しない。
 - 画像の消費は現在の計測エンジンでは未計測である。
 - **MCP サーバごとのトークン消費は実測できない。** ツール定義は常駐プロンプト側に載るため、

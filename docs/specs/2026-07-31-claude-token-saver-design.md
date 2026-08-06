@@ -219,7 +219,7 @@ launcher は engine の `--days` / `--all-projects` / `--paths` / `--top` / `--o
 レポートに含めるもの:
 
 - input / cache_creation / cache_read / output の集計
-- モデル名、`subagent_type`、`toolUseResult.totalTokens`
+- モデル名、`subagent_type`（join 済み。未解決は `(不明)`）、subagent `message.usage`
 - MCP サーバ名と利用回数
 - `--paths` 指定時の repo 内相対パス
 
@@ -234,11 +234,14 @@ launcher は engine の `--days` / `--all-projects` / `--paths` / `--top` / `--o
 - 同じ `message.id` の usage は一度だけ数える
 - `message.id` を持たない行は `requestId` と usage 内容で代替キーを作って重複排除する
 - `<session>/subagents/` の詳細ログは別枠で扱い、親の合計へ二重計上しない
+- サブエージェント消費の主合計は `<session>/subagents/**/*.jsonl` の `message.usage` のみとし、親 JSONL の結果回収トークン合計は合計に使わない
+- 起動固定コストは各サブログの初回 assistant 入力から実測し、usage 合計へ二重加算しない
+- 期間内のサブエージェント集合は完全母集団ではない。欠測分は平均値で補完しない
 - 現在のリポジトリに対応する project key が見つからないときは、警告付きで全プロジェクトへフォールバックする
 
 既知の限界は README と SKILL に明記し、数値を一般法則として書かない。
 
-- サブエージェントの固定コストは直接測定していない。メインセッション開始時の中央値を代理指標として用いている。
+- 起動固定コストの実測値はその環境・期間の参考であり、普遍の損益分岐点ではない。
 - `cache_read_input_tokens` は課金上の重みが不明なため、内訳のまま出力し加重しない。
 - 画像の消費は現在の計測エンジンでは未計測である。
 - MCP サーバごとのトークン消費は実測できない。分かるのは設定済みか、呼ばれたか、何回かまでである。
@@ -321,7 +324,7 @@ Codexから発見・明示実行できるようにするadapterである。
 - 高能力帯は創作、アーキテクチャ設計、矛盾発見、敵対的レビューに、軽量帯は機械的な検索、形式確認、狭い静的チェック、限定されたテスト実行に使う。
 - 起動した結果は必ず回収する。`decision`、`reason`、`delegated scope`、`capability tier`、`completion condition`、`collection method` を起動前に定める。
 - Stage 4 の token-report / calibration は人間が読む任意の参考情報に限る。`latest.json` の snapshot schemaを解析せず、計測値から委譲先やモデルを自動選択せず、設定・フック・MCP・エージェント設定を変更しない。
-- 起動固定費は直接測定していないため、固定の損益分岐点、モデル名、価格、固定トークン数を普遍的な規則として置かない。
+- token-report が出す起動固定コストの実測値をその環境・期間の参考にしてよいが、固定の損益分岐点、モデル名、価格、固定トークン数を普遍的な規則として置かない。
 - 配布と取り外しは既存の `skills/*/` 自動発見、台帳、所有マーカーの契約を再利用する。別 installer や delegation-policy 名をハードコードした固有分岐は追加せず、既存の skill loop 内で `agents/openai.yaml` を検出する metadata opt-in 分岐により Codex destination を扱う。公開 CLI と ledger schema は維持する。
 
 ### 5.5 キャリブレーションと診断（calibrate）
