@@ -280,11 +280,16 @@ Stop payload と設定ファイルは末尾まで完全な JSON として検証�
 ./.token-saver/token-calibrate.sh --apply
 ```
 
-`--calibrate` はトランスクリプトを読み取り、セッションごとの `cache_read` 中央値、サンプル数、算出日時、
-fingerprint を検証可能な `snapshot` として `.token-saver/calibration/latest.json` に保存する。
-サンプル条件の既定値はセッション5本以上かつ assistant ターン100以上で、`.claude/token-saver.json` の
-root 直下 `calibration.min_sessions` / `calibration.min_assistant_turns` で変更できる。条件未達なら推奨値を算出せず、
-同じサンプル周期の案内は report と Stop フックで一度だけにする。
+`--calibrate` はトランスクリプトを読み取り、セッションごとの `cache_read` について設定可能なパーセンタイル
+（既定 `calibration.percentile=75`）を baseline として算出し、サンプル数、分布（p50/p75/p90/p95）、
+上位3セッション集中度、算出日時、fingerprint を検証可能な `snapshot` として
+`.token-saver/calibration/latest.json` に保存する。短命セッションは既定で
+`calibration.exclude_below_assistant_turns=3` 未満を母集団から除外する（`0` で除外オフ）。
+サンプル条件の既定値はフィルタ後セッション5本以上かつ assistant ターン100以上で、
+`.claude/token-saver.json` の root 直下 `calibration.min_sessions` / `calibration.min_assistant_turns` /
+`calibration.percentile` / `calibration.exclude_below_assistant_turns` で変更できる。
+条件未達なら推奨値を算出せず、同じサンプル周期の案内は report と Stop フックで一度だけにする。
+アルゴリズムや指紋の判定条件キーが変わったあとは、旧 snapshot を適用せず再 `--calibrate` する。
 
 この計測コマンドは `.claude/token-saver.json`、フック、既存の `suggest_session_cut` を変更しない。
 `snapshot` を確認して利用者が明示的に `./.token-saver/token-calibrate.sh --apply` を実行したときだけ、
