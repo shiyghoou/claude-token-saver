@@ -286,6 +286,10 @@ fingerprint を検証可能な `snapshot` として `.token-saver/calibration/la
 root 直下 `calibration.min_sessions` / `calibration.min_assistant_turns` で変更できる。条件未達なら推奨値を算出せず、
 同じサンプル周期の案内は report と Stop フックで一度だけにする。
 
+fingerprint は対象パス集合と計測条件の同一性を検証する（ファイルサイズや
+mtime は含めない）。アルゴリズム変更後の古い snapshot は適用できないので、
+`--calibrate` をやり直してから `--apply` する。
+
 この計測コマンドは `.claude/token-saver.json`、フック、既存の `suggest_session_cut` を変更しない。
 `snapshot` を確認して利用者が明示的に `./.token-saver/token-calibrate.sh --apply` を実行したときだけ、
 `suggest_session_cut.initial_cache_read` / `increment_cache_read` と `calibration.last_applied` を更新する。

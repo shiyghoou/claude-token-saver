@@ -333,30 +333,93 @@ test_configが無ければ既定値との一致を確認して作成する() {
   assert_eq "18000000" "$(_config_value increment_cache_read)" "新規increment"
 }
 
-test_入力トランスクリプトが変化したsnapshotを適用せず再計測後だけ適用する() {
+test_トランスクリプト追記だけではapplyが失敗しない() {
   _fixture_with_measured_snapshot
-  before="$(cat "$CONFIG")"
   python3 - "$TRANSCRIPT" <<'PYEOF'
+import json
 import os
 import sys
+from datetime import datetime, timezone
 
 path = sys.argv[1]
-stat_result = os.stat(path)
-os.utime(path, (stat_result.st_atime, stat_result.st_mtime + 2))
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "type": "assistant",
+        "timestamp": stamp,
+        "sessionId": "measured-session-0",
+        "message": {
+            "id": "growth-only",
+            "usage": {
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 1,
+                "output_tokens": 1,
+            },
+            "content": [],
+        },
+    }) + "\n")
+st = os.stat(path)
+os.utime(path, (st.st_atime, st.st_mtime + 3))
 PYEOF
-
   _run_calibrate_command --apply
-  assert_eq "1" "$STATUS" "入力変化snapshotの拒否"
-  assert_eq "$before" "$(cat "$CONFIG")" "入力変化時のconfig非変更"
-
-  CLAUDE_CONFIG_DIR="$FIXTURE_CLAUDE_CONFIG_DIR" \
-    CTS_TOKEN_REPORT_TARGET_ROOT="$FIXTURE_REPO" \
-    "$BASH" "$REPO_ROOT/scripts/token-report.sh" --calibrate \
-    >"$TEST_TMP/token-calibrate-recalibrate.out" \
-    2>"$TEST_TMP/token-calibrate-recalibrate.err"
-  assert_eq "0" "$?" "再計測snapshot生成"
-  _run_calibrate_command --apply
-  assert_eq "0" "$STATUS" "再計測後のapply成功"
-  assert_eq "4000" "$(_config_value initial_cache_read)" "再計測後の推奨値"
+  assert_eq "0" "$STATUS" "追記のみでもapply成功"
+  assert_eq "4000" "$(_config_value initial_cache_read)" "追記後も推奨値適用"
   unset FIXTURE_CLAUDE_CONFIG_DIR
+}
+
+test_対象パスが増えたsnapshotはapplyを拒否する() {
+  _fixture_with_measured_snapshot
+  before="$(cat "$CONFIG")"
+  extra="$(dirname "$TRANSCRIPT")/extra-session.jsonl"
+  python3 - "$extra" <<'PYEOF'
+import json
+import sys
+from datetime import datetime, timezone
+
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "type": "assistant",
+        "timestamp": stamp,
+        "sessionId": "extra-session",
+        "message": {
+            "id": "extra-1",
+            "usage": {
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 10,
+                "output_tokens": 1,
+            },
+            "content": [],
+        },
+    }) + "\n")
+PYEOF
+  _run_calibrate_command --apply
+  assert_eq "1" "$STATUS" "パス増加でapply拒否"
+  assert_contains "$(cat "$TEST_TMP/token-calibrate.err")" "対象がsnapshot作成時から変化した" "パス増加の理由"
+  assert_eq "$before" "$(cat "$CONFIG")" "パス増加時のconfig非変更"
+  unset FIXTURE_CLAUDE_CONFIG_DIR
+}
+
+test_apply失敗時にCalibrationErrorの理由を出す() {
+  _fixture_with_latest
+  python3 - "$LATEST" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    snapshot = json.load(handle)
+snapshot["fingerprint"] = "0" * 64
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(snapshot, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PYEOF
+  before="$(cat "$CONFIG")"
+  _run_calibrate_command --apply
+  assert_eq "1" "$STATUS" "偽fingerprintで失敗"
+  err="$(cat "$TEST_TMP/token-calibrate.err")"
+  assert_contains "$err" "キャリブレーションを適用できません: " "理由付き接頭辞"
+  assert_contains "$err" "対象がsnapshot作成時から変化した" "具体理由"
+  assert_eq "$before" "$(cat "$CONFIG")" "失敗時非変更"
 }
