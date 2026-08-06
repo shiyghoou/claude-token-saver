@@ -39,7 +39,7 @@ while [ "$#" -gt 0 ]; do
     --guess) GUESS=1 ;;
     -h | --help)
       printf 'usage: uninstall.sh [--personal|--shared] [--guess] [<導入先ディレクトリ>]\n'
-      printf '  --personal  個人設定・フック・スキル・状態だけを外す\n'
+      printf '  --personal  個人設定・フック・スキル・コマンド・状態だけを外す\n'
       printf '  --shared    .gitignoreだけを外す\n'
       printf '  --guess     台帳の無い旧環境を推測して外す（個人側のみ）\n'
       exit 0
@@ -108,6 +108,7 @@ cts_reject_managed_symlinks() {
     "$TARGET/.agents/skills" \
     "$TARGET/.claude" \
     "$TARGET/.claude/skills" \
+    "$TARGET/.claude/commands" \
     "$TARGET/.codex" \
     "$TARGET/.codex/hooks.json" \
     "$TARGET/$(cts_legacy_handoff_rel)" \
@@ -151,8 +152,10 @@ fi
 
 have_ledger=0
 have_skill_record=0
+have_command_record=0
 python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" any && have_ledger=1
 python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" skills && have_skill_record=1
+python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" commands && have_command_record=1
 have_codex_hook_record=0
 python3 "$CTS_HOME/lib/ledger.py" has-record "$LEDGER" codex_hooks && have_codex_hook_record=1
 codex_hooks_created=0
@@ -166,10 +169,11 @@ fi
 token_report_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" token_report_source)"
 token_calibrate_source="$(python3 "$CTS_HOME/lib/ledger.py" get-value "$LEDGER" token_calibrate_source)"
 
-# 外せなかった・触らなかった設置物が Claude Code / Codex の skills destination に残っているか。
-# 残っているなら .gitignore の除外を外してはならない（絶対パスのリンクが
-# 未追跡ファイルとして git に現れる）。
+# 外せなかった・触らなかった設置物が Claude Code / Codex の skills / commands
+# destination に残っているか。残っているなら .gitignore の除外を外してはならない
+# （絶対パスのリンクが未追跡ファイルとして git に現れる）。
 skills_left=0
+commands_left=0
 token_report_left=0
 token_calibrate_left=0
 codex_hooks_left=0
@@ -539,18 +543,131 @@ if [ "$have_skill_record" = 0 ] && [ "$GUESS" = 1 ] &&
   skills_left=1
 fi
 
-# 空になった skills ディレクトリは片付ける。中身があるなら触らない。
+# --- 2b. スラッシュコマンド ----------------------------------------------------
+
+looks_like_our_command_link() {
+  local link="$1" name="$2" home
+  [ "$(basename "$link")" = "$name" ] || return 1
+  [ "$(basename "$(dirname "$link")")" = "commands" ] || return 1
+  home="$(dirname "$(dirname "$link")")"
+  [ -f "$home/install.sh" ]
+}
+
+command_destination_matches_record() {
+  local src="$1" dest="$2"
+  [ -n "$src" ] || return 1
+  if [ -L "$dest" ]; then
+    [ "$(readlink "$dest")" = "$src" ]
+  elif [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+remove_command() {
+  local name="$1" src="$2" dest
+  case "$name" in
+    "" | . | .. | */*)
+      warn "台帳のコマンド名が不正なので触らない: $name"
+      return 0
+      ;;
+  esac
+  dest="$TARGET/.claude/commands/$name"
+
+  if [ -L "$dest" ]; then
+    if [ -z "$src" ]; then
+      warn "Claude Code コマンド $name の記録にリンク先が無いため触らない"
+      commands_left=1
+      return 0
+    fi
+    if command_destination_matches_record "$src" "$dest"; then
+      if rm -f "$dest" && [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+        info "  Claude Code コマンドのリンクを外した: /$name:*"
+        return 0
+      fi
+      warn "Claude Code コマンド $name は削除できないため残す"
+      commands_left=1
+      return 0
+    fi
+    warn "Claude Code コマンド $name は導入後に差し替えられているので残す"
+    commands_left=1
+    return 0
+  elif [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; then
+    if rm -rf "$dest" && [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+      info "  Claude Code コマンドのコピーを削除した: /$name:*"
+      return 0
+    fi
+    warn "Claude Code コマンド $name は削除できないため残す"
+    commands_left=1
+    return 0
+  elif [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+    return 0
+  fi
+  warn "Claude Code コマンド $name は導入後に差し替えられているので残す"
+  commands_left=1
+}
+
+recorded_command_destinations_left() {
+  local name src _mode dest
+  [ "$have_command_record" = 1 ] || return 0
+  [ "${#warnings[@]}" -eq 0 ] || return 0
+  while IFS=$'\037' read -r name src _mode; do
+    [ -n "$name" ] || continue
+    case "$name" in
+      "" | . | .. | */*) continue ;;
+    esac
+    dest="$TARGET/.claude/commands/$name"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      warn "台帳のコマンド $name の導入先が残っているため台帳を残す"
+      commands_left=1
+    fi
+  done < <(python3 "$CTS_HOME/lib/ledger.py" list-commands "$LEDGER")
+}
+
+if [ "$have_command_record" = 1 ]; then
+  while IFS=$'\037' read -r name src _mode; do
+    [ -n "$name" ] || continue
+    remove_command "$name" "$src"
+  done < <(python3 "$CTS_HOME/lib/ledger.py" list-commands "$LEDGER")
+elif [ "$GUESS" = 0 ]; then
+  if [ -d "$TARGET/.claude/commands" ] &&
+     [ -n "$(find "$TARGET/.claude/commands" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    warn "台帳にコマンドの記録が無いため .claude/commands を変更していない（--guess で推測できる）"
+    commands_left=1
+  fi
+elif [ -d "$TARGET/.claude/commands" ]; then
+  for dest in "$TARGET/.claude/commands"/*; do
+    [ -e "$dest" ] || [ -L "$dest" ] || continue
+    name="$(basename "$dest")"
+    if [ -L "$dest" ]; then
+      if looks_like_our_command_link "$(readlink "$dest")" "$name"; then
+        rm -f "$dest"
+        info "  コマンドのリンクを外した: /$name:*"
+      else
+        info "  コマンド $name は導入先のものなので残す"
+      fi
+    elif [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; then
+      rm -rf "$dest"
+      info "  コマンドのコピーを削除した: /$name:*"
+    fi
+  done
+fi
+
+# 空になった skills / commands ディレクトリは片付ける。中身があるなら触らない。
 # 一度も導入していない導入先の空ディレクトリへ手を出さないため、
 # 記録がある（＝ここへ導入した）ときだけ片付ける。
 if [ "$have_ledger" = 1 ] || [ "$GUESS" = 1 ]; then
   rmdir "$TARGET/.claude/skills" 2>/dev/null || true
   rmdir "$TARGET/.agents/skills" 2>/dev/null || true
   rmdir "$TARGET/.agents" 2>/dev/null || true
+  rmdir "$TARGET/.claude/commands" 2>/dev/null || true
 fi
 
 # スキル処理の直後にも記録済み destination を再確認する。.gitignore の除外を
-# 外す前に残存を skills_left へ反映し、後段の台帳削除前チェックと二重に守る。
+# 外す前に残存を skills_left / commands_left へ反映し、後段の台帳削除前チェックと二重に守る。
 recorded_skill_destinations_left
+recorded_command_destinations_left
 
 fi
 
@@ -606,6 +723,33 @@ if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
     done < <(python3 "$CTS_HOME/lib/ledger.py" list-skills "$shared_skill_ledger")
   fi
 
+  shared_command_ledger="$TARGET/$(cts_ledger_rel)"
+  shared_have_command_record=0
+  if python3 "$CTS_HOME/lib/ledger.py" has-record "$shared_command_ledger" commands; then
+    shared_have_command_record=1
+  elif python3 "$CTS_HOME/lib/ledger.py" has-record "$LEGACY_LEDGER" commands; then
+    shared_command_ledger="$LEGACY_LEDGER"
+    shared_have_command_record=1
+  fi
+  if [ "$shared_have_command_record" = 1 ]; then
+    while IFS=$'\037' read -r name _src _mode; do
+      case "$name" in
+        "" | . | .. | */*)
+          [ -z "$name" ] || {
+            warn "台帳のコマンド名が不正なので .gitignore の除外を外さない: $name"
+            shared_left=1
+          }
+          ;;
+        *)
+          dest="$TARGET/.claude/commands/$name"
+          if [ -e "$dest" ] || [ -L "$dest" ]; then
+            shared_left=1
+          fi
+          ;;
+      esac
+    done < <(python3 "$CTS_HOME/lib/ledger.py" list-commands "$shared_command_ledger")
+  fi
+
   for state_candidate in "$state_dir" "$TARGET/$(cts_legacy_state_rel)" \
     "$handoff_dir" "$legacy_handoff_dir"; do
     if [ -L "$state_candidate" ]; then
@@ -623,7 +767,8 @@ fi
 # 依存しない（推測ではない）。
 if [ "$do_shared" = 1 ]; then
   if { [ "$do_personal" = 1 ] &&
-       { [ "$skills_left" = 1 ] || [ "$token_report_left" = 1 ] ||
+       { [ "$skills_left" = 1 ] || [ "$commands_left" = 1 ] ||
+         [ "$token_report_left" = 1 ] ||
          [ "$token_calibrate_left" = 1 ] || [ "$codex_hooks_left" = 1 ]; }; } ||
      { [ "$do_personal" = 0 ] && [ "$shared_left" = 1 ]; }; then
     warn "管理対象の設置物が残っているため .gitignore の除外を外していない"
@@ -654,6 +799,7 @@ settings_created=0
 # 実行が「記録の無い状態」＝何もできない状態になり、取り外し不能になる。
 # 無条件に消していた頃は、2回目が必ず推測経路へ落ちていた。
 recorded_skill_destinations_left
+recorded_command_destinations_left
 if [ "${#warnings[@]}" -eq 0 ]; then
   rm -f "$LEDGER"
 else
