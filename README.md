@@ -19,6 +19,7 @@ Claude Code のトークン消費を減らすヘルパー。任意のリポジ�
 | キャリブレーションと診断（calibrate） | **実装済み** |
 | 委譲判断ガイド（delegation-policy） | **実装済み** |
 | Claude Code / Codex の引き継ぎ後判断 | **実装済み** |
+| スラッシュコマンド（/token-saver:*） | **実装済み** |
 
 設計は [`docs/specs/2026-07-31-claude-token-saver-design.md`](docs/specs/2026-07-31-claude-token-saver-design.md) にある。
 
@@ -37,7 +38,10 @@ cd <導入したいリポジトリ>
 1. `.token-saver/handoff/{pending,consumed}` を作る
 2. `skills/` 配下を Claude Code の `.claude/skills/<name>` へシンボリックリンクする。
    `agents/openai.yaml` を持つスキルだけは、Codex の `.agents/skills/<name>` にも配置する。
-3. `.claude/settings.local.json` の `SessionStart` に `handoff-check.sh` を
+3. `commands/token-saver/` を Claude Code の `.claude/commands/token-saver` へシンボリックリンクする
+   （`/token-saver:report` / `/token-saver:calibrate` / `/token-saver:suggest-session-cut`）。
+   Codex / `.agents` にはスラッシュコマンドを置かない。
+4. `.claude/settings.local.json` の `SessionStart` に `handoff-check.sh` を
    `matcher: "startup|clear"` 付きで登録する。
    Codex project hook が使える導入先では `.codex/hooks.json` にも同じ command を
    `SessionStart` / `matcher: "startup|clear"` で登録する。`Stop` には
@@ -45,26 +49,26 @@ cd <導入したいリポジトリ>
    ユーザー独自フック、未知キー、別イベントは壊さない。既存の設定を初めて
    書き換える場合は、`.cts-backup` がまだ無ければ書き換え前の内容を退避する
    （新規作成時は対象なし）。Codex側のsymlinkや不正JSONは変更前に拒否する。
-4. `.gitignore` の `# claude-token-saver` ブロックを（再）生成する。中身は `.token-saver/`、
-   installerが新規作成し、台帳と現JSONが一致していて未追跡の `.codex/hooks.json`、および**実際に設置したスキル**のリンクパス。
+5. `.gitignore` の `# claude-token-saver` ブロックを（再）生成する。中身は `.token-saver/`、
+   installerが新規作成し、台帳と現JSONが一致していて未追跡の `.codex/hooks.json`、および**実際に設置したスキル・コマンド**のリンクパス。
    既存・追跡済み・利用者所有のCodex hooks.jsonは無条件にignoreしない。
    Codexの所有権はcommand文字列だけでは判定せず、台帳のcommandが `SessionStart` の
    `matcher: "startup|clear"` groupにある唯一の `type: "command"` entryで、
    JSON-decoded commandと `additionalContextLimit: 10000` が完全一致する場合だけ認める。
    同じcommandの別event・別metadata・重複・差し替えはfail-closedである。
-5. 導入先から計測と明示適用を実行する `.token-saver/token-report.sh` / `.token-saver/token-calibrate.sh` を設置する
-6. 設置したものを `.token-saver/installed.json`（台帳）へ記録する
+6. 導入先から計測と明示適用を実行する `.token-saver/token-report.sh` / `.token-saver/token-calibrate.sh` を設置する
+7. 設置したものを `.token-saver/installed.json`（台帳）へ記録する
 
 ### 個人設定と共有設定のスコープ
 
 引数なしの `install.sh` は、従来どおり個人設定と共有設定の両方を更新する。分けて実行したいときは、次のスコープを明示する。
 
 ```bash
-~/claude-token-saver/install.sh --personal   # settings・フック・スキル・状態・台帳だけ
+~/claude-token-saver/install.sh --personal   # settings・フック・スキル・コマンド・状態・台帳だけ
 ~/claude-token-saver/install.sh --shared     # .gitignoreだけ
 ```
 
-`--personal` は `.gitignore` を作成・変更せず、Claude Code設定、Codex project hook、スキル、状態、台帳だけを扱う。`--shared` は既存の新旧台帳を読み取り、実際に記録されたスキルと、installer作成・現JSON一致・未追跡のCodex hooks.jsonだけを除外へ含める。台帳が無い場合は `.token-saver/` だけを書き、スキルやCodex hooks.jsonを推測しない。共有設定を複数のクローンへ反映する場合も、各導入先で `--shared` を実行する。
+`--personal` は `.gitignore` を作成・変更せず、Claude Code設定、Codex project hook、スキル、スラッシュコマンド、状態、台帳だけを扱う。`--shared` は既存の新旧台帳を読み取り、実際に記録されたスキル・コマンドと、installer作成・現JSON一致・未追跡のCodex hooks.jsonだけを除外へ含める。台帳が無い場合は `.token-saver/` だけを書き、スキルやコマンド、Codex hooks.jsonを推測しない。共有設定を複数のクローンへ反映する場合も、各導入先で `--shared` を実行する。
 
 ### 配置
 
@@ -84,6 +88,7 @@ cd <導入したいリポジトリ>
     settings.local.json  ← フックの登録先。Claude Code がパスを決めるため動かせない
     skills/session-handoff
     skills/delegation-policy
+    commands/token-saver/   ← スラッシュ /token-saver:*
   .codex/
     hooks.json            ← Codex project hook。初回は `/hooks` で確認・trustする
   .agents/
@@ -106,8 +111,8 @@ Codexでは、導入後に `/hooks` を開いて定義を確認し、利用者�
 アプリを開いただけでモデル要求を生成しないため、完全な無入力自動実行ではなく、
 `startup|clear` 後の最初のモデル要求へ判断契約を注入する。再installやclone移動で
 commandの定義が変わった場合は、再度trustが必要になることがある。フックの登録先と
-Claude Code向けスキル本体はClaude Codeがパスを決めるため `.claude/` に残り、Codex
-向けの配置はmetadataを持つスキルに限る。
+Claude Code向けスキル本体とスラッシュコマンドはClaude Codeがパスを決めるため `.claude/` に残り、Codex
+向けの配置はmetadataを持つスキルに限る（偽のスラッシュコマンドを `.agents/` へ置かない）。
 
 リポジトリ名が `claude-token-saver` でディレクトリ名が `.token-saver` であるのは意図的で、
 管理するデータをツール中立にする一歩である。
@@ -170,6 +175,23 @@ Codex project hookを使う場合は、導入先で次を実行したあと、Co
 hookは最初のモデル要求へ追加contextを渡すだけで、アプリを開いただけの無入力モデル実行は
 開始しない。再install、clone移動、commandの更新、uninstall後の再導入では定義のhashが
 変わり、再確認が必要になることがある。
+
+
+## スラッシュコマンド（Claude Code）
+
+導入後、Claude Code から次を呼べる。実体は薄い Markdown で、ロジックは既存の
+`.token-saver/*.sh` や Stop フック登録済みスクリプトへ委譲する。
+
+| コマンド | 実行する入口 |
+| --- | --- |
+| `/token-saver:report` | `./.token-saver/token-report.sh` |
+| `/token-saver:calibrate` | 確認済み snapshot のときだけ `./.token-saver/token-calibrate.sh --apply` |
+| `/token-saver:suggest-session-cut` | Stop 相当の stdin で `suggest-session-cut.sh`（settings 登録パス、またはクローンの `scripts/`） |
+
+ソース定義はリポジトリの `commands/token-saver/`。install はパッケージごと
+`.claude/commands/token-saver` へ置く。既存スキルは残し、コマンドは追加の入口である。
+**Codex には相当するスラッシュを作らない**（`.agents/skills` のみ）。
+
 
 ## セッション切り提案（suggest-session-cut）
 

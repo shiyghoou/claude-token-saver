@@ -1873,3 +1873,66 @@ test_差し替えられたtoken_calibrate_entrypointは消さない() {
   assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "token-calibrate" "安全側の警告"
   assert_file_exists "$TARGET/.token-saver/installed.json" "取り残し台帳"
 }
+
+
+# --- Issue #38: namespaced slash commands ------------------------------------
+
+test_スラッシュコマンドパッケージのリンクを外す() {
+  _setup_target
+  _run_install
+  assert_file_exists "$TARGET/.claude/commands/token-saver/report.md"
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.claude/commands/token-saver"
+}
+
+test_コピー設置したスラッシュコマンドを外す() {
+  _setup_target
+  CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >/dev/null 2>&1
+  assert_file_exists "$TARGET/.claude/commands/token-saver/.claude-token-saver"
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "終了コード"
+  assert_file_missing "$TARGET/.claude/commands/token-saver"
+}
+
+test_差し替えられたスラッシュコマンドは消さない() {
+  _setup_target
+  _run_install
+  rm -f "$TARGET/.claude/commands/token-saver"
+  mkdir -p "$TARGET/.claude/commands/token-saver"
+  printf '利用者\n' >"$TARGET/.claude/commands/token-saver/report.md"
+  _run_uninstall
+  assert_file_exists "$TARGET/.claude/commands/token-saver/report.md"
+  assert_contains "$(cat "$TARGET/.claude/commands/token-saver/report.md")" "利用者" "差し替え保護"
+  assert_file_exists "$TARGET/.token-saver/installed.json"
+}
+
+test_スラッシュコマンドのinstall_uninstall往復() {
+  _setup_target
+  _run_install
+  assert_contains "$(cat "$TARGET/.gitignore")" ".claude/commands/token-saver" "install gitignore"
+  _run_uninstall
+  assert_eq "0" "$UNINSTALL_STATUS" "uninstall"
+  assert_file_missing "$TARGET/.claude/commands/token-saver"
+  if [ -f "$TARGET/.gitignore" ]; then
+    assert_not_contains "$(_gitignore_text)" ".claude/commands/token-saver" "uninstall gitignore"
+  fi
+}
+
+test_guessで自前コマンドリンクだけ外す() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/commands"
+  ln -s "$REPO_ROOT/commands/token-saver" "$TARGET/.claude/commands/token-saver"
+  rm -rf "$TARGET/.token-saver"
+  _run_uninstall_guess
+  assert_file_missing "$TARGET/.claude/commands/token-saver"
+}
+
+test_uninstallは_agentsへコマンドを探さない() {
+  _setup_target
+  _run_install
+  mkdir -p "$TARGET/.agents/commands/token-saver"
+  printf 'x\n' >"$TARGET/.agents/commands/token-saver/report.md"
+  _run_uninstall
+  assert_file_exists "$TARGET/.agents/commands/token-saver/report.md"
+}

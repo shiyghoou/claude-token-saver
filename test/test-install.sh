@@ -783,6 +783,7 @@ test_末尾に改行が無い_gitignore_でも行が結合しない() {
   assert_not_contains "$(cat "$TARGET/.gitignore")" "node_modules/#" ".gitignore"
 }
 
+
 # --- 以下、敵対的レビューの指摘に対する回帰テスト -----------------------------
 
 GITIGNORE_START="# claude-token-saver (install.sh が追記。uninstall.sh で削除される)"
@@ -794,8 +795,18 @@ _clone_repo() {
   mkdir -p "$dest"
   cp -R "$REPO_ROOT/install.sh" "$REPO_ROOT/uninstall.sh" "$dest/"
   local d
-  for d in scripts skills lib; do
-    [ -d "$REPO_ROOT/$d" ] && cp -R "$REPO_ROOT/$d" "$dest/"
+  for d in scripts skills lib commands; do
+    [ -d "$REPO_ROOT/$d" ] || continue
+    # 作業ツリーに誤って残った __pycache__ を被験クローンへ持ち込まない。
+    # install 本体が汚染するかの検証を壊さないための隔離である。
+    mkdir -p "$dest/$d"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --exclude '__pycache__' --exclude '*.pyc' "$REPO_ROOT/$d/" "$dest/$d/"
+    else
+      cp -R "$REPO_ROOT/$d/." "$dest/$d/"
+      find "$dest/$d" -depth -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+      find "$dest/$d" -type f -name '*.pyc' -delete 2>/dev/null || true
+    fi
   done
   return 0
 }
@@ -1564,10 +1575,16 @@ test_設置したものを台帳へ記録する() {
 test_クローンに__pycache__を書き散らさない() {
   _setup_target
   local clone="$TEST_TMP/clone"
+  # 作業ツリー側の誤残を持ち込ませないことと、install 実行後に生成しないことの両方を見る。
+  mkdir -p "$REPO_ROOT/lib/__pycache__"
+  printf 'pollute\n' >"$REPO_ROOT/lib/__pycache__/cts-test-pollute.pyc"
+  # 失敗時も残さない。並列実行では各ランナーが別 repo root を持つ前提である。
+  trap 'rm -rf "$REPO_ROOT/lib/__pycache__"' RETURN
   _clone_repo "$clone"
+  assert_file_missing "$clone/lib/__pycache__" "clone へ持ち込まない"
   bash "$clone/install.sh" "$TARGET" >/dev/null 2>&1
   # 導入先から呼ばれる道具である。利用者のクローンに生成物を残さない。
-  assert_file_missing "$clone/lib/__pycache__"
+  assert_file_missing "$clone/lib/__pycache__" "install 後も生成しない"
 }
 
 test_利用者が張った同名スキルのリンクは上書きしない() {
@@ -2259,4 +2276,105 @@ test_混在改行の_gitignoreは往復で変更しない() {
   bash "$REPO_ROOT/uninstall.sh" "$TARGET" >/dev/null 2>&1
   cmp -s "$TEST_TMP/gitignore.before" "$TARGET/.gitignore" ||
     _fail "混在改行の .gitignore を往復で変更した"
+}
+
+
+# --- Issue #38: namespaced slash commands (directory package) -----------------
+
+test_スラッシュコマンドパッケージをリンクする() {
+  _setup_target
+  _run_install
+  assert_eq "0" "$INSTALL_STATUS" "終了コード"
+  [ -L "$TARGET/.claude/commands/token-saver" ] ||
+    _fail "commands/token-saver がシンボリックリンクではない"
+  assert_eq "$REPO_ROOT/commands/token-saver" \
+    "$(readlink "$TARGET/.claude/commands/token-saver")" "コマンドリンク先"
+  assert_file_exists "$TARGET/.claude/commands/token-saver/report.md"
+  assert_file_exists "$TARGET/.claude/commands/token-saver/calibrate.md"
+  assert_file_exists "$TARGET/.claude/commands/token-saver/suggest-session-cut.md"
+}
+
+
+test_スラッシュコマンド定義は薄いentrypoint指示である() {
+  local body
+  body="$(cat "$REPO_ROOT/commands/token-saver/report.md")"
+  assert_contains "$body" "./.token-saver/token-report.sh" "report entrypoint"
+  assert_not_contains "$body" "measure-token-usage.py" "report に計測本体を埋め込まない"
+
+  body="$(cat "$REPO_ROOT/commands/token-saver/calibrate.md")"
+  assert_contains "$body" "./.token-saver/token-calibrate.sh --apply" "calibrate entrypoint"
+  assert_not_contains "$body" "apply_token_calibration" "calibrate に適用ロジックを埋め込まない"
+
+  body="$(cat "$REPO_ROOT/commands/token-saver/suggest-session-cut.md")"
+  assert_contains "$body" "suggest-session-cut.sh" "suggest-session-cut 実体"
+  assert_not_contains "$body" "def " "suggest-session-cut に Python 定義を埋め込まない"
+}
+
+test_スラッシュコマンドを台帳とgitignoreへ記録する() {
+  _setup_target
+  _run_install
+  ledger="$(cat "$TARGET/.token-saver/installed.json")"
+  assert_contains "$ledger" '"name": "token-saver"' "台帳 name"
+  assert_contains "$ledger" '"commands"' "台帳 commands キー"
+  assert_contains "$(cat "$TARGET/.gitignore")" \
+    ".claude/commands/token-saver" ".gitignore"
+  rc=0
+  python3 "$REPO_ROOT/lib/ledger.py" has-record \
+    "$TARGET/.token-saver/installed.json" commands || rc=$?
+  assert_eq "0" "$rc" "has-record commands"
+}
+
+test_スラッシュコマンドをコピー配置できる() {
+  _setup_target
+  local status=0
+  CTS_NO_SYMLINK=1 bash "$INSTALL" "$TARGET" >"$TEST_TMP/.out" 2>&1 || status=$?
+  assert_eq "0" "$status" "終了コード"
+  [ ! -L "$TARGET/.claude/commands/token-saver" ] ||
+    _fail "CTS_NO_SYMLINK でもシンボリックリンクになっている"
+  assert_file_exists "$TARGET/.claude/commands/token-saver/report.md"
+  assert_file_exists "$TARGET/.claude/commands/token-saver/.claude-token-saver"
+  assert_contains "$(cat "$TARGET/.gitignore")" \
+    ".claude/commands/token-saver" ".gitignore"
+}
+
+test_利用者の同名コマンドディレクトリは触らない() {
+  _setup_target
+  mkdir -p "$TARGET/.claude/commands/token-saver"
+  printf '利用者のコマンド\n' >"$TARGET/.claude/commands/token-saver/report.md"
+  _run_install
+  assert_contains "$(cat "$TARGET/.claude/commands/token-saver/report.md")" \
+    "利用者のコマンド" "同名保護"
+  assert_not_contains "$(cat "$TARGET/.gitignore")" \
+    ".claude/commands/token-saver" ".gitignore"
+}
+
+test_スラッシュコマンドを_agentsへ置かない() {
+  _setup_target
+  _run_install
+  assert_file_missing "$TARGET/.agents/commands"
+  assert_file_missing "$TARGET/.agents/commands/token-saver"
+}
+
+test_Claudeのlegacy風コマンドリンクを現srcへ張り替える() {
+  _setup_target
+  old_repo="$TEST_TMP/old-repo"
+  old_link="$old_repo/commands/token-saver"
+  mkdir -p "$old_link" "$TARGET/.claude/commands"
+  printf '#!/usr/bin/env bash\n' >"$old_repo/install.sh"
+  printf 'old\n' >"$old_link/report.md"
+  ln -s "$old_link" "$TARGET/.claude/commands/token-saver"
+  _run_install
+  assert_eq "$REPO_ROOT/commands/token-saver" \
+    "$(readlink "$TARGET/.claude/commands/token-saver")" "Claude legacy command link"
+  assert_contains "$(cat "$TARGET/.gitignore")" \
+    ".claude/commands/token-saver" "Claude command .gitignore"
+}
+
+test_personal後のsharedがコマンドをgitignoreへ書く() {
+  _setup_target
+  _run_install_args --personal
+  assert_file_missing "$TARGET/.gitignore" "personal後の.gitignore"
+  _run_install_args --shared
+  assert_contains "$(cat "$TARGET/.gitignore")" \
+    ".claude/commands/token-saver" "shared後のコマンド.gitignore"
 }

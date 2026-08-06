@@ -10,6 +10,9 @@
 
 set -uo pipefail
 
+# lib/*.py を呼んでもクローンへ __pycache__ を残さない
+export PYTHONDONTWRITEBYTECODE=1
+
 # 物理パスで解決する。シンボリックリンク経由で呼ばれたときに綴りの違う
 # パスが登録され、実パス経由の再実行で二重登録になるのを防ぐ。
 CTS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -157,6 +160,66 @@ cts_destination_is_owned() {
     { [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; }
 }
 
+# Claude Code スラッシュコマンドは skills と同様にディレクトリパッケージで置く。
+# commands/token-saver/ → .claude/commands/token-saver → /token-saver:report など。
+looks_like_our_command_link() {
+  local link="$1" name="$2" home
+  [ "$(basename "$link")" = "$name" ] || return 1
+  [ "$(basename "$(dirname "$link")")" = "commands" ] || return 1
+  home="$(dirname "$(dirname "$link")")"
+  [ -f "$home/install.sh" ]
+}
+
+cts_place_command() {
+  local name="$1" src="$2" dest="$3" allow_legacy_link="${4:-0}" link recorded
+  placed_command=""
+  placed_mode=""
+
+  if [ -z "${CTS_NO_SYMLINK:-}" ] && [ -L "$dest" ] &&
+     [ "$(readlink "$dest")" = "$src" ]; then
+    placed_command=1
+    placed_mode=link
+    return 0
+  fi
+  if [ -L "$dest" ]; then
+    link="$(readlink "$dest")"
+    recorded="$(python3 "$CTS_HOME/lib/ledger.py" get-command "$LEDGER" "$name" | cut -d $'\037' -f1)"
+    if [ "$link" != "$recorded" ] &&
+       { [ -n "$recorded" ] || [ "$allow_legacy_link" != 1 ] ||
+         ! looks_like_our_command_link "$link" "$name"; }; then
+      warn "Claude Code コマンド $name は導入先が張ったリンクなので触らない（$link）"
+      return 0
+    fi
+  elif [ -d "$dest" ]; then
+    if [ ! -f "$dest/.claude-token-saver" ]; then
+      warn "Claude Code コマンド $name は導入先に既存のディレクトリがあるため触らない（.gitignore にも書かない）"
+      return 0
+    fi
+  elif [ -e "$dest" ]; then
+    warn "Claude Code コマンド $name は導入先に既存のファイルがあるため触らない（.gitignore にも書かない）"
+    return 0
+  fi
+
+  rm -rf "$dest"
+  placed_mode=link
+  if [ -z "${CTS_NO_SYMLINK:-}" ] && ln -s "$src" "$dest" 2>/dev/null; then
+    info "  Claude Code コマンドをリンクした: /$name:*"
+  else
+    cp -R "$src" "$dest" || die "Claude Code コマンド $name を配置できない"
+    printf 'claude-token-saver が配置したコピー。手で編集しない。\n' >"$dest/.claude-token-saver" ||
+      die "コマンド所有マーカーを書けない"
+    placed_mode=copy
+    info "  Claude Code コマンドをコピーで配置した: /$name:*"
+  fi
+  placed_command=1
+}
+
+cts_command_destination_is_owned() {
+  local src="$1" dest="$2"
+  { [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; } ||
+    { [ -d "$dest" ] && [ -f "$dest/.claude-token-saver" ]; }
+}
+
 cts_reject_managed_symlinks() {
   local path
   for path in \
@@ -164,6 +227,7 @@ cts_reject_managed_symlinks() {
     "$TARGET/.agents/skills" \
     "$TARGET/.claude" \
     "$TARGET/.claude/skills" \
+    "$TARGET/.claude/commands" \
     "$TARGET/.codex" \
     "$TARGET/.codex/hooks.json" \
     "$TARGET/$(cts_legacy_handoff_rel)" \
@@ -238,6 +302,8 @@ info "claude-token-saver を導入する: $TARGET"
 installed_skills=()
 claude_installed_skills=()
 codex_installed_skills=()
+installed_commands=()
+claude_installed_commands=()
 codex_hook_installed=0
 codex_hooks_created=0
 codex_dir_created=0
@@ -647,6 +713,41 @@ done
 [ "$found_skills" -gt 0 ] ||
   warn "skills/ にスキルが1つも無いため何も設置していない（クローンが不完全である）"
 
+# --- 3b. Claude Code スラッシュコマンド --------------------------------------
+
+mkdir -p "$TARGET/.claude/commands" || die "commands ディレクトリを作成できない"
+
+found_commands=0
+for command_dir in "$CTS_HOME"/commands/*/; do
+  [ -d "$command_dir" ] || continue
+  name="$(basename "$command_dir")"
+  case "$name" in
+    "" | . | .. | */*)
+      warn "コマンド名が不正なので設置しない: $name"
+      continue
+      ;;
+  esac
+  if ! find "$command_dir" -maxdepth 1 -type f -name '*.md' -print -quit 2>/dev/null | grep -q .; then
+    continue
+  fi
+  found_commands=$((found_commands + 1))
+  src="$(cd "$command_dir" && pwd)"
+  dest="$TARGET/.claude/commands/$name"
+  cts_place_command "$name" "$src" "$dest" 1
+  if [ -n "$placed_command" ]; then
+    python3 "$CTS_HOME/lib/ledger.py" add-command "$LEDGER" "$name" "$src" "$placed_mode" ||
+      die "台帳を更新できない"
+    installed_commands+=("$name")
+    claude_installed_commands+=("$name")
+    applied+=("コマンドパッケージ /$name:* を設置")
+  fi
+done
+
+[ "$found_commands" -gt 0 ] ||
+  warn "commands/ にコマンドが1つも無いため何も設置していない（クローンが不完全である）"
+
+
+
 fi
 
 if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
@@ -676,6 +777,20 @@ if [ "$do_shared" = 1 ] && [ "$do_personal" = 0 ]; then
     esac
   done < <(python3 "$CTS_HOME/lib/ledger.py" list-skills "$shared_ledger")
 
+  while IFS=$'\037' read -r name src _mode; do
+    case "$name" in
+      "" | . | .. | */*)
+        [ -z "$name" ] || warn "台帳のコマンド名が不正なので .gitignore に書かない: $name"
+        ;;
+      *)
+        installed_commands+=("$name")
+        if cts_command_destination_is_owned "$src" "$TARGET/.claude/commands/$name"; then
+          claude_installed_commands+=("$name")
+        fi
+        ;;
+    esac
+  done < <(python3 "$CTS_HOME/lib/ledger.py" list-commands "$shared_ledger")
+
   shared_codex_ledger="$TARGET/$(cts_ledger_rel)"
   if ! python3 "$CTS_HOME/lib/ledger.py" has-record "$shared_codex_ledger" codex_hooks &&
      python3 "$CTS_HOME/lib/ledger.py" has-record "$legacy_ledger" codex_hooks; then
@@ -695,8 +810,8 @@ if [ "$do_shared" = 1 ]; then
 #
 # ブロックは毎回作り直す。存在確認だけで済ませると、スキルが増えたときに
 # 無視行が追加されず、リンクが版管理対象として現れる。
-# 無視行を書くのは実際に設置したスキルだけに限る。触らなかったスキル
-# （導入先が自前で持っているもの）を無視すると、その版管理を静かに壊す。
+# 無視行を書くのは実際に設置したスキル・コマンドだけに限る。触らなかったものを
+# 無視すると、その版管理を静かに壊す。
 {
   printf '%s/\n' "$(cts_base_rel)"
   if [ "$codex_hooks_ignore" = 1 ]; then
@@ -707,6 +822,9 @@ if [ "$do_shared" = 1 ]; then
   done
   for name in ${codex_installed_skills[@]+"${codex_installed_skills[@]}"}; do
     printf '.agents/skills/%s\n' "$name"
+  done
+  for name in ${claude_installed_commands[@]+"${claude_installed_commands[@]}"}; do
+    printf '.claude/commands/%s\n' "$name"
   done
 } | python3 "$CTS_HOME/lib/gitignore-block.py" apply "$GITIGNORE"
 gitignore_status=$?

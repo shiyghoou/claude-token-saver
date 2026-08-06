@@ -5,6 +5,9 @@
 #   ledger.py get-skill  <ledger> <name>          # "src<US>mode" を1行、無ければ何も出さない
 #   ledger.py list-skills <ledger>                # "name<US>src<US>mode" を行ごと
 #                                                 # <US> は 0x1f。理由は FS の定義を見よ。
+#   ledger.py add-command  <ledger> <name> <src> <link|copy>
+#   ledger.py get-command  <ledger> <name>
+#   ledger.py list-commands <ledger>
 #   ledger.py set-flag   <ledger> <name> <0|1>
 #   ledger.py get-flag   <ledger> <name>          # 0 か 1 を出す
 #   ledger.py set-value  <ledger> token_report_source <value>
@@ -23,6 +26,7 @@
 #
 # 記録するもの:
 #   skills            設置したスキル（名前・リンク先・リンクかコピーか）
+#   commands          設置した Claude Code スラッシュコマンド（名前・リンク先・リンクかコピーか）
 #   hooks             settings.local.json へ登録したコマンド文字列そのもの
 #   gitignore_created install.sh が .gitignore を新規作成したか
 #   token_report_source target-local entrypoint が呼ぶ source clone 側 launcher
@@ -35,6 +39,9 @@ import json
 import errno
 import os
 import sys
+
+# 導入先から呼ばれる道具である。クローンに __pycache__ を書き散らさない。
+sys.dont_write_bytecode = True
 import tempfile
 
 
@@ -133,6 +140,8 @@ def has_record(path, kind):
         return False
     if kind == "skills":
         return isinstance(data.get("skills"), list)
+    if kind == "commands":
+        return isinstance(data.get("commands"), list)
     if kind == "hooks":
         return isinstance(data.get("hooks"), list)
     if kind == "codex_hooks":
@@ -140,6 +149,7 @@ def has_record(path, kind):
     # any: 認識できるキーが1つでも在れば、この導入先へ install した記録である。
     return (
         isinstance(data.get("skills"), list)
+        or isinstance(data.get("commands"), list)
         or isinstance(data.get("hooks"), list)
         or isinstance(data.get("codex_hooks"), list)
         or "gitignore_created" in data
@@ -176,7 +186,7 @@ def line_safe_name(name):
 def path_safe_name(name):
     """パスへ連結しても導入先の外へ出ない名前かを返す。
 
-    台帳の name はそのまま .claude/skills/<name> へ連結される。.. を通せば
+    台帳の name はそのまま .claude/skills/<name> や .claude/commands/<name> へ連結される。.. を通せば
     導入先の外のリンクを削除できてしまう。
     書くときに弾く。読むときの防御は uninstall.sh 側に置く（パスを組み立てる
     のは向こうであり、組み立てる場所で検べるのが筋である）。
@@ -240,6 +250,44 @@ def cmd_list_skills(path):
     return 0
 
 
+
+def cmd_add_command(path, name, src, mode):
+    if not line_safe_name(name) or not path_safe_name(name):
+        sys.stderr.write("コマンド名が台帳に載せられない: %r\n" % (name,))
+        return 1
+    data = load(path)
+    commands = [
+        c
+        for c in get_list(data, "commands")
+        if not (isinstance(c, dict) and c.get("name") == name)
+    ]
+    commands.append({"name": name, "src": src, "mode": mode})
+    data["commands"] = commands
+    save(path, data)
+    return 0
+
+
+def cmd_get_command(path, name):
+    for c in get_list(load(path), "commands"):
+        if isinstance(c, dict) and c.get("name") == name:
+            print(FS.join([line_safe(c.get("src", "")), line_safe(c.get("mode", ""))]))
+            return 0
+    return 0
+
+
+def cmd_list_commands(path):
+    for c in get_list(load(path), "commands"):
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name")
+        if not line_safe_name(name):
+            if name:
+                sys.stderr.write("台帳のコマンド名が行プロトコルに載せられないので無視する: %r\n" % (name,))
+            continue
+        print(FS.join([name, line_safe(c.get("src", "")), line_safe(c.get("mode", ""))]))
+    return 0
+
+
 def cmd_has_record(path, kind):
     return 0 if has_record(path, kind) else 1
 
@@ -286,6 +334,12 @@ def main(argv):
             return cmd_get_skill(path, rest[0])
         if cmd == "list-skills" and not rest:
             return cmd_list_skills(path)
+        if cmd == "add-command" and len(rest) == 3:
+            return cmd_add_command(path, *rest)
+        if cmd == "get-command" and len(rest) == 1:
+            return cmd_get_command(path, rest[0])
+        if cmd == "list-commands" and not rest:
+            return cmd_list_commands(path)
         if cmd == "set-flag" and len(rest) == 2:
             return cmd_set_flag(path, *rest)
         if cmd == "get-flag" and len(rest) == 1:
@@ -298,7 +352,7 @@ def main(argv):
             check_writable(path)
             return 0
         if cmd == "has-record" and len(rest) == 1 and rest[0] in (
-            "skills", "hooks", "codex_hooks", "any"
+            "skills", "commands", "hooks", "codex_hooks", "any"
         ):
             return cmd_has_record(path, rest[0])
     except OSError as e:
