@@ -132,6 +132,16 @@ module = runpy.run_path(engine_path)
 if mode == "median":
     values = [int(value) for value in sys.argv[3:]]
     print(module["median_integer"](values))
+elif mode == "percentile":
+    percentile = int(sys.argv[3])
+    values = []
+    for token in sys.argv[4:]:
+        if token == "None":
+            values.append(None)
+        else:
+            values.append(int(token))
+    result = module["percentile_integer"](values, percentile)
+    print("None" if result is None else result)
 elif mode == "compact":
     scan = module["scan_transcripts"]([sys.argv[3]], None)
     event = scan.compact_events[0]
@@ -172,6 +182,17 @@ test_外れ値を中央値から除外する() {
 test_偶数サンプルは中央二値の整数平均を切り捨てる() {
   output="$(_run_python_harness median 10 20 40 1000)"
   assert_eq "30" "$output" "偶数中央値"
+}
+
+test_percentile_integerはnearest_rankで整数を返す() {
+  output="$(_run_python_harness percentile 75 10 20 30 40 1000)"
+  assert_eq "40" "$output" "p75 nearest-rank"
+  output="$(_run_python_harness percentile 50 10 20 40 1000)"
+  assert_eq "20" "$output" "p50 nearest-rank"
+  output="$(_run_python_harness percentile 75)"
+  assert_eq "None" "$output" "空配列"
+  output="$(_run_python_harness percentile 75 0 -1 10 20)"
+  assert_eq "20" "$output" "非正値除外"
 }
 
 test_ゼロを含むcompact基準とゼロ回復を記録する() {
@@ -222,19 +243,31 @@ _fixture_with_calibration_data() {
   min_sessions="${3:-}"
   min_assistant_turns="${4:-}"
   cache_read="${5:-10}"
+  percentile="${6:-}"
+  exclude_below="${7:-}"
   FIXTURE_HOME="$TEST_TMP/calibration-home"
   FIXTURE_REPO="$TEST_TMP/calibration-repo"
   FIXTURE_REPORT="$TEST_TMP/calibration-report.md"
   mkdir -p "$FIXTURE_HOME/.claude/projects" "$FIXTURE_REPO/.git" "$FIXTURE_REPO/.claude"
 
   python3 - "$FIXTURE_HOME" "$FIXTURE_REPO" "$session_count" "$assistant_turns" \
-    "$min_sessions" "$min_assistant_turns" "$cache_read" <<'PYEOF'
+    "$min_sessions" "$min_assistant_turns" "$cache_read" "$percentile" "$exclude_below" <<'PYEOF'
 import json
 import os
 import sys
 from datetime import datetime, timezone
 
-home, repo, session_count, assistant_turns, min_sessions, min_assistant_turns, cache_read = sys.argv[1:]
+(
+    home,
+    repo,
+    session_count,
+    assistant_turns,
+    min_sessions,
+    min_assistant_turns,
+    cache_read,
+    percentile,
+    exclude_below,
+) = sys.argv[1:]
 session_count = int(session_count)
 assistant_turns = int(assistant_turns)
 cache_read = int(cache_read)
@@ -269,11 +302,16 @@ config = {
         "keep": "unchanged",
     }
 }
+calibration = {}
 if min_sessions and min_assistant_turns:
-    config["calibration"] = {
-        "min_sessions": int(min_sessions),
-        "min_assistant_turns": int(min_assistant_turns),
-    }
+    calibration["min_sessions"] = int(min_sessions)
+    calibration["min_assistant_turns"] = int(min_assistant_turns)
+if percentile:
+    calibration["percentile"] = int(percentile)
+if exclude_below != "":
+    calibration["exclude_below_assistant_turns"] = int(exclude_below)
+if calibration:
+    config["calibration"] = calibration
 with open(os.path.join(repo, ".claude", "token-saver.json"), "w", encoding="utf-8") as handle:
     json.dump(config, handle, ensure_ascii=False, indent=2)
     handle.write("\n")
@@ -567,7 +605,7 @@ test_既定の5セッション100ターン未満は促さない() {
 }
 
 test_設定で必要数を変更できる() {
-  _fixture_with_calibration_data 2 3 2 3
+  _fixture_with_calibration_data 2 3 2 3 10 "" 0
   _run_calibrate >/dev/null
   assert_contains "$(cat "$FIXTURE_REPORT")" "判定: **算出可能**" "設定閾値"
 }
@@ -584,10 +622,14 @@ test_算出可能なら中央値と現在値をレポートする() {
 }
 
 test_不正なcalibration設定は各項目を既定値へ戻す() {
-  _fixture_with_calibration_data 2 3 2 3
+  _fixture_with_calibration_data 2 3 2 3 10 "" 0
   cat >"$FIXTURE_REPO/.claude/token-saver.json" <<'EOF'
 {
-  "calibration": { "min_sessions": 0, "min_assistant_turns": 0 },
+  "calibration": {
+    "min_sessions": 0,
+    "min_assistant_turns": 0,
+    "exclude_below_assistant_turns": 0
+  },
   "suggest_session_cut": {
     "initial_cache_read": 111,
     "increment_cache_read": 222
@@ -650,7 +692,15 @@ assert data["baseline_cache_read"] == 200
 assert data["current_initial"] == 111
 assert data["current_increment"] == 222
 assert data["recommended_levels"] == [200, 400, 600]
-assert data["source"] == "メインセッションの重複排除後 cache_read 中央値"
+assert data["source"] == "メインセッションの重複排除後 cache_read p75（assistant_turns>=3 を母集団）"
+assert data["percentile"] == 75
+assert data["exclude_below_assistant_turns"] == 3
+assert data["sample_session_count"] == 5
+assert data["total_session_count"] == 5
+assert data["excluded_session_count"] == 0
+assert data["distribution"]["p75"] == 200
+assert data["concentration"]["top_n"] == 3
+assert "session" not in json.dumps(data["concentration"])
 assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z", data["generated_at"])
 assert re.fullmatch(r"[0-9a-f]{64}", data["fingerprint"])
 print("schema-ok")
@@ -706,6 +756,194 @@ test_snapshot本体symlinkを追従せず失敗する() {
   status=$?
   assert_ne "0" "$status" "snapshot本体symlinkの終了コード"
   assert_eq '{"fixture": "external"}' "$(cat "$external_snapshot")" "外部snapshot非変更"
+}
+
+_fixture_with_varied_cache_reads() {
+  FIXTURE_HOME="$TEST_TMP/calibration-varied-home"
+  FIXTURE_REPO="$TEST_TMP/calibration-varied-repo"
+  FIXTURE_REPORT="$TEST_TMP/calibration-varied-report.md"
+  mkdir -p "$FIXTURE_HOME/.claude/projects" "$FIXTURE_REPO/.git" "$FIXTURE_REPO/.claude"
+  percentile="${1:-75}"
+  exclude_below="${2:-3}"
+  python3 - "$FIXTURE_HOME" "$FIXTURE_REPO" "$percentile" "$exclude_below" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+home, repo, percentile, exclude_below = sys.argv[1:]
+key = "".join(char if char.isascii() and char.isalnum() else "-" for char in repo)
+project = os.path.join(home, ".claude", "projects", key)
+os.makedirs(project)
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+sessions = [
+    ("short-a", 2, 10),
+    ("short-b", 2, 12),
+    ("long-a", 5, 100),
+    ("long-b", 5, 200),
+    ("long-c", 5, 300),
+    ("long-d", 5, 400),
+    ("long-e", 5, 1000),
+]
+with open(os.path.join(project, "varied.jsonl"), "w", encoding="utf-8") as handle:
+    message = 0
+    for session_id, turns, cache_read in sessions:
+        for _ in range(turns):
+            row = {
+                "type": "assistant",
+                "timestamp": stamp,
+                "sessionId": session_id,
+                "message": {
+                    "id": "message-{}".format(message),
+                    "usage": {
+                        "input_tokens": 1,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": cache_read,
+                        "output_tokens": 1,
+                    },
+                    "content": [],
+                },
+            }
+            message += 1
+            handle.write(json.dumps(row) + "\n")
+with open(os.path.join(repo, ".claude", "token-saver.json"), "w", encoding="utf-8") as handle:
+    json.dump({
+        "calibration": {
+            "min_sessions": 5,
+            "min_assistant_turns": 20,
+            "percentile": int(percentile),
+            "exclude_below_assistant_turns": int(exclude_below),
+        },
+        "suggest_session_cut": {
+            "initial_cache_read": 111,
+            "increment_cache_read": 222,
+        },
+    }, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PYEOF
+}
+
+test_exclude_below_assistant_turnsで短命を除外しbaselineが上がる() {
+  _fixture_with_varied_cache_reads 75 3
+  _run_calibrate >/dev/null
+  assert_eq "ok" "$(python3 - "$FIXTURE_REPO/.token-saver/calibration/latest.json" <<'PYEOF'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["excluded_session_count"] == 2
+assert data["sample_session_count"] == 5
+assert data["total_session_count"] == 7
+# values = [500,1000,1500,2000,5000]; p75 rank=ceil(0.75*5)=4 -> 2000
+assert data["baseline_cache_read"] == 2000
+print("ok")
+PYEOF
+)" "短命除外後baseline"
+}
+
+test_exclude_belowが0なら短命を残す() {
+  _fixture_with_varied_cache_reads 75 0
+  _run_calibrate >/dev/null
+  assert_eq "ok" "$(python3 - "$FIXTURE_REPO/.token-saver/calibration/latest.json" <<'PYEOF'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["excluded_session_count"] == 0
+assert data["sample_session_count"] == 7
+assert data["exclude_below_assistant_turns"] == 0
+assert data["baseline_cache_read"] == 2000
+assert "assistant_turns>=" not in data["source"]
+print("ok")
+PYEOF
+)" "短命除外オフ"
+}
+
+test_フィルタ後本数でmin_sessionsを判定する() {
+  FIXTURE_HOME="$TEST_TMP/calibration-filter-home"
+  FIXTURE_REPO="$TEST_TMP/calibration-filter-repo"
+  FIXTURE_REPORT="$TEST_TMP/calibration-filter-report.md"
+  mkdir -p "$FIXTURE_HOME/.claude/projects" "$FIXTURE_REPO/.git" "$FIXTURE_REPO/.claude"
+  python3 - "$FIXTURE_HOME" "$FIXTURE_REPO" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+home, repo = sys.argv[1:]
+key = "".join(char if char.isascii() and char.isalnum() else "-" for char in repo)
+project = os.path.join(home, ".claude", "projects", key)
+os.makedirs(project)
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+sessions = [
+    ("a", 3, 100),
+    ("b", 3, 100),
+    ("c", 3, 100),
+    ("d", 3, 100),
+    ("e", 1, 100),
+]
+with open(os.path.join(project, "filter.jsonl"), "w", encoding="utf-8") as handle:
+    msg = 0
+    for sid, turns, cr in sessions:
+        for _ in range(turns):
+            handle.write(json.dumps({
+                "type": "assistant",
+                "timestamp": stamp,
+                "sessionId": sid,
+                "message": {
+                    "id": "m{}".format(msg),
+                    "usage": {
+                        "input_tokens": 1,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": cr,
+                        "output_tokens": 1,
+                    },
+                    "content": [],
+                },
+            }) + "\n")
+            msg += 1
+with open(os.path.join(repo, ".claude", "token-saver.json"), "w", encoding="utf-8") as handle:
+    json.dump({
+        "calibration": {
+            "min_sessions": 5,
+            "min_assistant_turns": 10,
+            "exclude_below_assistant_turns": 3,
+            "percentile": 75,
+        },
+        "suggest_session_cut": {
+            "initial_cache_read": 111,
+            "increment_cache_read": 222,
+        },
+    }, handle)
+PYEOF
+  _run_calibrate >/dev/null
+  report="$(cat "$FIXTURE_REPORT")"
+  assert_contains "$report" "判定: **サンプル不足**" "フィルタ後min_sessions"
+  assert_contains "$report" "セッション数 4 件（必要 5 件）" "フィルタ後件数表示"
+}
+
+test_percentile設定キー変更でfingerprintが変わる() {
+  _fixture_with_calibration_data 5 100 5 100 10 75 0
+  _run_calibrate >/dev/null
+  fp75="$(python3 -c 'import json;print(json.load(open("'"$FIXTURE_REPO"'/.token-saver/calibration/latest.json"))["fingerprint"])')"
+  rm -rf "$FIXTURE_HOME" "$FIXTURE_REPO"
+  _fixture_with_calibration_data 5 100 5 100 10 90 0
+  _run_calibrate >/dev/null
+  fp90="$(python3 -c 'import json;print(json.load(open("'"$FIXTURE_REPO"'/.token-saver/calibration/latest.json"))["fingerprint"])')"
+  assert_ne "$fp75" "$fp90" "percentileでfingerprint変化"
+}
+
+test_レポートに分布と上位集中度を出す() {
+  _fixture_with_varied_cache_reads 75 3
+  _run_calibrate >/dev/null
+  report="$(cat "$FIXTURE_REPORT")"
+  assert_contains "$report" "採用パーセンタイル: p75" "percentile表示"
+  assert_contains "$report" "短命セッション除外: assistant_turns >= 3 を母集団" "除外表示"
+  assert_contains "$report" "| p50 |" "分布p50"
+  assert_contains "$report" "| p95 |" "分布p95"
+  assert_contains "$report" "採用: p75 = 2,000" "採用値"
+  assert_contains "$report" "上位3セッションで全体 cache_read の" "上位集中度"
+  assert_contains "$report" "母集団: サンプル 5 件 / 除外 2 件 / 期間内総セッション 7 件" "母集団表示"
 }
 
 _fingerprint_from_paths() {
