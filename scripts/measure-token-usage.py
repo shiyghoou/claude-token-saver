@@ -421,6 +421,26 @@ def is_token_count(value):
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def safe_agent_id(value):
+    if not isinstance(value, str) or not value or len(value) > 200:
+        return None
+    if (
+        any(ch in value for ch in "\"'{}[]\\`|/")
+        or has_unsafe_text(value)
+        or credential_shaped(value)
+        or path_shaped_metadata(value)
+    ):
+        return None
+    return value
+
+
+def agent_id_from_sub_path(path):
+    base = os.path.basename(path)
+    if base.endswith(".jsonl"):
+        base = base[: -len(".jsonl")]
+    return safe_agent_id(base)
+
+
 def safe_int(value):
     if not is_token_count(value):
         return 0
@@ -500,6 +520,18 @@ def median_non_negative_integer(values):
     if len(ordered) % 2:
         return ordered[middle]
     return (ordered[middle - 1] + ordered[middle]) // 2
+
+
+def fixed_cost_summary(values):
+    ordered = [value for value in values if isinstance(value, int) and value >= 0]
+    if not ordered:
+        return None
+    return {
+        "median": median_non_negative_integer(ordered),
+        "min": min(ordered),
+        "max": max(ordered),
+        "count": len(ordered),
+    }
 
 
 def calibration_prompt_key(session_count, assistant_turns, min_sessions, min_turns):
@@ -878,16 +910,16 @@ class Scan:
         self.read_paths = Counter()
         self.read_ext = Counter()
         self.agent_calls = Counter()
-        self.agent_results = Counter()
-        self.agent_tokens = defaultdict(int)
-        self.agent_models = defaultdict(Counter)
+        self.agent_id_types = {}  # agentId -> type str
         self.agent_usage = defaultdict(Usage)
         self.agent_usage_total = Usage()
-        self.agent_max = defaultdict(int)
-        self.agent_total = 0
+        self.agent_log_counts = Counter()  # type -> log files attributed
+        self.agent_fixed_costs = []  # list[int]
         self.main_tool_results = []
         self.compact_events = []
         self.sub_files = 0
+        self.sub_files_with_usage = 0
+        self.sub_unresolved_logs = 0
         self.sub_mcp_calls = Counter()
         self.scanned_dirs = []
         self.fell_back = False
@@ -1091,6 +1123,9 @@ def scan_transcripts(paths, since):
                                 sanitize_name(tool_input.get("subagent_type")) or "(既定)"
                             )
                             scan.agent_calls[subagent] += 1
+                            agent_id = safe_agent_id(tool_input.get("agentId"))
+                            if agent_id and agent_id not in scan.agent_id_types:
+                                scan.agent_id_types[agent_id] = subagent
                         elif name in ("Read", "NotebookRead"):
                             target = tool_input.get("file_path") or tool_input.get(
                                 "notebook_path"
@@ -1114,26 +1149,90 @@ def scan_transcripts(paths, since):
                     mark_matching_tool_results(scan, session_key, request_id)
 
                 result = entry.get("toolUseResult")
-                if (
-                    isinstance(result, dict)
-                    and is_token_count(result.get("totalTokens"))
-                    and result.get("agentType")
-                ):
-                    tokens = result["totalTokens"]
-                    subagent = sanitize_name(result.get("agentType")) or "(不明)"
-                    scan.agent_total += tokens
-                    scan.agent_tokens[subagent] += tokens
-                    scan.agent_results[subagent] += 1
-                    scan.agent_max[subagent] = max(scan.agent_max[subagent], tokens)
-                    model = sanitize_model(result.get("resolvedModel")) or "(不明)"
-                    scan.agent_models[subagent][model] += 1
-                    usage = result.get("usage")
-                    if isinstance(usage, dict):
-                        one = Usage()
-                        one.add_raw(usage)
-                        scan.agent_usage[subagent] += one
-                        scan.agent_usage_total += one
+                if isinstance(result, dict):
+                    agent_id = safe_agent_id(result.get("agentId"))
+                    if agent_id and agent_id not in scan.agent_id_types:
+                        subagent = sanitize_name(result.get("agentType")) or "(不明)"
+                        scan.agent_id_types[agent_id] = subagent
     return scan
+
+
+def scan_subagent_transcripts(scan, paths, since):
+    seen_messages = set()
+    for path in paths:
+        try:
+            handle = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        file_agent_id = agent_id_from_sub_path(path)
+        accepted_usage = False
+        fixed_cost = None
+        line_seen = False
+        with handle:
+            for line in handle:
+                scan.lines += 1
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+
+                stamp = parse_ts(entry.get("timestamp"))
+                if since is not None:
+                    if stamp is None:
+                        continue
+                    if stamp < since:
+                        continue
+                line_seen = True
+
+                entry_agent_id = safe_agent_id(entry.get("agentId"))
+                if entry_agent_id:
+                    file_agent_id = entry_agent_id
+
+                message = entry.get("message")
+                if entry.get("type") != "assistant" or not isinstance(message, dict):
+                    continue
+                usage = message.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                message_id = dedup_scalar(message.get("id"))
+                if message_id is None:
+                    key = ("sub", path, fallback_message_key(entry, usage))
+                else:
+                    key = ("sub", "id", message_id)
+                if key in seen_messages:
+                    if message_id is not None:
+                        scan.skipped_dupes += 1
+                    else:
+                        scan.skipped_fallback_dupes += 1
+                    continue
+                seen_messages.add(key)
+                one = Usage()
+                one.add_raw(usage)
+                if fixed_cost is None:
+                    fixed_cost = one.input + one.cache_creation + one.cache_read
+                agent_type = "(不明)"
+                if file_agent_id and file_agent_id in scan.agent_id_types:
+                    agent_type = scan.agent_id_types[file_agent_id]
+                scan.agent_usage[agent_type] += one
+                scan.agent_usage_total += one
+                accepted_usage = True
+
+        if not line_seen and since is not None:
+            # 期間内行が無いファイルは「読めたログ」に入れない
+            continue
+        scan.sub_files += 1
+        agent_type = "(不明)"
+        if file_agent_id and file_agent_id in scan.agent_id_types:
+            agent_type = scan.agent_id_types[file_agent_id]
+        else:
+            scan.sub_unresolved_logs += 1
+        scan.agent_log_counts[agent_type] += 1
+        if accepted_usage:
+            scan.sub_files_with_usage += 1
+        if fixed_cost is not None:
+            scan.agent_fixed_costs.append(fixed_cost)
 
 
 def disabled_plugins():
@@ -1433,7 +1532,8 @@ def build_diagnostics(scan, calibration, main_paths, sub_paths):
     configured = [row["name"] for row in mcp_rows]
     mcp_classification = classify_unused_mcp(configured, used)
 
-    agent_ratio = (scan.agent_total / float(main_total)) if main_total else 0.0
+    agent_usage_total = scan.agent_usage_total.total
+    agent_ratio = (agent_usage_total / float(main_total)) if main_total else 0.0
     compact_events = []
     for event in scan.compact_events:
         compact_events.append({
@@ -1451,9 +1551,12 @@ def build_diagnostics(scan, calibration, main_paths, sub_paths):
             "sessions_exceeding_level2": sessions,
             "mcp": mcp_classification,
             "agent_calls": sum(scan.agent_calls.values()),
-            "agent_results": sum(scan.agent_results.values()),
-            "agent_total_tokens": scan.agent_total,
+            "agent_log_files": scan.sub_files,
+            "agent_total_tokens": agent_usage_total,
             "agent_main_ratio": agent_ratio,
+            "agent_fixed_median": (
+                fixed_cost_summary(scan.agent_fixed_costs) or {}
+            ).get("median"),
             "compact_events": compact_events,
             "image_tokens": "未計測",
         },
@@ -1586,19 +1689,36 @@ def build_report(
     add("")
     rows = [
         ["main", *scan.main.row()],
-        [
-            "subagent usage",
-            *scan.agent_usage_total.row(),
-        ],
+        ["subagent message.usage", *scan.agent_usage_total.row()],
     ]
-    lines.extend(table(["区分", "input", "cache_creation", "cache_read", "output", "usage合計"], rows))
+    lines.extend(table(
+        ["区分", "input", "cache_creation", "cache_read", "output", "usage合計"],
+        rows,
+    ))
     add(f"- main 合計: **{fmt(scan.main.total)}**")
-    add(f"- subagent `toolUseResult.totalTokens` 合計: **{fmt(scan.agent_total)}**")
-    if scan.sub_files:
+    add(
+        f"- subagent `message.usage` 合計（別枠）: **{fmt(scan.agent_usage_total.total)}**"
+    )
+    launches = sum(scan.agent_calls.values())
+    add(f"- サブエージェント起動: {fmt(launches)}")
+    add(
+        f"- 読めたログ: {fmt(scan.sub_files)} 本"
+        f"（`<session>/subagents/`、うち usage あり {fmt(scan.sub_files_with_usage)} 本）"
+    )
+    add(f"- 型未解決ログ: {fmt(scan.sub_unresolved_logs)} 本")
+    add(
+        "- 注意: この区間のサブエージェント集合は完全母集団ではない。"
+        "欠測分は平均値で補完しない。"
+    )
+    fixed = fixed_cost_summary(scan.agent_fixed_costs)
+    if fixed:
         add(
-            f"- `<session>/subagents/` の詳細ログ {scan.sub_files} 本は別枠で扱い、"
-            "親の合計へ二重計上しない。"
+            "- 起動固定コスト（各ログの初回 assistant 入力:"
+            " input+cache_creation+cache_read）:"
+            f" 中央値 {fmt(fixed['median'])} / 最小 {fmt(fixed['min'])}"
+            f" / 最大 {fmt(fixed['max'])} / 標本数: {fmt(fixed['count'])}"
         )
+        add("- 起動固定コストは診断用であり、上記 usage 合計へ二重加算しない。")
     add("")
 
     add("## モデルとサブエージェント")
@@ -1609,26 +1729,40 @@ def build_report(
     ], args.top)
     lines.extend(table(["model", "input", "cache_creation", "cache_read", "output", "usage合計"], model_rows))
     agent_rows = []
+    types = set(scan.agent_calls) | set(scan.agent_usage) | set(scan.agent_log_counts)
     for subagent in sorted(
-        set(scan.agent_calls) | set(scan.agent_tokens),
-        key=lambda item: -scan.agent_tokens.get(item, 0),
+        types,
+        key=lambda item: (
+            -scan.agent_usage[item].total,
+            -scan.agent_calls.get(item, 0),
+            item,
+        ),
     ):
-        models = ", ".join(
-            f"{model} × {count}"
-            for model, count in scan.agent_models.get(subagent, Counter()).most_common(3)
-        ) or "-"
+        usage = scan.agent_usage[subagent]
         agent_rows.append(
             [
                 subagent,
                 scan.agent_calls.get(subagent, 0),
-                scan.agent_results.get(subagent, 0),
-                fmt(scan.agent_tokens.get(subagent, 0)),
-                models,
+                scan.agent_log_counts.get(subagent, 0),
+                fmt(usage.total),
+                fmt(usage.input),
+                fmt(usage.cache_creation),
+                fmt(usage.cache_read),
+                fmt(usage.output),
             ]
         )
     lines.extend(
         table(
-            ["subagent_type", "起動", "結果取得", "totalTokens", "resolvedModel"],
+            [
+                "subagent_type",
+                "起動",
+                "ログ",
+                "usage合計",
+                "input",
+                "cache_creation",
+                "cache_read",
+                "output",
+            ],
             top_rows(agent_rows, args.top),
         )
     )
@@ -1881,13 +2015,16 @@ def build_report(
                 )
             )
         add(
-            "- Agent: 起動 {} 件 / 結果 {} 件 / totalTokens {} / main比 {:.1%}".format(
+            "- Agent: 起動 {} 件 / ログ {} 本 / usage実測 {} / main比（usage実測） {:.1%}".format(
                 fmt(measured["agent_calls"]),
-                fmt(measured["agent_results"]),
+                fmt(measured["agent_log_files"]),
                 fmt(measured["agent_total_tokens"]),
                 measured["agent_main_ratio"],
             )
         )
+        fixed_med = measured.get("agent_fixed_median")
+        if fixed_med is not None:
+            add("- Agent 起動固定コスト中央値: {}".format(fmt(fixed_med)))
         add("- 画像入力のトークン消費は未計測です（画像を数値推定していない）。")
         add("")
 
@@ -2004,7 +2141,7 @@ def main():
     since = None if args.days == 0 else datetime.now(timezone.utc) - timedelta(days=args.days)
 
     scan = scan_transcripts(main_paths, since)
-    scan.sub_files = len(sub_paths)
+    scan_subagent_transcripts(scan, sub_paths, since)
     scan.sub_mcp_calls = scan_mcp_tool_names(sub_paths, since)
     scan.scanned_dirs = [os.path.basename(path) for path in project_dirs]
     scan.fell_back = fell_back

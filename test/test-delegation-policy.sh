@@ -92,7 +92,9 @@ test_段階4を疎結合の参考情報に限定する() {
 test_数値とモデル名を普遍化しない() {
   local body
   body="$(_skill_text)"
-  assert_contains "$body" "直接測定していない" "固定費の限界"
+  assert_not_contains "$body" "直接測定していない" "旧・未測定文言の除去"
+  assert_contains "$body" "token-report" "実測参考の参照"
+  assert_contains "$body" "環境" "環境固有"
   assert_contains "$body" "固定の損益分岐点" "固定閾値禁止"
   assert_contains "$body" "モデル名" "モデル名非固定"
   assert_contains "$body" "価格" "価格非固定"
