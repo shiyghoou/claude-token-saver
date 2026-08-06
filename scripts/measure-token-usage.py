@@ -1011,6 +1011,84 @@ def scan_transcripts(paths, since):
     return scan
 
 
+def scan_subagent_transcripts(scan, paths, since):
+    seen_messages = set()
+    for path in paths:
+        try:
+            handle = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        file_agent_id = agent_id_from_sub_path(path)
+        accepted_usage = False
+        fixed_cost = None
+        line_seen = False
+        with handle:
+            for line in handle:
+                scan.lines += 1
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+
+                stamp = parse_ts(entry.get("timestamp"))
+                if since is not None:
+                    if stamp is None:
+                        continue
+                    if stamp < since:
+                        continue
+                line_seen = True
+
+                entry_agent_id = safe_agent_id(entry.get("agentId"))
+                if entry_agent_id:
+                    file_agent_id = entry_agent_id
+
+                message = entry.get("message")
+                if entry.get("type") != "assistant" or not isinstance(message, dict):
+                    continue
+                usage = message.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                message_id = dedup_scalar(message.get("id"))
+                if message_id is None:
+                    key = ("sub", path, fallback_message_key(entry, usage))
+                else:
+                    key = ("sub", "id", message_id)
+                if key in seen_messages:
+                    if message_id is not None:
+                        scan.skipped_dupes += 1
+                    else:
+                        scan.skipped_fallback_dupes += 1
+                    continue
+                seen_messages.add(key)
+                one = Usage()
+                one.add_raw(usage)
+                if fixed_cost is None:
+                    fixed_cost = one.input + one.cache_creation + one.cache_read
+                agent_type = "(不明)"
+                if file_agent_id and file_agent_id in scan.agent_id_types:
+                    agent_type = scan.agent_id_types[file_agent_id]
+                scan.agent_usage[agent_type] += one
+                scan.agent_usage_total += one
+                accepted_usage = True
+
+        if not line_seen and since is not None:
+            # 期間内行が無いファイルは「読めたログ」に入れない
+            continue
+        scan.sub_files += 1
+        agent_type = "(不明)"
+        if file_agent_id and file_agent_id in scan.agent_id_types:
+            agent_type = scan.agent_id_types[file_agent_id]
+        else:
+            scan.sub_unresolved_logs += 1
+        scan.agent_log_counts[agent_type] += 1
+        if accepted_usage:
+            scan.sub_files_with_usage += 1
+        if fixed_cost is not None:
+            scan.agent_fixed_costs.append(fixed_cost)
+
+
 def disabled_plugins():
     disabled = set()
     for settings_path in (
@@ -1820,7 +1898,7 @@ def main():
     since = None if args.days == 0 else datetime.now(timezone.utc) - timedelta(days=args.days)
 
     scan = scan_transcripts(main_paths, since)
-    scan.sub_files = len(sub_paths)
+    scan_subagent_transcripts(scan, sub_paths, since)
     scan.sub_mcp_calls = scan_mcp_tool_names(sub_paths, since)
     scan.scanned_dirs = [os.path.basename(path) for path in project_dirs]
     scan.fell_back = fell_back
