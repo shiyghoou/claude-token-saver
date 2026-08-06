@@ -684,3 +684,52 @@ test_snapshot本体symlinkを追従せず失敗する() {
   assert_ne "0" "$status" "snapshot本体symlinkの終了コード"
   assert_eq '{"fixture": "external"}' "$(cat "$external_snapshot")" "外部snapshot非変更"
 }
+
+_fingerprint_from_paths() {
+  python3 - "$REPO_ROOT" "$@" <<'PYEOF'
+import os
+import runpy
+import sys
+
+repo_root = sys.argv[1]
+paths = sys.argv[2:]
+engine = runpy.run_path(os.path.join(repo_root, "scripts", "measure-token-usage.py"))
+args = type("Args", (object,), {})()
+args.days = 0
+args.all_projects = False
+settings = {"min_sessions": 5, "min_assistant_turns": 100}
+print(
+    engine["calibration_fingerprint"](
+        args, None, settings, paths, [], ["/proj"], False
+    )
+)
+PYEOF
+}
+
+test_fingerprintはファイルサイズ変化でも一致する() {
+  path_a="$TEST_TMP/fp-a.jsonl"
+  path_b="$TEST_TMP/fp-b.jsonl"
+  printf 'x\n' >"$path_a"
+  printf 'y\n' >"$path_b"
+  before="$(_fingerprint_from_paths "$path_a" "$path_b")"
+  printf 'xxxxx\n' >>"$path_a"
+  python3 - "$path_a" <<'PYEOF'
+import os, sys
+st = os.stat(sys.argv[1])
+os.utime(sys.argv[1], (st.st_atime, st.st_mtime + 5))
+PYEOF
+  after="$(_fingerprint_from_paths "$path_a" "$path_b")"
+  assert_eq "$before" "$after" "size/mtime変化でも指紋一致"
+}
+
+test_fingerprintはパス集合が変わると不一致になる() {
+  path_a="$TEST_TMP/fp-set-a.jsonl"
+  path_b="$TEST_TMP/fp-set-b.jsonl"
+  path_c="$TEST_TMP/fp-set-c.jsonl"
+  printf 'a\n' >"$path_a"
+  printf 'b\n' >"$path_b"
+  printf 'c\n' >"$path_c"
+  first="$(_fingerprint_from_paths "$path_a" "$path_b")"
+  second="$(_fingerprint_from_paths "$path_a" "$path_b" "$path_c")"
+  assert_ne "$first" "$second" "パス増加で指紋不一致"
+}
