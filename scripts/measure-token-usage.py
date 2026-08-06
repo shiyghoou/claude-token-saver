@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import sys
@@ -42,10 +43,11 @@ FALLBACK_WARNING = (
 CALIBRATION_DEFAULTS = {
     "min_sessions": 5,
     "min_assistant_turns": 100,
+    "percentile": 75,
+    "exclude_below_assistant_turns": 3,
 }
 CALIBRATION_MAX = 1000000
 DEFAULT_SESSION_CUT = 30000000
-CALIBRATION_SOURCE = "メインセッションの重複排除後 cache_read 中央値"
 TOKEN_SAVER_DIRNAME = ".token" + "-saver"
 HEAVY_TOOL_RESULT_BYTES = 4096
 
@@ -79,6 +81,26 @@ def calibration_positive_int(value, default):
     return default
 
 
+def calibration_percentile_int(value, default):
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= 99
+    ):
+        return value
+    return default
+
+
+def calibration_nonneg_int(value, default):
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= CALIBRATION_MAX
+    ):
+        return value
+    return default
+
+
 def load_calibration_settings(config_path):
     settings = dict(CALIBRATION_DEFAULTS)
     data = read_token_saver_config(config_path)
@@ -87,9 +109,31 @@ def load_calibration_settings(config_path):
     calibration = data.get("calibration")
     if not isinstance(calibration, dict):
         return settings
-    for key, default in CALIBRATION_DEFAULTS.items():
-        settings[key] = calibration_positive_int(calibration.get(key), default)
+    settings["min_sessions"] = calibration_positive_int(
+        calibration.get("min_sessions"), CALIBRATION_DEFAULTS["min_sessions"]
+    )
+    settings["min_assistant_turns"] = calibration_positive_int(
+        calibration.get("min_assistant_turns"),
+        CALIBRATION_DEFAULTS["min_assistant_turns"],
+    )
+    settings["percentile"] = calibration_percentile_int(
+        calibration.get("percentile"), CALIBRATION_DEFAULTS["percentile"]
+    )
+    settings["exclude_below_assistant_turns"] = calibration_nonneg_int(
+        calibration.get("exclude_below_assistant_turns"),
+        CALIBRATION_DEFAULTS["exclude_below_assistant_turns"],
+    )
     return settings
+
+
+def calibration_source(settings):
+    source = "メインセッションの重複排除後 cache_read p{}".format(
+        settings["percentile"]
+    )
+    exclude = settings["exclude_below_assistant_turns"]
+    if exclude == 0:
+        return source
+    return "{}（assistant_turns>={} を母集団）".format(source, exclude)
 
 
 def load_session_cut_settings(config_path):
@@ -127,6 +171,15 @@ def calibration_fingerprint(
         period,
         "min_sessions:{}".format(settings["min_sessions"]),
         "min_assistant_turns:{}".format(settings["min_assistant_turns"]),
+        "percentile:{}".format(
+            settings.get("percentile", CALIBRATION_DEFAULTS["percentile"])
+        ),
+        "exclude_below_assistant_turns:{}".format(
+            settings.get(
+                "exclude_below_assistant_turns",
+                CALIBRATION_DEFAULTS["exclude_below_assistant_turns"],
+            )
+        ),
         "selection:{}".format(selection),
     ):
         digest.update(value.encode("utf-8"))
@@ -155,10 +208,35 @@ def build_calibration(
     config_path = project_path(".claude", "token-saver.json")
     settings = load_calibration_settings(config_path)
     current = load_session_cut_settings(config_path)
-    values = [stats.cache_read for stats in scan.session_stats.values()]
-    baseline = median_integer(values)
-    session_count = len(scan.session_stats)
-    assistant_turns = sum(stats.assistant_turns for stats in scan.session_stats.values())
+    exclude = settings["exclude_below_assistant_turns"]
+    total_session_count = len(scan.session_stats)
+    values = []
+    excluded_session_count = 0
+    for stats in scan.session_stats.values():
+        cache_read = stats.cache_read
+        if (
+            not isinstance(cache_read, int)
+            or isinstance(cache_read, bool)
+            or cache_read <= 0
+        ):
+            continue
+        turns = stats.assistant_turns
+        if exclude != 0 and (
+            not isinstance(turns, int)
+            or isinstance(turns, bool)
+            or turns < exclude
+        ):
+            excluded_session_count += 1
+            continue
+        values.append(cache_read)
+    sample_session_count = len(values)
+    session_count = sample_session_count
+    assistant_turns = sum(
+        stats.assistant_turns for stats in scan.session_stats.values()
+    )
+    baseline = percentile_integer(values, settings["percentile"])
+    distribution = calibration_distribution(values)
+    concentration = calibration_concentration(values)
     eligible = (
         session_count >= settings["min_sessions"]
         and assistant_turns >= settings["min_assistant_turns"]
@@ -171,9 +249,16 @@ def build_calibration(
         "period": period,
         "min_sessions": settings["min_sessions"],
         "min_assistant_turns": settings["min_assistant_turns"],
+        "percentile": settings["percentile"],
+        "exclude_below_assistant_turns": settings["exclude_below_assistant_turns"],
         "session_count": session_count,
+        "sample_session_count": sample_session_count,
+        "total_session_count": total_session_count,
+        "excluded_session_count": excluded_session_count,
         "assistant_turns": assistant_turns,
         "baseline_cache_read": baseline,
+        "distribution": distribution,
+        "concentration": concentration,
         "current_initial": current["initial_cache_read"],
         "current_increment": current["increment_cache_read"],
         "scan_days": args.days,
@@ -194,7 +279,7 @@ def build_calibration(
             project_dirs,
             fell_back,
         ),
-        "source": CALIBRATION_SOURCE,
+        "source": calibration_source(settings),
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     result["prompt_available"] = False
@@ -356,6 +441,61 @@ def median_integer(values):
     if len(ordered) % 2:
         return ordered[middle]
     return (ordered[middle - 1] + ordered[middle]) // 2
+
+
+def percentile_integer(values, percentile):
+    ordered = sorted(
+        value
+        for value in values
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    )
+    if not ordered:
+        return None
+    if (
+        not isinstance(percentile, int)
+        or isinstance(percentile, bool)
+        or not 1 <= percentile <= 99
+    ):
+        return None
+    rank = int(math.ceil((percentile / 100.0) * len(ordered)))
+    if rank < 1:
+        rank = 1
+    if rank > len(ordered):
+        rank = len(ordered)
+    return ordered[rank - 1]
+
+
+def calibration_distribution(values):
+    return {
+        "p50": percentile_integer(values, 50),
+        "p75": percentile_integer(values, 75),
+        "p90": percentile_integer(values, 90),
+        "p95": percentile_integer(values, 95),
+    }
+
+
+def calibration_concentration(values, top_n=3):
+    ordered = sorted(
+        (
+            value
+            for value in values
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        ),
+        reverse=True,
+    )
+    cache_read_sum_all = sum(ordered)
+    cache_read_sum_top = sum(ordered[:top_n])
+    share = (
+        float(cache_read_sum_top) / float(cache_read_sum_all)
+        if cache_read_sum_all > 0
+        else 0.0
+    )
+    return {
+        "top_n": top_n,
+        "share": share,
+        "cache_read_sum_top": cache_read_sum_top,
+        "cache_read_sum_all": cache_read_sum_all,
+    }
 
 
 def median_non_negative_integer(values):
@@ -1554,16 +1694,74 @@ def build_report(
         add("## キャリブレーション")
         add("")
         add("- 対象期間: {}".format(calibration["period"]))
+        percentile = calibration.get("percentile")
+        exclude = calibration.get("exclude_below_assistant_turns")
+        if percentile is not None:
+            add("- 採用パーセンタイル: p{}".format(percentile))
+        if exclude == 0:
+            add("- 短命セッション除外: オフ")
+        elif exclude is not None:
+            add(
+                "- 短命セッション除外: assistant_turns >= {} を母集団".format(exclude)
+            )
         add(
             "- 判定条件: セッション {} 件以上 / assistant ターン {} 件以上".format(
                 calibration["min_sessions"], calibration["min_assistant_turns"]
             )
         )
         add(
-            "- 観測値: セッション {} 件 / assistant ターン {} 件".format(
+            "- 母集団: サンプル {} 件 / 除外 {} 件 / 期間内総セッション {} 件".format(
+                calibration.get("sample_session_count", calibration["session_count"]),
+                calibration.get("excluded_session_count", 0),
+                calibration.get(
+                    "total_session_count", calibration["session_count"]
+                ),
+            )
+        )
+        add(
+            "- 観測値: サンプル {} 件 / assistant ターン {} 件".format(
                 calibration["session_count"], calibration["assistant_turns"]
             )
         )
+        distribution = calibration.get("distribution") or {}
+        if distribution:
+            add("- 分布:")
+            add("")
+            lines.extend(
+                table(
+                    ["パーセンタイル", "cache_read"],
+                    [
+                        [
+                            label,
+                            fmt(distribution[key])
+                            if distribution.get(key) is not None
+                            else "—",
+                        ]
+                        for label, key in (
+                            ("p50", "p50"),
+                            ("p75", "p75"),
+                            ("p90", "p90"),
+                            ("p95", "p95"),
+                        )
+                    ],
+                )
+            )
+            if (
+                percentile is not None
+                and calibration.get("baseline_cache_read") is not None
+            ):
+                add(
+                    "- 採用: p{} = {}".format(
+                        percentile, fmt(calibration["baseline_cache_read"])
+                    )
+                )
+        concentration = calibration.get("concentration") or {}
+        if concentration.get("cache_read_sum_all"):
+            add(
+                "- 上位{}セッションで全体 cache_read の {:.1%}".format(
+                    concentration.get("top_n", 3), concentration.get("share", 0.0)
+                )
+            )
         if calibration["eligible"]:
             baseline, level_two, level_three = calibration["recommended_levels"]
             add("- 判定: **算出可能**")
@@ -1589,7 +1787,8 @@ def build_report(
             if calibration["assistant_turns"] < calibration["min_assistant_turns"]:
                 add(
                     "- 不足: assistant ターン {} 件（必要 {} 件）".format(
-                        calibration["assistant_turns"], calibration["min_assistant_turns"]
+                        calibration["assistant_turns"],
+                        calibration["min_assistant_turns"],
                     )
                 )
             if calibration["baseline_cache_read"] is None:

@@ -23,8 +23,13 @@ import ledger
 
 DEFAULT_SESSION_CUT = 30000000
 TOKEN_SAVER_DIRNAME = ".token" + "-saver"
-CALIBRATION_DEFAULTS = {"min_sessions": 5, "min_assistant_turns": 100}
-CALIBRATION_SOURCE = "メインセッションの重複排除後 cache_read 中央値"
+CALIBRATION_DEFAULTS = {
+    "min_sessions": 5,
+    "min_assistant_turns": 100,
+    "percentile": 75,
+    "exclude_below_assistant_turns": 3,
+}
+CALIBRATION_MAX = 1000000
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$")
 PROMPT_KEY_RE = re.compile(r"^[0-9][0-9-]*[0-9]$")
@@ -36,6 +41,36 @@ class CalibrationError(Exception):
 
 def positive_integer(value):
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def non_negative_integer(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def calibration_source(settings):
+    source = "メインセッションの重複排除後 cache_read p{}".format(
+        settings["percentile"]
+    )
+    exclude = settings["exclude_below_assistant_turns"]
+    if exclude == 0:
+        return source
+    return "{}（assistant_turns>={} を母集団）".format(source, exclude)
+
+
+def _valid_calibration_setting(key, value):
+    if key == "percentile":
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 1 <= value <= 99
+        )
+    if key == "exclude_below_assistant_turns":
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 <= value <= CALIBRATION_MAX
+        )
+    return positive_integer(value)
 
 
 def _reject_symlink_components(path):
@@ -99,8 +134,6 @@ def load_snapshot(path):
     snapshot = _read_json(path)
     if snapshot.get("eligible") is not True:
         raise CalibrationError("snapshotが適用可能ではない")
-    if snapshot.get("source") != CALIBRATION_SOURCE:
-        raise CalibrationError("snapshotの算出元が不正")
     _validate_timestamp(snapshot.get("generated_at"))
     fingerprint = snapshot.get("fingerprint")
     if not isinstance(fingerprint, str) or not FINGERPRINT_RE.match(fingerprint):
@@ -112,13 +145,67 @@ def load_snapshot(path):
         "min_sessions",
         "min_assistant_turns",
         "session_count",
+        "sample_session_count",
         "assistant_turns",
         "baseline_cache_read",
         "current_initial",
         "current_increment",
+        "percentile",
     ):
         if not positive_integer(snapshot.get(key)):
             raise CalibrationError("snapshotの数値が不正")
+    if not _valid_calibration_setting(
+        "percentile", snapshot["percentile"]
+    ) or snapshot["percentile"] > 99:
+        raise CalibrationError("snapshotの数値が不正")
+    if not _valid_calibration_setting(
+        "exclude_below_assistant_turns",
+        snapshot.get("exclude_below_assistant_turns"),
+    ):
+        raise CalibrationError("snapshotの数値が不正")
+    for key in ("total_session_count", "excluded_session_count"):
+        if not non_negative_integer(snapshot.get(key)):
+            raise CalibrationError("snapshotの数値が不正")
+    if snapshot["sample_session_count"] != snapshot["session_count"]:
+        raise CalibrationError("snapshotのsession数が不整合")
+    if snapshot["total_session_count"] < snapshot["session_count"]:
+        raise CalibrationError("snapshotのsession数が不整合")
+    if snapshot["excluded_session_count"] > snapshot["total_session_count"]:
+        raise CalibrationError("snapshotのsession数が不整合")
+
+    distribution = snapshot.get("distribution")
+    if not isinstance(distribution, dict):
+        raise CalibrationError("snapshotの分布が不正")
+    for key in ("p50", "p75", "p90", "p95"):
+        value = distribution.get(key)
+        if value is not None and not positive_integer(value):
+            raise CalibrationError("snapshotの分布が不正")
+
+    concentration = snapshot.get("concentration")
+    if not isinstance(concentration, dict):
+        raise CalibrationError("snapshotの集中度が不正")
+    if concentration.get("top_n") != 3:
+        raise CalibrationError("snapshotの集中度が不正")
+    share = concentration.get("share")
+    if not isinstance(share, (int, float)) or isinstance(share, bool) or not 0 <= share <= 1:
+        raise CalibrationError("snapshotの集中度が不正")
+    for key in ("cache_read_sum_top", "cache_read_sum_all"):
+        if not non_negative_integer(concentration.get(key)):
+            raise CalibrationError("snapshotの集中度が不正")
+    if concentration["cache_read_sum_top"] > concentration["cache_read_sum_all"]:
+        raise CalibrationError("snapshotの集中度が不正")
+
+    expected_source = calibration_source(
+        {
+            "percentile": snapshot["percentile"],
+            "exclude_below_assistant_turns": snapshot[
+                "exclude_below_assistant_turns"
+            ],
+        }
+    )
+    if snapshot.get("source") != expected_source:
+        raise CalibrationError("snapshotの算出元が不正")
+
     if not isinstance(snapshot.get("all_projects"), bool):
         raise CalibrationError("snapshotの対象選択が不正")
     if (
@@ -157,6 +244,10 @@ def validate_scan_identity(root, snapshot):
         settings = {
             "min_sessions": snapshot["min_sessions"],
             "min_assistant_turns": snapshot["min_assistant_turns"],
+            "percentile": snapshot["percentile"],
+            "exclude_below_assistant_turns": snapshot[
+                "exclude_below_assistant_turns"
+            ],
         }
         project_dirs, fell_back = engine["select_project_dirs"](args)
         main_paths, sub_paths = engine["transcript_paths"](project_dirs)
@@ -187,7 +278,7 @@ def _current_calibration_settings(config):
     for key, default in CALIBRATION_DEFAULTS.items():
         if key in calibration:
             value = calibration[key]
-            if not positive_integer(value):
+            if not _valid_calibration_setting(key, value):
                 raise CalibrationError("calibrationの判定条件が不正")
             values[key] = value
         else:

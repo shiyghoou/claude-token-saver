@@ -34,14 +34,26 @@ snapshot = {
     "period": "全期間",
     "min_sessions": 5,
     "min_assistant_turns": 100,
+    "percentile": 75,
+    "exclude_below_assistant_turns": 3,
     "session_count": 5,
+    "sample_session_count": 5,
+    "total_session_count": 5,
+    "excluded_session_count": 0,
     "assistant_turns": 100,
     "baseline_cache_read": 18000000,
+    "distribution": {"p50": 18000000, "p75": 18000000, "p90": 18000000, "p95": 18000000},
+    "concentration": {
+        "top_n": 3,
+        "share": 0.6,
+        "cache_read_sum_top": 54000000,
+        "cache_read_sum_all": 90000000,
+    },
     "current_initial": 30000000,
     "current_increment": 30000000,
     "recommended_levels": [18000000, 36000000, 54000000],
     "fingerprint": "a" * 64,
-    "source": "メインセッションの重複排除後 cache_read 中央値",
+    "source": "メインセッションの重複排除後 cache_read p75（assistant_turns>=3 を母集団）",
     "generated_at": "2026-08-04T00:00:00.000000Z",
     "scan_days": 0,
     "all_projects": False,
@@ -59,7 +71,12 @@ main_paths, sub_paths = engine["transcript_paths"](project_dirs)
 snapshot["fingerprint"] = engine["calibration_fingerprint"](
     args,
     None,
-    {"min_sessions": 5, "min_assistant_turns": 100},
+    {
+        "min_sessions": 5,
+        "min_assistant_turns": 100,
+        "percentile": 75,
+        "exclude_below_assistant_turns": 3,
+    },
     main_paths,
     sub_paths,
     project_dirs,
@@ -359,4 +376,66 @@ PYEOF
   assert_eq "0" "$STATUS" "再計測後のapply成功"
   assert_eq "4000" "$(_config_value initial_cache_read)" "再計測後の推奨値"
   unset FIXTURE_CLAUDE_CONFIG_DIR
+}
+
+test_旧中央値sourceのsnapshotを拒否する() {
+  _fixture_with_latest
+  python3 - "$LATEST" <<'PYEOF'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    snapshot = json.load(handle)
+snapshot["source"] = "メインセッションの重複排除後 cache_read 中央値"
+for key in (
+    "percentile",
+    "exclude_below_assistant_turns",
+    "sample_session_count",
+    "total_session_count",
+    "excluded_session_count",
+    "distribution",
+    "concentration",
+):
+    snapshot.pop(key, None)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(snapshot, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PYEOF
+  _run_calibrate_command --apply
+  assert_ne "0" "$STATUS" "旧中央値snapshot拒否"
+  assert_contains "$(cat "$TEST_TMP/token-calibrate.err")" "キャリブレーションを適用できません" "旧中央値エラー"
+}
+
+test_percentileがconfigと違えば拒否する() {
+  _fixture_with_latest
+  python3 - "$CONFIG" <<'PYEOF'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    config = json.load(handle)
+config["calibration"] = {"percentile": 90}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PYEOF
+  _run_calibrate_command --apply
+  assert_ne "0" "$STATUS" "percentile不一致拒否"
+}
+
+test_exclude_belowがconfigと違えば拒否する() {
+  _fixture_with_latest
+  python3 - "$CONFIG" <<'PYEOF'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    config = json.load(handle)
+config["calibration"] = {"exclude_below_assistant_turns": 0}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PYEOF
+  _run_calibrate_command --apply
+  assert_ne "0" "$STATUS" "exclude不一致拒否"
 }
