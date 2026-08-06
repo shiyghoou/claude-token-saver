@@ -537,8 +537,11 @@ def main(argv):
             raise
         finally:
             _release_calibration_state(state_context)
-    except (CalibrationError, OSError, TypeError, ValueError):
-        sys.stderr.write("キャリブレーションを適用できません\n")
+    except CalibrationError as e:
+        sys.stderr.write("キャリブレーションを適用できません: {}\n".format(e))
+        return 1
+    except (OSError, TypeError, ValueError) as e:
+        sys.stderr.write("キャリブレーションを適用できません: {}\n".format(type(e).__name__))
         return 1
     print("キャリブレーションを適用しました")
     return 0

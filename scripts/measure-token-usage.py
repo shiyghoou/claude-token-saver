@@ -189,15 +189,9 @@ def calibration_fingerprint(
         digest.update(directory.encode("utf-8", "surrogateescape"))
         digest.update(b"\0")
     for path in sorted(main_paths + sub_paths):
-        try:
-            metadata = os.stat(path)
-        except OSError:
+        if not os.path.lexists(path):
             continue
         digest.update(path.encode("utf-8", "surrogateescape"))
-        digest.update(b"\0")
-        digest.update(str(metadata.st_size).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(str(int(metadata.st_mtime * 1000000000)).encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest()
 

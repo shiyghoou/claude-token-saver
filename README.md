@@ -291,6 +291,10 @@ Stop payload と設定ファイルは末尾まで完全な JSON として検証�
 条件未達なら推奨値を算出せず、同じサンプル周期の案内は report と Stop フックで一度だけにする。
 アルゴリズムや指紋の判定条件キーが変わったあとは、旧 snapshot を適用せず再 `--calibrate` する。
 
+fingerprint は対象パス集合と計測条件の同一性を検証する（ファイルサイズや
+mtime は含めない）。アルゴリズム変更後の古い snapshot は適用できないので、
+`--calibrate` をやり直してから `--apply` する。
+
 この計測コマンドは `.claude/token-saver.json`、フック、既存の `suggest_session_cut` を変更しない。
 `snapshot` を確認して利用者が明示的に `./.token-saver/token-calibrate.sh --apply` を実行したときだけ、
 `suggest_session_cut.initial_cache_read` / `increment_cache_read` と `calibration.last_applied` を更新する。
