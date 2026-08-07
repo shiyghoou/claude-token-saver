@@ -2,7 +2,7 @@
 
 このプロジェクトで作業するエージェントは、以下の手順を必ず守る。
 
-リポジトリ概要は README.md を正とする。段階4（キャリブレーションと診断: `token-report --calibrate` / `token-calibrate --apply`）と段階5（委譲判断ガイド: `skills/delegation-policy`）は実装済みである。作業ルール本文はプロセス規律であり、機能仕様の詳細は README および `docs/` 配下を参照する。
+リポジトリ概要は README.md を正とする。段階4（キャリブレーションと診断: `token-report --calibrate` / `token-calibrate --apply`）と段階5（委譲判断ガイド: `skills/delegation-policy`）は実装済みである。作業ルール本文はプロセス規律であり、機能仕様の詳細は README および `docs/` 配下を参照する。引き継ぎ本文の信頼境界と残差リスクは README「pending の運用上の信頼境界（残差リスク）」および `skills/session-handoff/SKILL.md` を正とする。
 
 ## 1. Issueファースト
 

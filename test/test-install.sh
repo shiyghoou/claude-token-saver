@@ -293,8 +293,10 @@ test_Claudeのlegacy風managed_linkを現srcへ張り替える() {
   _setup_target
   old_repo="$TEST_TMP/old-repo"
   old_link="$old_repo/skills/delegation-policy"
-  mkdir -p "$old_link" "$TARGET/.claude/skills"
+  mkdir -p "$old_link" "$old_repo/lib" "$TARGET/.claude/skills"
   printf '#!/usr/bin/env bash\n' >"$old_repo/install.sh"
+  : >"$old_repo/uninstall.sh"
+  : >"$old_repo/lib/ledger.py"
   ln -s "$old_link" "$TARGET/.claude/skills/delegation-policy"
   _run_install
   assert_eq "0" "$INSTALL_STATUS" "終了コード"
@@ -2359,8 +2361,10 @@ test_Claudeのlegacy風コマンドリンクを現srcへ張り替える() {
   _setup_target
   old_repo="$TEST_TMP/old-repo"
   old_link="$old_repo/commands/token-saver"
-  mkdir -p "$old_link" "$TARGET/.claude/commands"
+  mkdir -p "$old_link" "$old_repo/lib" "$TARGET/.claude/commands"
   printf '#!/usr/bin/env bash\n' >"$old_repo/install.sh"
+  : >"$old_repo/uninstall.sh"
+  : >"$old_repo/lib/ledger.py"
   printf 'old\n' >"$old_link/report.md"
   ln -s "$old_link" "$TARGET/.claude/commands/token-saver"
   _run_install
@@ -2368,6 +2372,21 @@ test_Claudeのlegacy風コマンドリンクを現srcへ張り替える() {
     "$(readlink "$TARGET/.claude/commands/token-saver")" "Claude legacy command link"
   assert_contains "$(cat "$TARGET/.gitignore")" \
     ".claude/commands/token-saver" "Claude command .gitignore"
+}
+
+test_install_shだけの外来コマンドリンクは張り替えない() {
+  _setup_target
+  foreign="$TEST_TMP/foreign-cmd-repo"
+  mkdir -p "$foreign/commands/token-saver" "$TARGET/.claude/commands"
+  : >"$foreign/install.sh"
+  printf 'foreign\n' >"$foreign/commands/token-saver/report.md"
+  ln -s "$foreign/commands/token-saver" "$TARGET/.claude/commands/token-saver"
+  _run_install
+  assert_eq "$foreign/commands/token-saver" \
+    "$(readlink "$TARGET/.claude/commands/token-saver")" "外来コマンドリンク"
+  assert_contains "$(cat "$TARGET/.claude/commands/token-saver/report.md")" \
+    "foreign" "外来コマンドの内容"
+  assert_contains "$INSTALL_OUT" "警告" "出力"
 }
 
 test_personal後のsharedがコマンドをgitignoreへ書く() {

@@ -1343,7 +1343,7 @@ test_未導入なら利用者の空の_claude_ディレクトリを消さない(
 test_推測経路は_guess_を付けたときだけ通る() {
   _setup_target
   # 利用者が社内共有リポジトリの skills/ へ張ったリンク。install.sh という
-  # ありふれた名前が親に在るだけで「自分のもの」と誤認される形をしている。
+  # ありふれた名前が親に在るだけでは「自分のもの」とみなさない（#51）。
   local shared="$TEST_TMP/shared"
   mkdir -p "$shared/skills/session-handoff"
   printf '利用者の共有スキル\n' >"$shared/skills/session-handoff/SKILL.md"
@@ -1364,11 +1364,34 @@ test_推測経路は_guess_を付けたときだけ通る() {
   assert_contains "$(_hook_commands SessionStart)" "user-own" "SessionStart のコマンド"
   assert_contains "$UNINSTALL_OUT$UNINSTALL_ERR" "--guess" "出力"
 
-  # --guess を明示したときだけ従来の推測へ落ちる。
-  # 推測は利用者の設置物を巻き込む。それが opt-in である理由そのものである。
+  # --guess を明示したときだけフック推測へ落ちる。指紋の無い共有スキルリンクは残す。
+  _run_uninstall_guess
+  assert_file_exists "$TARGET/.claude/skills/session-handoff"
+  assert_contains "$(cat "$TARGET/.claude/skills/session-handoff/SKILL.md")" \
+    "利用者の共有スキル" "共有スキルの内容"
+  assert_not_contains "$(_settings_text)" "user-own" "settings.local.json"
+}
+
+test_guessはCTS指紋のスキルリンクだけ外す() {
+  _setup_target
+  local cts_clone="$TEST_TMP/cts-clone" foreign="$TEST_TMP/foreign"
+  mkdir -p "$cts_clone/skills/session-handoff" "$cts_clone/lib" \
+    "$foreign/skills/delegation-policy"
+  printf 'CTS由来\n' >"$cts_clone/skills/session-handoff/SKILL.md"
+  : >"$cts_clone/install.sh"
+  : >"$cts_clone/uninstall.sh"
+  : >"$cts_clone/lib/ledger.py"
+  printf '外来2\n' >"$foreign/skills/delegation-policy/SKILL.md"
+  : >"$foreign/install.sh"
+  mkdir -p "$TARGET/.claude/skills"
+  ln -s "$cts_clone/skills/session-handoff" "$TARGET/.claude/skills/session-handoff"
+  ln -s "$foreign/skills/delegation-policy" "$TARGET/.claude/skills/delegation-policy"
+
   _run_uninstall_guess
   assert_file_missing "$TARGET/.claude/skills/session-handoff"
-  assert_not_contains "$(_settings_text)" "user-own" "settings.local.json"
+  assert_file_exists "$TARGET/.claude/skills/delegation-policy"
+  assert_contains "$(cat "$TARGET/.claude/skills/delegation-policy/SKILL.md")" \
+    "外来2" "指紋なしリンクは残す"
 }
 
 test_二度目の取り外しでも推測に落ちない() {
@@ -1926,6 +1949,19 @@ test_guessで自前コマンドリンクだけ外す() {
   rm -rf "$TARGET/.token-saver"
   _run_uninstall_guess
   assert_file_missing "$TARGET/.claude/commands/token-saver"
+}
+
+test_guessはinstall_shだけの外来コマンドリンクを外さない() {
+  _setup_target
+  local foreign="$TEST_TMP/foreign-commands"
+  mkdir -p "$foreign/commands/token-saver" "$TARGET/.claude/commands"
+  : >"$foreign/install.sh"
+  printf '外来コマンド\n' >"$foreign/commands/token-saver/report.md"
+  ln -s "$foreign/commands/token-saver" "$TARGET/.claude/commands/token-saver"
+  _run_uninstall_guess
+  assert_file_exists "$TARGET/.claude/commands/token-saver"
+  assert_contains "$(cat "$TARGET/.claude/commands/token-saver/report.md")" \
+    "外来コマンド" "外来コマンドの内容"
 }
 
 test_uninstallは_agentsへコマンドを探さない() {
