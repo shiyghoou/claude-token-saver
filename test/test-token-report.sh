@@ -339,6 +339,40 @@ with open(os.path.join(project, "other.jsonl"), "w", encoding="utf-8") as fh:
 PYEOF
 }
 
+_replace_with_project_scoped_classifier_rows() {
+  rm -rf "$FIXTURE_HOME/.claude/projects"
+  python3 - "$FIXTURE_HOME" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+home = sys.argv[1]
+projects = os.path.join(home, ".claude", "projects")
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+row = {
+    "type": "user",
+    "timestamp": stamp,
+    "uuid": "same-classifier-uuid",
+    "classifierMetaLines": "PROJECT_SCOPED_CLASSIFIER_PRIVATE_SENTINEL",
+    "message": {"role": "user", "content": []},
+}
+
+first = os.path.join(projects, "private-project-scope-one")
+second = os.path.join(projects, "private-project-scope-two")
+subagents = os.path.join(first, "session", "subagents")
+os.makedirs(subagents, exist_ok=True)
+os.makedirs(second, exist_ok=True)
+for path in (
+    os.path.join(first, "parent.jsonl"),
+    os.path.join(subagents, "agent.jsonl"),
+    os.path.join(second, "parent.jsonl"),
+):
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+PYEOF
+}
+
 _add_unrelated_codex_project() {
   python3 - "$FIXTURE_CODEX_HOME" "$FIXTURE_REPO" <<'PYEOF'
 import json
@@ -415,6 +449,59 @@ with open(os.path.join(directory, "boundary.jsonl"), "w", encoding="utf-8") as h
         handle.write(json.dumps(row) + "\n")
 with open(os.path.join(directory, "broken.jsonl"), "w", encoding="utf-8") as handle:
     handle.write('{"CODEX_PRIVATE_SENTINEL":\n')
+PYEOF
+}
+
+_replace_with_non_monotonic_codex_rows() {
+  rm -rf "$FIXTURE_CODEX_HOME/sessions"
+  python3 - "$FIXTURE_CODEX_HOME" "$FIXTURE_REPO" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+codex_home, repo = sys.argv[1:]
+directory = os.path.join(codex_home, "sessions", "2026", "08", "08")
+os.makedirs(directory, exist_ok=True)
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def usage(inp, cached, cache_write, output, reasoning):
+    return {
+        "input_tokens": inp,
+        "cached_input_tokens": cached,
+        "cache_write_input_tokens": cache_write,
+        "output_tokens": output,
+        "reasoning_output_tokens": reasoning,
+        "total_tokens": inp + output,
+    }
+
+first_last = usage(100, 40, 10, 20, 5)
+first_total = usage(100, 40, 10, 20, 5)
+decreasing_total = usage(120, 39, 15, 30, 6)
+rejected_last = usage(900, 0, 0, 100, 0)
+later_last = usage(50, 10, 0, 10, 2)
+later_total = usage(150, 50, 20, 30, 8)
+rows = [
+    {"type": "session_meta", "payload": {
+        "source": {"subagent": {"other": "guardian"}}, "cwd": repo}},
+    {"type": "turn_context", "payload": {"model": "codex-auto-review"}},
+    {"type": "event_msg", "timestamp": stamp, "payload": {
+        "type": "token_count", "info": {
+            "last_token_usage": first_last, "total_token_usage": first_total}}},
+    {"type": "event_msg", "timestamp": stamp, "payload": {
+        "type": "token_count", "info": {
+            "last_token_usage": rejected_last,
+            "total_token_usage": decreasing_total}}},
+    {"type": "event_msg", "timestamp": stamp, "payload": {
+        "type": "token_count", "info": {
+            "last_token_usage": first_last, "total_token_usage": first_total}}},
+    {"type": "event_msg", "timestamp": stamp, "payload": {
+        "type": "token_count", "info": {
+            "last_token_usage": later_last, "total_token_usage": later_total}}},
+]
+with open(os.path.join(directory, "non-monotonic.jsonl"), "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
 PYEOF
 }
 
@@ -563,6 +650,16 @@ test_Claude_auto_classifierを親とsubagentから重複なく数える() {
   assert_contains "$report" "重複: **1**" "uuid重複"
 }
 
+test_Claude_auto_classifierの重複排除をproject内に限定する() {
+  _fixture
+  _replace_with_project_scoped_classifier_rows
+  _execute_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "呼出: **2**" "projectをまたぐ同一uuidは別呼出"
+  assert_contains "$report" "重複: **1**" "同一projectの親とsubagentだけ重複"
+  assert_not_contains "$report" "private-project-scope" "内部project scopeの秘匿"
+}
+
 test_Claude_auto_classifierの代替キーと欠測を区別する() {
   _run_report --days 1 >/dev/null 2>&1
   report="$(_report)"
@@ -614,6 +711,17 @@ test_Codex累積usage再掲を二重加算しない() {
   assert_contains "$report" "cumulative duplicate: **1**" "累積tuple重複"
   assert_contains "$report" "usage turn: **2**" "再掲非加算"
   assert_not_contains "$report" "Codex 合計: **300**" "再掲を含む合計"
+}
+
+test_Codex非単調累積usageを除外して後続の単調増加を数える() {
+  _fixture
+  _replace_with_non_monotonic_codex_rows
+  _execute_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "usage turn: **2**" "非単調tupleを除く受理ターン"
+  assert_contains "$report" "Codex 合計: **180**" "非単調tupleのlast usageを非加算"
+  assert_contains "$report" "usage invalid: **1**" "非単調tupleの不正件数"
+  assert_contains "$report" "cumulative duplicate: **1**" "完全再掲は重複扱い"
 }
 
 test_Codex識別条件不一致とusage欠測を推計しない() {

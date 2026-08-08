@@ -923,7 +923,7 @@ def classifier_tool_use_id(entry):
     return values[0]
 
 
-def record_claude_auto_classifier(scan, entry, since):
+def record_claude_auto_classifier(scan, entry, since, project_scope):
     meta = entry.get("classifierMetaLines")
     if entry.get("type") != "user" or not isinstance(meta, str) or not meta.strip():
         return
@@ -935,7 +935,7 @@ def record_claude_auto_classifier(scan, entry, since):
         return
     uuid = dedup_scalar(entry.get("uuid"))
     if uuid is not None:
-        key = ("uuid", uuid)
+        key = (project_scope, "uuid", uuid)
     else:
         session_id = dedup_scalar(entry.get("sessionId"))
         source_uuid = dedup_scalar(entry.get("sourceToolAssistantUUID"))
@@ -943,7 +943,7 @@ def record_claude_auto_classifier(scan, entry, since):
         if session_id is None or source_uuid is None or tool_use_id is None:
             scan.auto_classifier_identifier_missing += 1
             return
-        key = ("fallback", session_id, source_uuid, tool_use_id)
+        key = (project_scope, "fallback", session_id, source_uuid, tool_use_id)
     if key in scan._auto_classifier_keys:
         scan.auto_classifier_duplicates += 1
         return
@@ -1140,7 +1140,7 @@ def mark_matching_tool_results(scan, session_key, request_id):
             scan.main_tool_results[index]["usage_matched"] = True
 
 
-def scan_transcripts(paths, since):
+def scan_transcripts(paths, since, project_scopes):
     scan = Scan()
     seen_messages = set()
     for path in paths:
@@ -1158,7 +1158,9 @@ def scan_transcripts(paths, since):
                     continue
                 if not isinstance(entry, dict):
                     continue
-                record_claude_auto_classifier(scan, entry, since)
+                record_claude_auto_classifier(
+                    scan, entry, since, project_scopes[path]
+                )
 
                 stamp = parse_ts(entry.get("timestamp"))
                 if since is not None:
@@ -1263,7 +1265,7 @@ def scan_transcripts(paths, since):
     return scan
 
 
-def scan_subagent_transcripts(scan, paths, since):
+def scan_subagent_transcripts(scan, paths, since, project_scopes):
     seen_messages = set()
     for path in paths:
         try:
@@ -1283,7 +1285,9 @@ def scan_subagent_transcripts(scan, paths, since):
                     continue
                 if not isinstance(entry, dict):
                     continue
-                record_claude_auto_classifier(scan, entry, since)
+                record_claude_auto_classifier(
+                    scan, entry, since, project_scopes[path]
+                )
 
                 stamp = parse_ts(entry.get("timestamp"))
                 if since is not None:
@@ -1482,6 +1486,7 @@ def scan_codex_auto_review(args, since):
         guardian_session = False
         model = None
         seen_totals = set()
+        previous_total = None
         with handle:
             for line in handle:
                 try:
@@ -1535,7 +1540,13 @@ def scan_codex_auto_review(args, since):
                 if key in seen_totals:
                     stats.cumulative_duplicates += 1
                     continue
+                if previous_total is not None and any(
+                        current < previous
+                        for current, previous in zip(key, previous_total)):
+                    stats.usage_invalid += 1
+                    continue
                 seen_totals.add(key)
+                previous_total = key
                 stats.add_usage(last_usage)
                 stats.usage_turns += 1
         if guardian_session:
@@ -2405,17 +2416,22 @@ def select_project_dirs(args):
 def transcript_paths(project_dirs):
     main_paths = []
     sub_paths = []
+    project_scopes = {}
     for directory in project_dirs:
+        project_scope = hashlib.sha256(
+            os.path.realpath(directory).encode("utf-8", "surrogateescape")
+        ).digest()
         for base, _dirs, files in os.walk(directory):
             for name in files:
                 if not name.endswith(".jsonl"):
                     continue
                 full = os.path.join(base, name)
+                project_scopes[full] = project_scope
                 if os.path.dirname(full) == directory:
                     main_paths.append(full)
                 else:
                     sub_paths.append(full)
-    return main_paths, sub_paths
+    return main_paths, sub_paths, project_scopes
 
 
 def main():
@@ -2447,11 +2463,11 @@ def main():
         return 1
 
     project_dirs, fell_back = select_project_dirs(args)
-    main_paths, sub_paths = transcript_paths(project_dirs)
+    main_paths, sub_paths, project_scopes = transcript_paths(project_dirs)
     since = None if args.days == 0 else datetime.now(timezone.utc) - timedelta(days=args.days)
 
-    scan = scan_transcripts(main_paths, since)
-    scan_subagent_transcripts(scan, sub_paths, since)
+    scan = scan_transcripts(main_paths, since, project_scopes)
+    scan_subagent_transcripts(scan, sub_paths, since, project_scopes)
     scan.codex_auto = scan_codex_auto_review(args, since)
     scan.sub_mcp_calls = scan_mcp_tool_names(sub_paths, since)
     scan.scanned_dirs = [os.path.basename(path) for path in project_dirs]
