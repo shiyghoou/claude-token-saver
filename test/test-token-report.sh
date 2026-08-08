@@ -9,8 +9,10 @@ _fixture() {
   FIXTURE_REPO="$TEST_TMP/repo with a deliberately long name"
   FIXTURE_CONFIG="$TEST_TMP/alternate config"
   FIXTURE_OUT="$TEST_TMP/report.md"
+  FIXTURE_CODEX_HOME="$TEST_TMP/codex-home"
   mkdir -p "$FIXTURE_HOME/.claude/projects" "$FIXTURE_REPO/.git" \
-    "$FIXTURE_REPO-sibling" "$FIXTURE_REPO/relative-install"
+    "$FIXTURE_REPO-sibling" "$FIXTURE_REPO/relative-install" \
+    "$FIXTURE_CODEX_HOME/sessions"
 
   python3 - "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" <<'PYEOF'
 import json
@@ -106,6 +108,29 @@ rows.append({"type": "assistant", "timestamp": stamp(60 * 24 * 30), "sessionId":
              "message": {"id": "message-old", "model": "old-model",
                          "usage": usage(7, 7000, 70000, 700), "content": []}})
 
+# Claude auto-mode permission classifier は本文や usage を記録せず、呼出件数だけを数える。
+# 同じ uuid の2行は親内で重複、fallback は session/source/tool_result の3要素で識別する。
+classifier_meta = "CLASSIFIER_PRIVATE_SENTINEL"
+for _ in range(2):
+    rows.append({"type": "user", "timestamp": stamp(4), "uuid": "classifier-uuid-1",
+                 "classifierMetaLines": classifier_meta,
+                 "message": {"role": "user", "content": []}})
+rows.append({"type": "user", "timestamp": stamp(4), "sessionId": "classifier-session",
+             "sourceToolAssistantUUID": "classifier-source",
+             "classifierMetaLines": classifier_meta,
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "classifier-tool-use"}]}})
+rows.append({"type": "user", "timestamp": stamp(4), "sessionId": "classifier-session",
+             "classifierMetaLines": classifier_meta,
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "classifier-missing-source"}]}})
+rows.append({"type": "user", "uuid": "classifier-missing-timestamp",
+             "classifierMetaLines": classifier_meta,
+             "message": {"role": "user", "content": []}})
+rows.append({"type": "user", "timestamp": stamp(60 * 24 * 30),
+             "uuid": "classifier-old", "classifierMetaLines": classifier_meta,
+             "message": {"role": "user", "content": []}})
+
 with open(os.path.join(project, "session.jsonl"), "w", encoding="utf-8") as fh:
     for row in rows:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -130,6 +155,11 @@ with open(plot_path, "w", encoding="utf-8") as fh:
         "message": {"id": "sub-msg-2", "model": "sub-model",
                     "usage": usage(1, 0, 0, 1),
                     "content": []},
+    }, ensure_ascii=False) + "\n")
+    fh.write(json.dumps({
+        "type": "user", "timestamp": stamp(4), "uuid": "classifier-subagent-uuid",
+        "classifierMetaLines": classifier_meta,
+        "message": {"role": "user", "content": []},
     }, ensure_ascii=False) + "\n")
 
 # 型未解決の孤立ログ（親マップに無い agentId）
@@ -195,6 +225,7 @@ _execute_report_from() {
   run_dir="$1"
   shift
   ( cd "$run_dir" && HOME="$FIXTURE_HOME" CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR_OVERRIDE:-}" \
+      CODEX_HOME="$FIXTURE_CODEX_HOME" \
       python3 -B "$REPO_ROOT/scripts/measure-token-usage.py" --out "$FIXTURE_OUT" "$@" )
 }
 
@@ -366,6 +397,39 @@ test_期間外の行を除外し_days_0で全期間を読む() {
   _run_report --days 0 >/dev/null 2>&1
   all_time="$(_report)"
   assert_contains "$all_time" "81,323" "全期間の合計"
+}
+
+test_Claude_auto_classifierを親とsubagentから重複なく数える() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Claude Code permission classifier" "classifier区分"
+  assert_contains "$report" "呼出: **3**" "親とsubagentの有効呼出"
+  assert_contains "$report" "重複: **1**" "uuid重複"
+}
+
+test_Claude_auto_classifierの代替キーと欠測を区別する() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "呼出: **3**" "fallback識別子の有効呼出"
+  assert_contains "$report" "識別子欠測: **1**" "fallback要素欠測"
+}
+
+test_Claude_auto_classifierはtimestamp欠測を全期間でも除外する() {
+  _run_report --days 1 >/dev/null 2>&1
+  recent="$(_report)"
+  assert_contains "$recent" "timestamp 欠測: **1**" "期間付きのtimestamp欠測"
+  _run_report --days 0 >/dev/null 2>&1
+  all_time="$(_report)"
+  assert_contains "$all_time" "呼出: **4**" "期間外valid rowのみ追加"
+  assert_contains "$all_time" "timestamp 欠測: **1**" "全期間でもtimestamp必須"
+}
+
+test_Claude_classifier本文を出さずtokenをN_Aにする() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "usage 実測: **N/A**" "usageは未計測"
+  assert_not_contains "$report" "CLASSIFIER_PRIVATE_SENTINEL" "classifier本文秘匿"
+  assert_not_contains "$report" "usage 実測: **0**" "未計測をゼロ扱いしない"
 }
 
 test_本文_prompt_tool結果_env_認証情報を出力しない() {

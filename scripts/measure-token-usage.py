@@ -890,6 +890,47 @@ def content_blocks(message):
     return content if isinstance(content, list) else []
 
 
+def classifier_tool_use_id(entry):
+    values = []
+    for block in content_blocks(entry.get("message")):
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        value = dedup_scalar(block.get("tool_use_id"))
+        if value is not None:
+            values.append(value)
+    if len(values) != 1:
+        return None
+    return values[0]
+
+
+def record_claude_auto_classifier(scan, entry, since):
+    meta = entry.get("classifierMetaLines")
+    if entry.get("type") != "user" or not isinstance(meta, str) or not meta.strip():
+        return
+    stamp = parse_ts(entry.get("timestamp"))
+    if stamp is None:
+        scan.auto_classifier_timestamp_missing += 1
+        return
+    if since is not None and stamp < since:
+        return
+    uuid = dedup_scalar(entry.get("uuid"))
+    if uuid is not None:
+        key = ("uuid", uuid)
+    else:
+        session_id = dedup_scalar(entry.get("sessionId"))
+        source_uuid = dedup_scalar(entry.get("sourceToolAssistantUUID"))
+        tool_use_id = classifier_tool_use_id(entry)
+        if session_id is None or source_uuid is None or tool_use_id is None:
+            scan.auto_classifier_identifier_missing += 1
+            return
+        key = ("fallback", session_id, source_uuid, tool_use_id)
+    if key in scan._auto_classifier_keys:
+        scan.auto_classifier_duplicates += 1
+        return
+    scan._auto_classifier_keys.add(key)
+    scan.auto_classifier_calls += 1
+
+
 class Usage:
     FIELDS = (
         ("input", "input_tokens"),
@@ -968,6 +1009,11 @@ class Scan:
         self.no_message_id = 0
         self.no_timestamp = 0
         self.no_timestamp_with_usage = 0
+        self.auto_classifier_calls = 0
+        self.auto_classifier_duplicates = 0
+        self.auto_classifier_identifier_missing = 0
+        self.auto_classifier_timestamp_missing = 0
+        self._auto_classifier_keys = set()
         # These are metadata-only indexes used while scanning.  They never enter
         # the report or snapshot, and do not retain prompt/tool-result bodies.
         self._tool_names = {}
@@ -1092,6 +1138,7 @@ def scan_transcripts(paths, since):
                     continue
                 if not isinstance(entry, dict):
                     continue
+                record_claude_auto_classifier(scan, entry, since)
 
                 stamp = parse_ts(entry.get("timestamp"))
                 if since is not None:
@@ -1216,6 +1263,7 @@ def scan_subagent_transcripts(scan, paths, since):
                     continue
                 if not isinstance(entry, dict):
                     continue
+                record_claude_auto_classifier(scan, entry, since)
 
                 stamp = parse_ts(entry.get("timestamp"))
                 if since is not None:
@@ -1738,6 +1786,16 @@ def build_report(
     add(
         f"- subagent `message.usage` 合計（別枠）: **{fmt(scan.agent_usage_total.total)}**"
     )
+    add("")
+    add("## オートモード補助エージェント")
+    add("")
+    add("### Claude Code permission classifier")
+    add("")
+    add(f"- 呼出: **{fmt(scan.auto_classifier_calls)}**")
+    add("- usage 実測: **N/A**（ログに usage が無いため 0 や推計値へ置き換えない）")
+    add(f"- 重複: **{fmt(scan.auto_classifier_duplicates)}**")
+    add(f"- 識別子欠測: **{fmt(scan.auto_classifier_identifier_missing)}**")
+    add(f"- timestamp 欠測: **{fmt(scan.auto_classifier_timestamp_missing)}**")
     launches = sum(scan.agent_calls.values())
     add(f"- サブエージェント起動: {fmt(launches)}")
     add(
