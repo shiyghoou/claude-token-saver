@@ -56,6 +56,16 @@ entrypoint を呼んでも source clone へレポートを書かない。source 
 - 「MCP」は設定済みサーバ名と実際の利用回数を並べて、未使用の候補を探す
 - project key が見つからないときは、警告付きで全プロジェクトへフォールバックする
 
+### オートモード補助エージェント
+
+オートモード補助エージェントは main / subagent と別枠で表示する。Claude Code は
+`classifierMetaLines` を持つ permission classifier の呼出件数だけを数える。usage はログに無いため
+**N/A** とし、推計しない。Codex 全体の使用量は対象外であり、`CODEX_HOME/sessions` の `source` が
+`guardian`、現在の model が `codex-auto-review` であるイベントの
+`token_count.info.last_token_usage` だけを実測する。`cached input` と `reasoning output` は内数で、
+合計へ二重加算しない。欠測・型不正・整合性不一致は件数化し、推計しない。本文・session id・実パスは出力しない。
+この別枠は `calibration` の snapshot、fingerprint、recommendation、apply 入力に含めない。
+
 ## 共有時の注意
 
 - 含まれるのは集計値、モデル名、subagent_type、MCP サーバ名、repo 内の相対パスだけ

@@ -101,10 +101,12 @@ def check_apply_syntax():
 def check_calibration_cli(temp_root):
     fixture_root = os.path.join(temp_root, "calibration-cli-repo")
     config_root = os.path.join(temp_root, "calibration-cli-config")
+    codex_root = os.path.join(temp_root, "codex-home")
     project_dir = os.path.join(config_root, "projects", "fixture-project")
     os.makedirs(os.path.join(fixture_root, ".git"))
     os.makedirs(os.path.join(fixture_root, ".claude"))
     os.makedirs(project_dir)
+    os.makedirs(os.path.join(codex_root, "sessions"))
 
     config_path = os.path.join(fixture_root, ".claude", "token-saver.json")
     with open(config_path, "w", encoding="utf-8") as stream:
@@ -174,6 +176,7 @@ def check_calibration_cli(temp_root):
     report_path = os.path.join(fixture_root, "report.md")
     environment = os.environ.copy()
     environment["CLAUDE_CONFIG_DIR"] = config_root
+    environment["CODEX_HOME"] = codex_root
     environment["CLI_ENV_SECRET"] = "CLI_ENV_SECRET"
     result = subprocess.run(
         [

@@ -9,16 +9,18 @@ _fixture() {
   FIXTURE_REPO="$TEST_TMP/repo with a deliberately long name"
   FIXTURE_CONFIG="$TEST_TMP/alternate config"
   FIXTURE_OUT="$TEST_TMP/report.md"
+  FIXTURE_CODEX_HOME="$TEST_TMP/codex-home"
   mkdir -p "$FIXTURE_HOME/.claude/projects" "$FIXTURE_REPO/.git" \
-    "$FIXTURE_REPO-sibling" "$FIXTURE_REPO/relative-install"
+    "$FIXTURE_REPO-sibling" "$FIXTURE_REPO/relative-install" \
+    "$FIXTURE_CODEX_HOME/sessions"
 
-  python3 - "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" <<'PYEOF'
+  python3 - "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" "$FIXTURE_CODEX_HOME" <<'PYEOF'
 import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-home, repo, config = sys.argv[1:]
+home, repo, config, codex_home = sys.argv[1:]
 now = datetime.now(timezone.utc)
 
 def stamp(minutes):
@@ -106,6 +108,29 @@ rows.append({"type": "assistant", "timestamp": stamp(60 * 24 * 30), "sessionId":
              "message": {"id": "message-old", "model": "old-model",
                          "usage": usage(7, 7000, 70000, 700), "content": []}})
 
+# Claude auto-mode permission classifier は本文や usage を記録せず、呼出件数だけを数える。
+# 同じ uuid の2行は親内で重複、fallback は session/source/tool_result の3要素で識別する。
+classifier_meta = "CLASSIFIER_PRIVATE_SENTINEL"
+for _ in range(2):
+    rows.append({"type": "user", "timestamp": stamp(4), "uuid": "classifier-uuid-1",
+                 "classifierMetaLines": classifier_meta,
+                 "message": {"role": "user", "content": []}})
+rows.append({"type": "user", "timestamp": stamp(4), "sessionId": "classifier-session",
+             "sourceToolAssistantUUID": "classifier-source",
+             "classifierMetaLines": classifier_meta,
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "classifier-tool-use"}]}})
+rows.append({"type": "user", "timestamp": stamp(4), "sessionId": "classifier-session",
+             "classifierMetaLines": classifier_meta,
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "classifier-missing-source"}]}})
+rows.append({"type": "user", "uuid": "classifier-missing-timestamp",
+             "classifierMetaLines": classifier_meta,
+             "message": {"role": "user", "content": []}})
+rows.append({"type": "user", "timestamp": stamp(60 * 24 * 30),
+             "uuid": "classifier-old", "classifierMetaLines": classifier_meta,
+             "message": {"role": "user", "content": []}})
+
 with open(os.path.join(project, "session.jsonl"), "w", encoding="utf-8") as fh:
     for row in rows:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -130,6 +155,11 @@ with open(plot_path, "w", encoding="utf-8") as fh:
         "message": {"id": "sub-msg-2", "model": "sub-model",
                     "usage": usage(1, 0, 0, 1),
                     "content": []},
+    }, ensure_ascii=False) + "\n")
+    fh.write(json.dumps({
+        "type": "user", "timestamp": stamp(4), "uuid": "classifier-subagent-uuid",
+        "classifierMetaLines": classifier_meta,
+        "message": {"role": "user", "content": []},
     }, ensure_ascii=False) + "\n")
 
 # 型未解決の孤立ログ（親マップに無い agentId）
@@ -186,6 +216,68 @@ with open(os.path.join(config, "claude.json"), "w") as fh:
 with open(os.path.join(alt_project, "session.jsonl"), "w", encoding="utf-8") as out:
     with open(os.path.join(project, "session.jsonl"), encoding="utf-8") as src:
         out.write(src.read())
+
+# Codex guardian / codex-auto-review は Claude Code transcript と別の履歴である。
+# total_token_usage の同一tupleは再送として扱い、last_token_usageだけを加算対象にする。
+codex_dir = os.path.join(codex_home, "sessions", "2026", "08", "08")
+os.makedirs(codex_dir, exist_ok=True)
+
+def codex_usage(inp, cached, cache_write, output, reasoning, total):
+    return {
+        "input_tokens": inp,
+        "cached_input_tokens": cached,
+        "cache_write_input_tokens": cache_write,
+        "output_tokens": output,
+        "reasoning_output_tokens": reasoning,
+        "total_tokens": total,
+    }
+
+first = codex_usage(100, 40, 10, 20, 5, 120)
+second = codex_usage(50, 10, 0, 10, 2, 60)
+cumulative = codex_usage(150, 50, 10, 30, 7, 180)
+invalid = codex_usage(1, 0, 0, 2, 0, 4)
+guardian_rows = [
+    {"type": "session_meta", "timestamp": stamp(9), "payload": {
+        "source": {"subagent": {"other": "guardian"}}, "cwd": repo}},
+    {"type": "turn_context", "timestamp": stamp(8), "payload": {
+        "model": "codex-auto-review"}},
+    {"type": "event_msg", "timestamp": stamp(7), "payload": {
+        "type": "token_count", "info": {"last_token_usage": first,
+        "total_token_usage": first}}},
+    {"type": "event_msg", "timestamp": stamp(6), "payload": {
+        "type": "token_count", "info": {"last_token_usage": first,
+        "total_token_usage": first}}},
+    {"type": "event_msg", "timestamp": stamp(5), "payload": {
+        "type": "token_count", "info": {"last_token_usage": second,
+        "total_token_usage": cumulative}}},
+    {"type": "turn_context", "timestamp": stamp(4), "payload": {
+        "model": "codex-not-auto-review"}},
+    {"type": "event_msg", "timestamp": stamp(4), "payload": {
+        "type": "token_count", "info": {"last_token_usage": codex_usage(999, 0, 0, 0, 0, 999),
+        "total_token_usage": codex_usage(999, 0, 0, 0, 0, 999)}}},
+    {"type": "turn_context", "timestamp": stamp(3), "payload": {
+        "model": "codex-auto-review"}},
+    {"type": "event_msg", "timestamp": stamp(2), "payload": {
+        "type": "token_count", "info": {"total_token_usage": cumulative}}},
+    {"type": "event_msg", "timestamp": stamp(1), "payload": {
+        "type": "token_count", "info": {"last_token_usage": second}}},
+    {"type": "event_msg", "timestamp": stamp(1), "payload": {
+        "type": "token_count", "info": {"last_token_usage": invalid,
+        "total_token_usage": invalid}}},
+]
+with open(os.path.join(codex_dir, "guardian.jsonl"), "w", encoding="utf-8") as fh:
+    for row in guardian_rows:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+with open(os.path.join(codex_dir, "not-guardian.jsonl"), "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({"type": "session_meta", "timestamp": stamp(3), "payload": {
+        "source": {"subagent": {"other": "not-guardian"}}, "cwd": repo}}) + "\n")
+    fh.write(json.dumps({"type": "turn_context", "timestamp": stamp(3), "payload": {
+        "model": "codex-auto-review"}}) + "\n")
+    fh.write(json.dumps({"type": "event_msg", "timestamp": stamp(3), "payload": {
+        "type": "token_count", "info": {"last_token_usage":
+        codex_usage(999, 0, 0, 0, 0, 999), "total_token_usage":
+        codex_usage(999, 0, 0, 0, 0, 999)}}}) + "\n")
 PYEOF
   : > "$FIXTURE_REPO/inside-visible.md"
   : > "$FIXTURE_REPO/second-visible.md"
@@ -195,6 +287,7 @@ _execute_report_from() {
   run_dir="$1"
   shift
   ( cd "$run_dir" && HOME="$FIXTURE_HOME" CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR_OVERRIDE:-}" \
+      CODEX_HOME="$FIXTURE_CODEX_HOME" \
       python3 -B "$REPO_ROOT/scripts/measure-token-usage.py" --out "$FIXTURE_OUT" "$@" )
 }
 
@@ -243,6 +336,187 @@ row = {
 }
 with open(os.path.join(project, "other.jsonl"), "w", encoding="utf-8") as fh:
     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+PYEOF
+}
+
+_replace_with_project_scoped_classifier_rows() {
+  rm -rf "$FIXTURE_HOME/.claude/projects"
+  python3 - "$FIXTURE_HOME" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+home = sys.argv[1]
+projects = os.path.join(home, ".claude", "projects")
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+row = {
+    "type": "user",
+    "timestamp": stamp,
+    "uuid": "same-classifier-uuid",
+    "classifierMetaLines": "PROJECT_SCOPED_CLASSIFIER_PRIVATE_SENTINEL",
+    "message": {"role": "user", "content": []},
+}
+
+first = os.path.join(projects, "private-project-scope-one")
+second = os.path.join(projects, "private-project-scope-two")
+subagents = os.path.join(first, "session", "subagents")
+os.makedirs(subagents, exist_ok=True)
+os.makedirs(second, exist_ok=True)
+for path in (
+    os.path.join(first, "parent.jsonl"),
+    os.path.join(subagents, "agent.jsonl"),
+    os.path.join(second, "parent.jsonl"),
+):
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+PYEOF
+}
+
+_add_unrelated_codex_project() {
+  python3 - "$FIXTURE_CODEX_HOME" "$FIXTURE_REPO" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+codex_home, repo = sys.argv[1:]
+directory = os.path.join(codex_home, "sessions", "2026", "08", "08")
+os.makedirs(directory, exist_ok=True)
+usage = {
+    "input_tokens": 200,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 20,
+    "reasoning_output_tokens": 0,
+    "total_tokens": 220,
+}
+rows = [
+    {"type": "session_meta", "payload": {
+        "source": {"subagent": {"other": "guardian"}},
+        "cwd": repo + "-outside",
+    }},
+    {"type": "turn_context", "payload": {"model": "codex-auto-review"}},
+    {"type": "event_msg", "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+     "payload": {"type": "token_count", "info": {
+         "last_token_usage": usage, "total_token_usage": usage,
+     }}},
+]
+with open(os.path.join(directory, "other-project.jsonl"), "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
+PYEOF
+}
+
+_add_codex_boundary_rows() {
+  python3 - "$FIXTURE_CODEX_HOME" "$FIXTURE_REPO" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+codex_home, repo = sys.argv[1:]
+directory = os.path.join(codex_home, "sessions", "2026", "08", "08")
+os.makedirs(directory, exist_ok=True)
+now = datetime.now(timezone.utc)
+
+def usage(total):
+    return {
+        "input_tokens": total - 30,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 30,
+        "reasoning_output_tokens": 0,
+        "total_tokens": total,
+    }
+
+rows = [
+    {"type": "session_meta", "payload": {
+        "source": {"subagent": {"other": "guardian"}}, "cwd": repo,
+        "id": "CODEX_SESSION_SECRET",
+    }},
+    {"type": "turn_context", "payload": {"model": "codex-auto-review"}},
+    {"type": "event_msg", "timestamp": (now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+     "payload": {"type": "token_count", "info": {
+         "last_token_usage": usage(330), "total_token_usage": usage(330),
+     }}},
+    {"type": "event_msg", "payload": {"type": "token_count", "info": {
+         "last_token_usage": usage(440), "total_token_usage": usage(440),
+     }}, "text": "CODEX_PRIVATE_SENTINEL"},
+]
+with open(os.path.join(directory, "boundary.jsonl"), "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
+with open(os.path.join(directory, "broken.jsonl"), "w", encoding="utf-8") as handle:
+    handle.write('{"CODEX_PRIVATE_SENTINEL":\n')
+PYEOF
+}
+
+_replace_with_non_monotonic_codex_rows() {
+  rm -rf "$FIXTURE_CODEX_HOME/sessions"
+  python3 - "$FIXTURE_CODEX_HOME" "$FIXTURE_REPO" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+codex_home, repo = sys.argv[1:]
+directory = os.path.join(codex_home, "sessions", "2026", "08", "08")
+os.makedirs(directory, exist_ok=True)
+stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def usage(inp, cached, cache_write, output, reasoning):
+    return {
+        "input_tokens": inp,
+        "cached_input_tokens": cached,
+        "cache_write_input_tokens": cache_write,
+        "output_tokens": output,
+        "reasoning_output_tokens": reasoning,
+        "total_tokens": inp + output,
+    }
+
+first_last = usage(100, 40, 10, 20, 5)
+first_total = usage(100, 40, 10, 20, 5)
+decreasing_total = usage(120, 39, 15, 30, 6)
+rejected_last = usage(900, 0, 0, 100, 0)
+later_last = usage(50, 10, 0, 10, 2)
+later_total = usage(150, 50, 20, 30, 8)
+rows = [
+    {"type": "session_meta", "payload": {
+        "source": {"subagent": {"other": "guardian"}}, "cwd": repo}},
+    {"type": "turn_context", "payload": {"model": "codex-auto-review"}},
+    {"type": "event_msg", "timestamp": stamp, "payload": {
+        "type": "token_count", "info": {
+            "last_token_usage": first_last, "total_token_usage": first_total}}},
+    {"type": "event_msg", "timestamp": stamp, "payload": {
+        "type": "token_count", "info": {
+            "last_token_usage": rejected_last,
+            "total_token_usage": decreasing_total}}},
+    {"type": "event_msg", "timestamp": stamp, "payload": {
+        "type": "token_count", "info": {
+            "last_token_usage": first_last, "total_token_usage": first_total}}},
+    {"type": "event_msg", "timestamp": stamp, "payload": {
+        "type": "token_count", "info": {
+            "last_token_usage": later_last, "total_token_usage": later_total}}},
+]
+with open(os.path.join(directory, "non-monotonic.jsonl"), "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
+PYEOF
+}
+
+_add_codex_read_error() {
+  python3 - "$FIXTURE_CODEX_HOME" <<'PYEOF'
+import os
+import socket
+import sys
+
+directory = os.path.join(sys.argv[1], "sessions", "2026", "08", "08")
+os.makedirs(directory, exist_ok=True)
+path = os.path.join(directory, "unreadable.jsonl")
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(path)
+listener.close()
 PYEOF
 }
 
@@ -366,6 +640,229 @@ test_期間外の行を除外し_days_0で全期間を読む() {
   _run_report --days 0 >/dev/null 2>&1
   all_time="$(_report)"
   assert_contains "$all_time" "81,323" "全期間の合計"
+}
+
+test_Claude_auto_classifierを親とsubagentから重複なく数える() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Claude Code permission classifier" "classifier区分"
+  assert_contains "$report" "呼出: **3**" "親とsubagentの有効呼出"
+  assert_contains "$report" "重複: **1**" "uuid重複"
+}
+
+test_Claude_auto_classifierの重複排除をproject内に限定する() {
+  _fixture
+  _replace_with_project_scoped_classifier_rows
+  _execute_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "呼出: **2**" "projectをまたぐ同一uuidは別呼出"
+  assert_contains "$report" "重複: **1**" "同一projectの親とsubagentだけ重複"
+  assert_not_contains "$report" "private-project-scope" "内部project scopeの秘匿"
+}
+
+test_scan_transcriptsの2引数callerはpath間classifierを重複扱いしない() {
+  _fixture
+  _replace_with_project_scoped_classifier_rows
+  actual="$(python3 - "$REPO_ROOT/scripts/measure-token-usage.py" \
+    "$FIXTURE_HOME/.claude/projects" <<'PYEOF'
+import glob
+import os
+import runpy
+import sys
+
+engine_path, projects = sys.argv[1:]
+engine = runpy.run_path(engine_path)
+paths = sorted(glob.glob(os.path.join(projects, "*", "parent.jsonl")))
+scan = engine["scan_transcripts"](paths, None)
+print(scan.auto_classifier_calls, scan.auto_classifier_duplicates)
+PYEOF
+)"
+  assert_eq "2 0" "$actual" "2引数callerのpath別classifier scope"
+}
+
+test_Claude_auto_classifierの代替キーと欠測を区別する() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "呼出: **3**" "fallback識別子の有効呼出"
+  assert_contains "$report" "識別子欠測: **1**" "fallback要素欠測"
+}
+
+test_Claude_auto_classifierはtimestamp欠測を全期間でも除外する() {
+  _run_report --days 1 >/dev/null 2>&1
+  recent="$(_report)"
+  assert_contains "$recent" "timestamp 欠測: **1**" "期間付きのtimestamp欠測"
+  _run_report --days 0 >/dev/null 2>&1
+  all_time="$(_report)"
+  assert_contains "$all_time" "呼出: **4**" "期間外valid rowのみ追加"
+  assert_contains "$all_time" "timestamp 欠測: **1**" "全期間でもtimestamp必須"
+}
+
+test_Claude_classifier本文を出さずtokenをN_Aにする() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "usage 実測: **N/A**" "usageは未計測"
+  assert_not_contains "$report" "CLASSIFIER_PRIVATE_SENTINEL" "classifier本文秘匿"
+  assert_not_contains "$report" "usage 実測: **0**" "未計測をゼロ扱いしない"
+}
+
+test_Codex_guardian_auto_reviewのusageを別枠集計する() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex guardian / codex-auto-review" "Codex別枠"
+  assert_contains "$report" "guardian session: **1**" "guardian session数"
+  assert_contains "$report" "usage turn: **2**" "usage turn数"
+  assert_contains "$report" "| 150 | 50 | 10 | 30 | 7 | 180 |" "Codex breakdown"
+  assert_contains "$report" "Codex 合計: **180**" "Codex合計"
+  assert_contains "$report" "main 合計: **3,616**" "main別枠維持"
+  assert_contains "$report" "10,225" "subagent別枠維持"
+}
+
+test_Codex_cachedとreasoningを二重加算しない() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **180**" "inputとoutputだけの合計"
+  assert_not_contains "$report" "Codex 合計: **247**" "cachedとreasoningの二重加算"
+  assert_contains "$report" "cached input と reasoning output は内数であり、合計へ再加算しない" "内数注意"
+}
+
+test_Codex累積usage再掲を二重加算しない() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "cumulative duplicate: **1**" "累積tuple重複"
+  assert_contains "$report" "usage turn: **2**" "再掲非加算"
+  assert_not_contains "$report" "Codex 合計: **300**" "再掲を含む合計"
+}
+
+test_Codex非単調累積usageを除外して後続の単調増加を数える() {
+  _fixture
+  _replace_with_non_monotonic_codex_rows
+  _execute_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "usage turn: **2**" "非単調tupleを除く受理ターン"
+  assert_contains "$report" "Codex 合計: **180**" "非単調tupleのlast usageを非加算"
+  assert_contains "$report" "usage invalid: **1**" "非単調tupleの不正件数"
+  assert_contains "$report" "cumulative duplicate: **1**" "完全再掲は重複扱い"
+}
+
+test_Codex識別条件不一致とusage欠測を推計しない() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "model mismatch: **1**" "model不一致"
+  assert_contains "$report" "usage missing: **1**" "usage欠測"
+  assert_contains "$report" "usage invalid: **2**" "total usage 欠測と数値不正"
+  assert_not_contains "$report" "999" "non-guardianと不一致modelの除外"
+}
+
+test_Codex_auto_reviewはrepoとall_projectsを分ける() {
+  _fixture
+  _add_unrelated_codex_project
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **180**" "repo cwd のみ"
+  _execute_report_from "$FIXTURE_REPO" --all-projects --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **400**" "all-projects は repo 外も含む"
+}
+
+test_Codex_auto_reviewは期間外とtimestamp欠測を除外する() {
+  _fixture
+  _add_codex_boundary_rows
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **180**" "期間外を除外"
+  assert_contains "$report" "timestamp missing: **1**" "timestamp 欠測"
+  _execute_report_from "$FIXTURE_REPO" --days 0 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **510**" "全期間は期間外を含む"
+  assert_contains "$report" "timestamp missing: **1**" "全期間もtimestamp必須"
+}
+
+test_Codex履歴なし読取不能壊れたJSONLを区別する() {
+  _fixture
+  rm -rf "$FIXTURE_CODEX_HOME/sessions"
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "history status: **missing**" "history root 無し"
+  assert_not_contains "$report" "Codex 合計: **0**" "missing を 0 token と断定しない"
+
+  _fixture
+  rm -rf "$FIXTURE_CODEX_HOME/sessions"
+  : >"$FIXTURE_CODEX_HOME/sessions"
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "history status: **unreadable**" "history root が regular file"
+  assert_not_contains "$report" "Codex 合計: **0**" "unreadable を 0 token と断定しない"
+
+  rm -rf "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" "$FIXTURE_CODEX_HOME"
+  _fixture
+  _add_codex_boundary_rows
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "JSONL malformed line: **1**" "壊れた JSONL を数える"
+}
+
+test_Codex_read_errorは部分読取をN_Aとして表示する() {
+  _fixture
+  rm -rf "$FIXTURE_CODEX_HOME/sessions"
+  mkdir -p "$FIXTURE_CODEX_HOME/sessions"
+  _add_codex_read_error
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "history status: **partial**" "open error は部分読取"
+  assert_contains "$report" "Codex usage: **N/A**" "partial を推計しない"
+  assert_contains "$report" "read error: **1**" "open error を数える"
+  assert_not_contains "$report" "Codex 合計: **0**" "read error を 0 token と断定しない"
+}
+
+test_Codex本文ID実パスをレポートへ出さない() {
+  _fixture
+  _add_codex_boundary_rows
+  _execute_report_from "$FIXTURE_REPO" --days 0 >/dev/null 2>&1
+  report="$(_report)"
+  for secret in CODEX_PRIVATE_SENTINEL CODEX_SESSION_SECRET "$FIXTURE_CODEX_HOME"; do
+    assert_not_contains "$report" "$secret" "Codex 秘匿値 $secret"
+  done
+}
+
+test_オート補助計測をcalibration_snapshotへ入れない() {
+  _fixture
+  _execute_report_from "$FIXTURE_REPO" --calibrate --days 1 >/dev/null 2>&1
+  snapshot="$FIXTURE_REPO/.token-saver/calibration/latest.json"
+  with_codex="$TEST_TMP/calibration-with-codex.json"
+  cp "$snapshot" "$with_codex"
+
+  cp -R "$FIXTURE_CODEX_HOME/sessions" "$TEST_TMP/codex-sessions-populated"
+  rm -rf "$FIXTURE_CODEX_HOME/sessions"
+  mkdir -p "$FIXTURE_CODEX_HOME/sessions"
+  _execute_report_from "$FIXTURE_REPO" --calibrate --days 1 >/dev/null 2>&1
+  python3 - "$with_codex" "$snapshot" <<'PYEOF' || _fail "Codex session の有無で calibration 本体が変化した"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    populated = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    empty = json.load(handle)
+
+assert populated["fingerprint"] == empty["fingerprint"]
+assert populated["recommended_levels"] == empty["recommended_levels"]
+assert populated["generated_at"] != empty["generated_at"]
+for field in ("classifier", "codex_auto", "guardian"):
+    assert field not in populated
+    assert field not in empty
+populated.pop("generated_at")
+empty.pop("generated_at")
+assert populated == empty
+PYEOF
+
+  rm -rf "$FIXTURE_HOME/.codex"
+  mkdir -p "$FIXTURE_HOME/.codex"
+  mv "$TEST_TMP/codex-sessions-populated" "$FIXTURE_HOME/.codex/sessions"
+  ( cd "$FIXTURE_REPO" && HOME="$FIXTURE_HOME" CLAUDE_CONFIG_DIR="" \
+      env -u CODEX_HOME python3 -B "$REPO_ROOT/scripts/measure-token-usage.py" \
+        --out "$FIXTURE_OUT" --days 1 ) >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **180**" "未設定 CODEX_HOME は ~/.codex を使う"
 }
 
 test_本文_prompt_tool結果_env_認証情報を出力しない() {
