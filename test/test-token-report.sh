@@ -260,6 +260,8 @@ guardian_rows = [
     {"type": "event_msg", "timestamp": stamp(2), "payload": {
         "type": "token_count", "info": {"total_token_usage": cumulative}}},
     {"type": "event_msg", "timestamp": stamp(1), "payload": {
+        "type": "token_count", "info": {"last_token_usage": second}}},
+    {"type": "event_msg", "timestamp": stamp(1), "payload": {
         "type": "token_count", "info": {"last_token_usage": invalid,
         "total_token_usage": invalid}}},
 ]
@@ -413,6 +415,21 @@ with open(os.path.join(directory, "boundary.jsonl"), "w", encoding="utf-8") as h
         handle.write(json.dumps(row) + "\n")
 with open(os.path.join(directory, "broken.jsonl"), "w", encoding="utf-8") as handle:
     handle.write('{"CODEX_PRIVATE_SENTINEL":\n')
+PYEOF
+}
+
+_add_codex_read_error() {
+  python3 - "$FIXTURE_CODEX_HOME" <<'PYEOF'
+import os
+import socket
+import sys
+
+directory = os.path.join(sys.argv[1], "sessions", "2026", "08", "08")
+os.makedirs(directory, exist_ok=True)
+path = os.path.join(directory, "unreadable.jsonl")
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(path)
+listener.close()
 PYEOF
 }
 
@@ -604,7 +621,7 @@ test_Codex識別条件不一致とusage欠測を推計しない() {
   report="$(_report)"
   assert_contains "$report" "model mismatch: **1**" "model不一致"
   assert_contains "$report" "usage missing: **1**" "usage欠測"
-  assert_contains "$report" "usage invalid: **1**" "usage不正"
+  assert_contains "$report" "usage invalid: **2**" "total usage 欠測と数値不正"
   assert_not_contains "$report" "999" "non-guardianと不一致modelの除外"
 }
 
@@ -656,6 +673,19 @@ test_Codex履歴なし読取不能壊れたJSONLを区別する() {
   assert_contains "$report" "JSONL malformed line: **1**" "壊れた JSONL を数える"
 }
 
+test_Codex_read_errorは部分読取をN_Aとして表示する() {
+  _fixture
+  rm -rf "$FIXTURE_CODEX_HOME/sessions"
+  mkdir -p "$FIXTURE_CODEX_HOME/sessions"
+  _add_codex_read_error
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "history status: **partial**" "open error は部分読取"
+  assert_contains "$report" "Codex usage: **N/A**" "partial を推計しない"
+  assert_contains "$report" "read error: **1**" "open error を数える"
+  assert_not_contains "$report" "Codex 合計: **0**" "read error を 0 token と断定しない"
+}
+
 test_Codex本文ID実パスをレポートへ出さない() {
   _fixture
   _add_codex_boundary_rows
@@ -670,17 +700,32 @@ test_オート補助計測をcalibration_snapshotへ入れない() {
   _fixture
   _execute_report_from "$FIXTURE_REPO" --calibrate --days 1 >/dev/null 2>&1
   snapshot="$FIXTURE_REPO/.token-saver/calibration/latest.json"
-  with_codex="$(cat "$snapshot")"
+  with_codex="$TEST_TMP/calibration-with-codex.json"
+  cp "$snapshot" "$with_codex"
 
   cp -R "$FIXTURE_CODEX_HOME/sessions" "$TEST_TMP/codex-sessions-populated"
   rm -rf "$FIXTURE_CODEX_HOME/sessions"
   mkdir -p "$FIXTURE_CODEX_HOME/sessions"
   _execute_report_from "$FIXTURE_REPO" --calibrate --days 1 >/dev/null 2>&1
-  without_codex="$(cat "$snapshot")"
-  assert_eq "$with_codex" "$without_codex" "Codex session の有無で snapshot bytes は不変"
-  for field in classifier codex_auto guardian; do
-    assert_not_contains "$with_codex" "\"$field\"" "snapshot に補助計測 field を入れない"
-  done
+  python3 - "$with_codex" "$snapshot" <<'PYEOF' || _fail "Codex session の有無で calibration 本体が変化した"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    populated = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    empty = json.load(handle)
+
+assert populated["fingerprint"] == empty["fingerprint"]
+assert populated["recommended_levels"] == empty["recommended_levels"]
+assert populated["generated_at"] != empty["generated_at"]
+for field in ("classifier", "codex_auto", "guardian"):
+    assert field not in populated
+    assert field not in empty
+populated.pop("generated_at")
+empty.pop("generated_at")
+assert populated == empty
+PYEOF
 
   rm -rf "$FIXTURE_HOME/.codex"
   mkdir -p "$FIXTURE_HOME/.codex"

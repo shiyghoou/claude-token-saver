@@ -315,19 +315,6 @@ def write_calibration_snapshot(snapshot):
     target = os.path.join(calibration_dir, "latest.json")
     if os.path.lexists(target) and os.path.islink(target):
         return False
-    if os.path.isfile(target):
-        previous = read_json(target)
-        if isinstance(previous, dict):
-            previous_without_time = dict(previous)
-            snapshot_without_time = dict(snapshot)
-            previous_time = previous_without_time.pop("generated_at", None)
-            snapshot_without_time.pop("generated_at", None)
-            if (
-                isinstance(previous_time, str)
-                and previous_without_time == snapshot_without_time
-            ):
-                snapshot = dict(snapshot)
-                snapshot["generated_at"] = previous_time
     temp_path = None
     try:
         descriptor, temp_path = tempfile.mkstemp(
@@ -1533,9 +1520,11 @@ def scan_codex_auto_review(args, since):
                     stats.model_mismatch += 1
                     continue
                 info = payload.get("info")
-                if not isinstance(info, dict) or (
-                        "last_token_usage" not in info or "total_token_usage" not in info):
+                if not isinstance(info, dict) or "last_token_usage" not in info:
                     stats.usage_missing += 1
+                    continue
+                if "total_token_usage" not in info:
+                    stats.usage_invalid += 1
                     continue
                 last_usage = validated_codex_usage(info.get("last_token_usage"))
                 total_usage = validated_codex_usage(info.get("total_token_usage"))
@@ -1551,6 +1540,8 @@ def scan_codex_auto_review(args, since):
                 stats.usage_turns += 1
         if guardian_session:
             stats.guardian_sessions += 1
+    if stats.read_errors:
+        stats.history_status = "partial"
     return stats
 
 
@@ -2015,6 +2006,9 @@ def build_report(
         add("- cached input と reasoning output は内数であり、合計へ再加算しない。")
     else:
         add("- Codex usage: **N/A**（履歴を読めないため 0 や推計値へ置き換えない）")
+        if codex_auto.history_status == "partial":
+            add(f"- JSONL malformed line: **{fmt(codex_auto.malformed_lines)}**")
+            add(f"- read error: **{fmt(codex_auto.read_errors)}**")
     launches = sum(scan.agent_calls.values())
     add(f"- サブエージェント起動: {fmt(launches)}")
     add(
