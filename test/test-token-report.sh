@@ -337,6 +337,85 @@ with open(os.path.join(project, "other.jsonl"), "w", encoding="utf-8") as fh:
 PYEOF
 }
 
+_add_unrelated_codex_project() {
+  python3 - "$FIXTURE_CODEX_HOME" "$FIXTURE_REPO" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+codex_home, repo = sys.argv[1:]
+directory = os.path.join(codex_home, "sessions", "2026", "08", "08")
+os.makedirs(directory, exist_ok=True)
+usage = {
+    "input_tokens": 200,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 20,
+    "reasoning_output_tokens": 0,
+    "total_tokens": 220,
+}
+rows = [
+    {"type": "session_meta", "payload": {
+        "source": {"subagent": {"other": "guardian"}},
+        "cwd": repo + "-outside",
+    }},
+    {"type": "turn_context", "payload": {"model": "codex-auto-review"}},
+    {"type": "event_msg", "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+     "payload": {"type": "token_count", "info": {
+         "last_token_usage": usage, "total_token_usage": usage,
+     }}},
+]
+with open(os.path.join(directory, "other-project.jsonl"), "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
+PYEOF
+}
+
+_add_codex_boundary_rows() {
+  python3 - "$FIXTURE_CODEX_HOME" "$FIXTURE_REPO" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+codex_home, repo = sys.argv[1:]
+directory = os.path.join(codex_home, "sessions", "2026", "08", "08")
+os.makedirs(directory, exist_ok=True)
+now = datetime.now(timezone.utc)
+
+def usage(total):
+    return {
+        "input_tokens": total - 30,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 30,
+        "reasoning_output_tokens": 0,
+        "total_tokens": total,
+    }
+
+rows = [
+    {"type": "session_meta", "payload": {
+        "source": {"subagent": {"other": "guardian"}}, "cwd": repo,
+        "id": "CODEX_SESSION_SECRET",
+    }},
+    {"type": "turn_context", "payload": {"model": "codex-auto-review"}},
+    {"type": "event_msg", "timestamp": (now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+     "payload": {"type": "token_count", "info": {
+         "last_token_usage": usage(330), "total_token_usage": usage(330),
+     }}},
+    {"type": "event_msg", "payload": {"type": "token_count", "info": {
+         "last_token_usage": usage(440), "total_token_usage": usage(440),
+     }}, "text": "CODEX_PRIVATE_SENTINEL"},
+]
+with open(os.path.join(directory, "boundary.jsonl"), "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
+with open(os.path.join(directory, "broken.jsonl"), "w", encoding="utf-8") as handle:
+    handle.write('{"CODEX_PRIVATE_SENTINEL":\n')
+PYEOF
+}
+
 test_同一message_idの重複を一度だけ集計する() {
   _run_report --days 1 >/dev/null 2>&1
   report="$(_report)"
@@ -527,6 +606,90 @@ test_Codex識別条件不一致とusage欠測を推計しない() {
   assert_contains "$report" "usage missing: **1**" "usage欠測"
   assert_contains "$report" "usage invalid: **1**" "usage不正"
   assert_not_contains "$report" "999" "non-guardianと不一致modelの除外"
+}
+
+test_Codex_auto_reviewはrepoとall_projectsを分ける() {
+  _fixture
+  _add_unrelated_codex_project
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **180**" "repo cwd のみ"
+  _execute_report_from "$FIXTURE_REPO" --all-projects --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **400**" "all-projects は repo 外も含む"
+}
+
+test_Codex_auto_reviewは期間外とtimestamp欠測を除外する() {
+  _fixture
+  _add_codex_boundary_rows
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **180**" "期間外を除外"
+  assert_contains "$report" "timestamp missing: **1**" "timestamp 欠測"
+  _execute_report_from "$FIXTURE_REPO" --days 0 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **510**" "全期間は期間外を含む"
+  assert_contains "$report" "timestamp missing: **1**" "全期間もtimestamp必須"
+}
+
+test_Codex履歴なし読取不能壊れたJSONLを区別する() {
+  _fixture
+  rm -rf "$FIXTURE_CODEX_HOME/sessions"
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "history status: **missing**" "history root 無し"
+  assert_not_contains "$report" "Codex 合計: **0**" "missing を 0 token と断定しない"
+
+  _fixture
+  rm -rf "$FIXTURE_CODEX_HOME/sessions"
+  : >"$FIXTURE_CODEX_HOME/sessions"
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "history status: **unreadable**" "history root が regular file"
+  assert_not_contains "$report" "Codex 合計: **0**" "unreadable を 0 token と断定しない"
+
+  rm -rf "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" "$FIXTURE_CODEX_HOME"
+  _fixture
+  _add_codex_boundary_rows
+  _execute_report_from "$FIXTURE_REPO" --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "JSONL malformed line: **1**" "壊れた JSONL を数える"
+}
+
+test_Codex本文ID実パスをレポートへ出さない() {
+  _fixture
+  _add_codex_boundary_rows
+  _execute_report_from "$FIXTURE_REPO" --days 0 >/dev/null 2>&1
+  report="$(_report)"
+  for secret in CODEX_PRIVATE_SENTINEL CODEX_SESSION_SECRET "$FIXTURE_CODEX_HOME"; do
+    assert_not_contains "$report" "$secret" "Codex 秘匿値 $secret"
+  done
+}
+
+test_オート補助計測をcalibration_snapshotへ入れない() {
+  _fixture
+  _execute_report_from "$FIXTURE_REPO" --calibrate --days 1 >/dev/null 2>&1
+  snapshot="$FIXTURE_REPO/.token-saver/calibration/latest.json"
+  with_codex="$(cat "$snapshot")"
+
+  cp -R "$FIXTURE_CODEX_HOME/sessions" "$TEST_TMP/codex-sessions-populated"
+  rm -rf "$FIXTURE_CODEX_HOME/sessions"
+  mkdir -p "$FIXTURE_CODEX_HOME/sessions"
+  _execute_report_from "$FIXTURE_REPO" --calibrate --days 1 >/dev/null 2>&1
+  without_codex="$(cat "$snapshot")"
+  assert_eq "$with_codex" "$without_codex" "Codex session の有無で snapshot bytes は不変"
+  for field in classifier codex_auto guardian; do
+    assert_not_contains "$with_codex" "\"$field\"" "snapshot に補助計測 field を入れない"
+  done
+
+  rm -rf "$FIXTURE_HOME/.codex"
+  mkdir -p "$FIXTURE_HOME/.codex"
+  mv "$TEST_TMP/codex-sessions-populated" "$FIXTURE_HOME/.codex/sessions"
+  ( cd "$FIXTURE_REPO" && HOME="$FIXTURE_HOME" CLAUDE_CONFIG_DIR="" \
+      env -u CODEX_HOME python3 -B "$REPO_ROOT/scripts/measure-token-usage.py" \
+        --out "$FIXTURE_OUT" --days 1 ) >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **180**" "未設定 CODEX_HOME は ~/.codex を使う"
 }
 
 test_本文_prompt_tool結果_env_認証情報を出力しない() {

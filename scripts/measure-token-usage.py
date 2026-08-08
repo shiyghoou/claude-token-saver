@@ -315,6 +315,19 @@ def write_calibration_snapshot(snapshot):
     target = os.path.join(calibration_dir, "latest.json")
     if os.path.lexists(target) and os.path.islink(target):
         return False
+    if os.path.isfile(target):
+        previous = read_json(target)
+        if isinstance(previous, dict):
+            previous_without_time = dict(previous)
+            snapshot_without_time = dict(snapshot)
+            previous_time = previous_without_time.pop("generated_at", None)
+            snapshot_without_time.pop("generated_at", None)
+            if (
+                isinstance(previous_time, str)
+                and previous_without_time == snapshot_without_time
+            ):
+                snapshot = dict(snapshot)
+                snapshot["generated_at"] = previous_time
     temp_path = None
     try:
         descriptor, temp_path = tempfile.mkstemp(
@@ -1977,28 +1990,31 @@ def build_report(
     add("### Codex guardian / codex-auto-review")
     add("")
     add(f"- history status: **{codex_auto.history_status}**")
-    add(f"- guardian session: **{fmt(codex_auto.guardian_sessions)}**")
-    add(f"- usage turn: **{fmt(codex_auto.usage_turns)}**")
-    lines.extend(table(
-        [
-            "input",
-            "cached input",
-            "cache write input",
-            "output",
-            "reasoning output",
-            "合計",
-        ],
-        [codex_auto.row()],
-    ))
-    add(f"- Codex 合計: **{fmt(codex_auto.total)}**")
-    add(f"- cumulative duplicate: **{fmt(codex_auto.cumulative_duplicates)}**")
-    add(f"- model mismatch: **{fmt(codex_auto.model_mismatch)}**")
-    add(f"- usage missing: **{fmt(codex_auto.usage_missing)}**")
-    add(f"- usage invalid: **{fmt(codex_auto.usage_invalid)}**")
-    add(f"- timestamp missing: **{fmt(codex_auto.timestamp_missing)}**")
-    add(f"- JSONL malformed line: **{fmt(codex_auto.malformed_lines)}**")
-    add(f"- read error: **{fmt(codex_auto.read_errors)}**")
-    add("- cached input と reasoning output は内数であり、合計へ再加算しない。")
+    if codex_auto.history_status == "available":
+        add(f"- guardian session: **{fmt(codex_auto.guardian_sessions)}**")
+        add(f"- usage turn: **{fmt(codex_auto.usage_turns)}**")
+        lines.extend(table(
+            [
+                "input",
+                "cached input",
+                "cache write input",
+                "output",
+                "reasoning output",
+                "合計",
+            ],
+            [codex_auto.row()],
+        ))
+        add(f"- Codex 合計: **{fmt(codex_auto.total)}**")
+        add(f"- cumulative duplicate: **{fmt(codex_auto.cumulative_duplicates)}**")
+        add(f"- model mismatch: **{fmt(codex_auto.model_mismatch)}**")
+        add(f"- usage missing: **{fmt(codex_auto.usage_missing)}**")
+        add(f"- usage invalid: **{fmt(codex_auto.usage_invalid)}**")
+        add(f"- timestamp missing: **{fmt(codex_auto.timestamp_missing)}**")
+        add(f"- JSONL malformed line: **{fmt(codex_auto.malformed_lines)}**")
+        add(f"- read error: **{fmt(codex_auto.read_errors)}**")
+        add("- cached input と reasoning output は内数であり、合計へ再加算しない。")
+    else:
+        add("- Codex usage: **N/A**（履歴を読めないため 0 や推計値へ置き換えない）")
     launches = sum(scan.agent_calls.values())
     add(f"- サブエージェント起動: {fmt(launches)}")
     add(
