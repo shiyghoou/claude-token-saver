@@ -2423,7 +2423,7 @@ def select_project_dirs(args):
     return [os.path.join(PROJECTS_DIR, name) for name in all_names], True
 
 
-def transcript_paths(project_dirs):
+def _transcript_paths_with_scopes(project_dirs):
     main_paths = []
     sub_paths = []
     project_scopes = {}
@@ -2442,6 +2442,13 @@ def transcript_paths(project_dirs):
                 else:
                     sub_paths.append(full)
     return main_paths, sub_paths, project_scopes
+
+
+def transcript_paths(project_dirs):
+    main_paths, sub_paths, _project_scopes = _transcript_paths_with_scopes(
+        project_dirs
+    )
+    return main_paths, sub_paths
 
 
 def main():
@@ -2473,7 +2480,7 @@ def main():
         return 1
 
     project_dirs, fell_back = select_project_dirs(args)
-    main_paths, sub_paths, project_scopes = transcript_paths(project_dirs)
+    main_paths, sub_paths, project_scopes = _transcript_paths_with_scopes(project_dirs)
     since = None if args.days == 0 else datetime.now(timezone.utc) - timedelta(days=args.days)
 
     scan = scan_transcripts(main_paths, since, project_scopes)
