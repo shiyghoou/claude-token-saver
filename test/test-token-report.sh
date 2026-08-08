@@ -14,13 +14,13 @@ _fixture() {
     "$FIXTURE_REPO-sibling" "$FIXTURE_REPO/relative-install" \
     "$FIXTURE_CODEX_HOME/sessions"
 
-  python3 - "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" <<'PYEOF'
+  python3 - "$FIXTURE_HOME" "$FIXTURE_REPO" "$FIXTURE_CONFIG" "$FIXTURE_CODEX_HOME" <<'PYEOF'
 import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-home, repo, config = sys.argv[1:]
+home, repo, config, codex_home = sys.argv[1:]
 now = datetime.now(timezone.utc)
 
 def stamp(minutes):
@@ -216,6 +216,66 @@ with open(os.path.join(config, "claude.json"), "w") as fh:
 with open(os.path.join(alt_project, "session.jsonl"), "w", encoding="utf-8") as out:
     with open(os.path.join(project, "session.jsonl"), encoding="utf-8") as src:
         out.write(src.read())
+
+# Codex guardian / codex-auto-review は Claude Code transcript と別の履歴である。
+# total_token_usage の同一tupleは再送として扱い、last_token_usageだけを加算対象にする。
+codex_dir = os.path.join(codex_home, "sessions", "2026", "08", "08")
+os.makedirs(codex_dir, exist_ok=True)
+
+def codex_usage(inp, cached, cache_write, output, reasoning, total):
+    return {
+        "input_tokens": inp,
+        "cached_input_tokens": cached,
+        "cache_write_input_tokens": cache_write,
+        "output_tokens": output,
+        "reasoning_output_tokens": reasoning,
+        "total_tokens": total,
+    }
+
+first = codex_usage(100, 40, 10, 20, 5, 120)
+second = codex_usage(50, 10, 0, 10, 2, 60)
+cumulative = codex_usage(150, 50, 10, 30, 7, 180)
+invalid = codex_usage(1, 0, 0, 2, 0, 4)
+guardian_rows = [
+    {"type": "session_meta", "timestamp": stamp(9), "payload": {
+        "source": {"subagent": {"other": "guardian"}}, "cwd": repo}},
+    {"type": "turn_context", "timestamp": stamp(8), "payload": {
+        "model": "codex-auto-review"}},
+    {"type": "event_msg", "timestamp": stamp(7), "payload": {
+        "type": "token_count", "info": {"last_token_usage": first,
+        "total_token_usage": first}}},
+    {"type": "event_msg", "timestamp": stamp(6), "payload": {
+        "type": "token_count", "info": {"last_token_usage": first,
+        "total_token_usage": first}}},
+    {"type": "event_msg", "timestamp": stamp(5), "payload": {
+        "type": "token_count", "info": {"last_token_usage": second,
+        "total_token_usage": cumulative}}},
+    {"type": "turn_context", "timestamp": stamp(4), "payload": {
+        "model": "codex-not-auto-review"}},
+    {"type": "event_msg", "timestamp": stamp(4), "payload": {
+        "type": "token_count", "info": {"last_token_usage": codex_usage(999, 0, 0, 0, 0, 999),
+        "total_token_usage": codex_usage(999, 0, 0, 0, 0, 999)}}},
+    {"type": "turn_context", "timestamp": stamp(3), "payload": {
+        "model": "codex-auto-review"}},
+    {"type": "event_msg", "timestamp": stamp(2), "payload": {
+        "type": "token_count", "info": {"total_token_usage": cumulative}}},
+    {"type": "event_msg", "timestamp": stamp(1), "payload": {
+        "type": "token_count", "info": {"last_token_usage": invalid,
+        "total_token_usage": invalid}}},
+]
+with open(os.path.join(codex_dir, "guardian.jsonl"), "w", encoding="utf-8") as fh:
+    for row in guardian_rows:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+with open(os.path.join(codex_dir, "not-guardian.jsonl"), "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({"type": "session_meta", "timestamp": stamp(3), "payload": {
+        "source": {"subagent": {"other": "not-guardian"}}, "cwd": repo}}) + "\n")
+    fh.write(json.dumps({"type": "turn_context", "timestamp": stamp(3), "payload": {
+        "model": "codex-auto-review"}}) + "\n")
+    fh.write(json.dumps({"type": "event_msg", "timestamp": stamp(3), "payload": {
+        "type": "token_count", "info": {"last_token_usage":
+        codex_usage(999, 0, 0, 0, 0, 999), "total_token_usage":
+        codex_usage(999, 0, 0, 0, 0, 999)}}}) + "\n")
 PYEOF
   : > "$FIXTURE_REPO/inside-visible.md"
   : > "$FIXTURE_REPO/second-visible.md"
@@ -430,6 +490,43 @@ test_Claude_classifier本文を出さずtokenをN_Aにする() {
   assert_contains "$report" "usage 実測: **N/A**" "usageは未計測"
   assert_not_contains "$report" "CLASSIFIER_PRIVATE_SENTINEL" "classifier本文秘匿"
   assert_not_contains "$report" "usage 実測: **0**" "未計測をゼロ扱いしない"
+}
+
+test_Codex_guardian_auto_reviewのusageを別枠集計する() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex guardian / codex-auto-review" "Codex別枠"
+  assert_contains "$report" "guardian session: **1**" "guardian session数"
+  assert_contains "$report" "usage turn: **2**" "usage turn数"
+  assert_contains "$report" "| 150 | 50 | 10 | 30 | 7 | 180 |" "Codex breakdown"
+  assert_contains "$report" "Codex 合計: **180**" "Codex合計"
+  assert_contains "$report" "main 合計: **3,616**" "main別枠維持"
+  assert_contains "$report" "10,225" "subagent別枠維持"
+}
+
+test_Codex_cachedとreasoningを二重加算しない() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "Codex 合計: **180**" "inputとoutputだけの合計"
+  assert_not_contains "$report" "Codex 合計: **247**" "cachedとreasoningの二重加算"
+  assert_contains "$report" "cached input と reasoning output は内数であり、合計へ再加算しない" "内数注意"
+}
+
+test_Codex累積usage再掲を二重加算しない() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "cumulative duplicate: **1**" "累積tuple重複"
+  assert_contains "$report" "usage turn: **2**" "再掲非加算"
+  assert_not_contains "$report" "Codex 合計: **300**" "再掲を含む合計"
+}
+
+test_Codex識別条件不一致とusage欠測を推計しない() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "model mismatch: **1**" "model不一致"
+  assert_contains "$report" "usage missing: **1**" "usage欠測"
+  assert_contains "$report" "usage invalid: **1**" "usage不正"
+  assert_not_contains "$report" "999" "non-guardianと不一致modelの除外"
 }
 
 test_本文_prompt_tool結果_env_認証情報を出力しない() {

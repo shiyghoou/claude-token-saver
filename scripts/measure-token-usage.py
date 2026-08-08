@@ -25,6 +25,16 @@ from datetime import datetime, timedelta, timezone
 HOME = os.path.expanduser("~")
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
 PROJECTS_DIR = os.path.join(CLAUDE_DIR, "projects")
+CODEX_HOME = os.environ.get("CODEX_HOME") or os.path.join(HOME, ".codex")
+CODEX_SESSIONS_DIR = os.path.join(CODEX_HOME, "sessions")
+CODEX_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
 
 MODEL_SAFE_RE = re.compile(r"^[A-Za-z0-9._\[\]()<>-]+$")
 MARKDOWN_LINK_RE = re.compile(r"(!?)\[([^\]\r\n]*)\]\(([^)\r\n]*)\)")
@@ -484,6 +494,16 @@ def safe_int(value):
     if not is_token_count(value):
         return 0
     return value
+
+
+def validated_codex_usage(value):
+    if not isinstance(value, dict):
+        return None
+    if any(not is_token_count(value.get(name)) for name in CODEX_USAGE_FIELDS):
+        return None
+    if value["total_tokens"] != value["input_tokens"] + value["output_tokens"]:
+        return None
+    return dict((name, value[name]) for name in CODEX_USAGE_FIELDS)
 
 
 def median_integer(values):
@@ -1365,6 +1385,162 @@ def within(root, path):
     return path_real == root_real or path_real.startswith(root_real + os.sep)
 
 
+def codex_cwd_matches_project(value):
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        candidate = os.path.realpath(value)
+    except (OSError, ValueError):
+        return False
+    return candidate == PROJECT_ROOT or within(PROJECT_ROOT, candidate)
+
+
+class CodexAutoStats:
+    def __init__(self):
+        self.history_status = "available"
+        self.guardian_sessions = 0
+        self.usage_turns = 0
+        self.input = 0
+        self.cached_input = 0
+        self.cache_write_input = 0
+        self.output = 0
+        self.reasoning_output = 0
+        self.model_mismatch = 0
+        self.usage_missing = 0
+        self.usage_invalid = 0
+        self.cumulative_duplicates = 0
+        self.timestamp_missing = 0
+        self.malformed_lines = 0
+        self.read_errors = 0
+
+    def add_usage(self, usage):
+        self.input += usage["input_tokens"]
+        self.cached_input += usage["cached_input_tokens"]
+        self.cache_write_input += usage["cache_write_input_tokens"]
+        self.output += usage["output_tokens"]
+        self.reasoning_output += usage["reasoning_output_tokens"]
+
+    @property
+    def total(self):
+        return self.input + self.output
+
+    def row(self):
+        return [
+            fmt(self.input),
+            fmt(self.cached_input),
+            fmt(self.cache_write_input),
+            fmt(self.output),
+            fmt(self.reasoning_output),
+            fmt(self.total),
+        ]
+
+
+def codex_guardian_session(payload, args):
+    if not isinstance(payload, dict):
+        return False
+    source = payload.get("source")
+    if not isinstance(source, dict):
+        return False
+    subagent = source.get("subagent")
+    if not isinstance(subagent, dict) or subagent.get("other") != "guardian":
+        return False
+    return args.all_projects or codex_cwd_matches_project(payload.get("cwd"))
+
+
+def codex_usage_tuple(usage):
+    return tuple(usage[name] for name in CODEX_USAGE_FIELDS)
+
+
+def scan_codex_auto_review(args, since):
+    stats = CodexAutoStats()
+    if not os.path.exists(CODEX_SESSIONS_DIR):
+        stats.history_status = "missing"
+        return stats
+    if not os.path.isdir(CODEX_SESSIONS_DIR) or os.path.islink(CODEX_SESSIONS_DIR):
+        stats.history_status = "unreadable"
+        return stats
+
+    paths = []
+
+    def walk_error(_error):
+        stats.read_errors += 1
+
+    for base, dirs, files in os.walk(
+            CODEX_SESSIONS_DIR, topdown=True, followlinks=False, onerror=walk_error):
+        dirs[:] = sorted(name for name in dirs if not os.path.islink(os.path.join(base, name)))
+        for name in sorted(files):
+            path = os.path.join(base, name)
+            if name.endswith(".jsonl") and not os.path.islink(path):
+                paths.append(path)
+
+    for path in sorted(paths):
+        try:
+            handle = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            stats.read_errors += 1
+            continue
+        guardian_session = False
+        model = None
+        seen_totals = set()
+        with handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    stats.malformed_lines += 1
+                    continue
+                if not isinstance(entry, dict):
+                    stats.malformed_lines += 1
+                    continue
+                if entry.get("type") == "session_meta":
+                    if codex_guardian_session(entry.get("payload"), args):
+                        guardian_session = True
+                    continue
+                if not guardian_session:
+                    continue
+                if entry.get("type") == "turn_context":
+                    payload = entry.get("payload")
+                    if isinstance(payload, dict):
+                        model = payload.get("model")
+                    else:
+                        model = None
+                    continue
+                if entry.get("type") != "event_msg":
+                    continue
+                payload = entry.get("payload")
+                if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                    continue
+                stamp = parse_ts(entry.get("timestamp"))
+                if stamp is None:
+                    stats.timestamp_missing += 1
+                    continue
+                if since is not None and stamp < since:
+                    continue
+                if model != "codex-auto-review":
+                    stats.model_mismatch += 1
+                    continue
+                info = payload.get("info")
+                if not isinstance(info, dict) or (
+                        "last_token_usage" not in info or "total_token_usage" not in info):
+                    stats.usage_missing += 1
+                    continue
+                last_usage = validated_codex_usage(info.get("last_token_usage"))
+                total_usage = validated_codex_usage(info.get("total_token_usage"))
+                if last_usage is None or total_usage is None:
+                    stats.usage_invalid += 1
+                    continue
+                key = codex_usage_tuple(total_usage)
+                if key in seen_totals:
+                    stats.cumulative_duplicates += 1
+                    continue
+                seen_totals.add(key)
+                stats.add_usage(last_usage)
+                stats.usage_turns += 1
+        if guardian_session:
+            stats.guardian_sessions += 1
+    return stats
+
+
 def read_mcp_server_definitions(plugin_root):
     definitions = []
     sources = [os.path.join(plugin_root, ".mcp.json")]
@@ -1796,6 +1972,33 @@ def build_report(
     add(f"- 重複: **{fmt(scan.auto_classifier_duplicates)}**")
     add(f"- 識別子欠測: **{fmt(scan.auto_classifier_identifier_missing)}**")
     add(f"- timestamp 欠測: **{fmt(scan.auto_classifier_timestamp_missing)}**")
+    codex_auto = scan.codex_auto
+    add("")
+    add("### Codex guardian / codex-auto-review")
+    add("")
+    add(f"- history status: **{codex_auto.history_status}**")
+    add(f"- guardian session: **{fmt(codex_auto.guardian_sessions)}**")
+    add(f"- usage turn: **{fmt(codex_auto.usage_turns)}**")
+    lines.extend(table(
+        [
+            "input",
+            "cached input",
+            "cache write input",
+            "output",
+            "reasoning output",
+            "合計",
+        ],
+        [codex_auto.row()],
+    ))
+    add(f"- Codex 合計: **{fmt(codex_auto.total)}**")
+    add(f"- cumulative duplicate: **{fmt(codex_auto.cumulative_duplicates)}**")
+    add(f"- model mismatch: **{fmt(codex_auto.model_mismatch)}**")
+    add(f"- usage missing: **{fmt(codex_auto.usage_missing)}**")
+    add(f"- usage invalid: **{fmt(codex_auto.usage_invalid)}**")
+    add(f"- timestamp missing: **{fmt(codex_auto.timestamp_missing)}**")
+    add(f"- JSONL malformed line: **{fmt(codex_auto.malformed_lines)}**")
+    add(f"- read error: **{fmt(codex_auto.read_errors)}**")
+    add("- cached input と reasoning output は内数であり、合計へ再加算しない。")
     launches = sum(scan.agent_calls.values())
     add(f"- サブエージェント起動: {fmt(launches)}")
     add(
@@ -2239,6 +2442,7 @@ def main():
 
     scan = scan_transcripts(main_paths, since)
     scan_subagent_transcripts(scan, sub_paths, since)
+    scan.codex_auto = scan_codex_auto_review(args, since)
     scan.sub_mcp_calls = scan_mcp_tool_names(sub_paths, since)
     scan.scanned_dirs = [os.path.basename(path) for path in project_dirs]
     scan.fell_back = fell_back
