@@ -286,7 +286,7 @@ Stop payload と設定ファイルは末尾まで完全な JSON として検証�
 **N/A** とし、推計しない。Codex 全体の使用量は対象外であり、`CODEX_HOME/sessions` の `source` が
 `guardian`、現在の model が `codex-auto-review` であるイベントの
 `token_count.info.last_token_usage` だけを実測する。`cached input` と `reasoning output` は内数で、
-合計へ二重加算しない。欠測・型不正・整合性不一致は件数化するが、本文・session id・実パスは出力しない。
+合計へ二重加算しない。欠測・型不正・整合性不一致は件数化し、推計しない。本文・session id・実パスは出力しない。
 この別枠は `calibration` の snapshot、fingerprint、recommendation、apply 入力に含めない。
 
 共有時の境界:

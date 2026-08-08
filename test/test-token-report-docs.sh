@@ -90,6 +90,8 @@ _assert_auto_auxiliary_contract() {
   assert_contains "$body" "last_token_usage" "$label measured usage"
   assert_contains "$body" "cached input" "$label cached subset"
   assert_contains "$body" "reasoning output" "$label reasoning subset"
+  assert_contains "$body" "欠測・型不正・整合性不一致は件数化し、推計しない" \
+    "$label Codex abnormal data not estimated"
   assert_contains "$body" "calibration" "$label calibration boundary"
 }
 
