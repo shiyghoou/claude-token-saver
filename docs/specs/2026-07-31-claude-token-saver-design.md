@@ -100,7 +100,8 @@ claude-token-saver/
 Claude Code の `.claude/skills/delegation-policy` と Codex の `.agents/skills/delegation-policy` に配置する。
 metadata の `allow_implicit_invocation: false` により Codex では `$delegation-policy` の明示実行だけを許可する。
 Codex側のhandoff自動消費はClaude Codeと共通のSessionStart hookで行う。`delegation-policy`
-自体は引き続き明示実行だけを許可し、token-reportによるCodex使用量計測は提供しない。
+自体は引き続き明示実行だけを許可する。token-report は Codex 全体を計測対象にしないが、
+guardian / codex-auto-review のオートモード補助エージェント usage は別枠で実測する。
 
 ## 5. 機能設計
 
@@ -223,6 +224,16 @@ launcher は engine の `--days` / `--all-projects` / `--paths` / `--top` / `--o
 - MCP サーバ名と利用回数
 - `--paths` 指定時の repo 内相対パス
 
+#### オートモード補助エージェント
+
+オートモード補助エージェントは main / subagent と別枠で表示する。Claude Code は
+`classifierMetaLines` を持つ permission classifier の呼出件数だけを数える。usage はログに無いため
+**N/A** とし、推計しない。Codex 全体の使用量は対象外であり、`CODEX_HOME/sessions` の `source` が
+`guardian`、現在の model が `codex-auto-review` であるイベントの
+`token_count.info.last_token_usage` だけを実測する。`cached input` と `reasoning output` は内数で、
+合計へ二重加算しない。欠測・型不正・整合性不一致は件数化するが、本文・session id・実パスは出力しない。
+この別枠は `calibration` の snapshot、fingerprint、recommendation、apply 入力に含めない。
+
 レポートに含めないもの:
 
 - prompt、content、本文
@@ -313,9 +324,9 @@ cache/marker の tmp → rename による原子的な更新である。
 Codex CLI / IDE では `$delegation-policy` と指定して明示実行し、`/skills` で利用可能な skill を確認する。
 `allow_implicit_invocation: false` により、暗黙起動を禁止する。
 handoffの自動消費はClaude CodeとCodexの共通SessionStart hookが担当するが、
-`delegation-policy` 自体は明示実行だけであり、暗黙起動しない。
-token-reportによるCodex使用量計測は提供しない。これはClaude Code向けの判断ガイドを
-Codexから発見・明示実行できるようにするadapterである。
+`delegation-policy` 自体は明示実行だけであり、暗黙起動しない。token-report は Codex 全体を
+計測対象にしないが、guardian / codex-auto-review のオートモード補助エージェント usage は別枠で実測する。
+これはClaude Code向けの判断ガイドをCodexから発見・明示実行できるようにするadapterである。
 
 - 判断順序は、非コスト理由、作業の重さと残りの会話期間、起動・指示受け渡し・結果の読解・統合の固定費、能力帯と bounded ownership、完了条件と結果回収で固定する。
 - 非コスト理由は、並列化、ツール制限、専門知識の分離、独立した敵対的レビューである。必要ならトークン節約だけで却下しない。

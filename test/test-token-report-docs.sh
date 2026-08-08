@@ -78,6 +78,21 @@ _assert_shared_contract() {
   assert_contains "$body" "calibrate" "$label calibrate scope"
 }
 
+_assert_auto_auxiliary_contract() {
+  local body="$1" label="$2"
+  assert_contains "$body" "オートモード補助エージェント" "$label section"
+  assert_contains "$body" "permission classifier" "$label Claude classifier"
+  assert_contains "$body" "N/A" "$label Claude usage unavailable"
+  assert_contains "$body" "推計しない" "$label no estimation"
+  assert_contains "$body" "CODEX_HOME" "$label Codex root"
+  assert_contains "$body" "guardian" "$label guardian source"
+  assert_contains "$body" "codex-auto-review" "$label Codex model"
+  assert_contains "$body" "last_token_usage" "$label measured usage"
+  assert_contains "$body" "cached input" "$label cached subset"
+  assert_contains "$body" "reasoning output" "$label reasoning subset"
+  assert_contains "$body" "calibration" "$label calibration boundary"
+}
+
 test_token_report_SKILLがlauncherと保存先を案内する() {
   assert_file_exists "$(_skill_path)"
   skill="$(_skill)"
@@ -174,6 +189,22 @@ test_token_reportの共有契約がREADME_SKILL_設計書で一致する() {
   done <<EOF
 $(_doc_paths)
 EOF
+}
+
+test_オート補助計測契約がREADME_SKILL_設計書で一致する() {
+  _assert_auto_auxiliary_contract "$(_readme)" "README"
+  _assert_auto_auxiliary_contract "$(_skill)" "SKILL"
+  _assert_auto_auxiliary_contract "$(_design_token_report_section)" "DESIGN"
+}
+
+test_Codex全使用量を測るとの誤記を残さない() {
+  combined="$(cat "$REPO_ROOT/README.md")
+$(cat "$(_skill_path)")
+$(_design_token_report_section)"
+  combined_without_newlines="$(printf '%s' "$combined" | tr -d '\n')"
+  assert_not_contains "$combined_without_newlines" "Codexの全使用量を計測" "Codex 全使用量の誤記"
+  assert_not_contains "$combined_without_newlines" "token-reportによるCodex使用量計測は提供しない" \
+    "旧 Codex 非対応文言"
 }
 
 test_PAWARS固有のIssueと提出先を新規文書に残さない() {
