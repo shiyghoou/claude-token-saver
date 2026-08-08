@@ -660,6 +660,26 @@ test_Claude_auto_classifierの重複排除をproject内に限定する() {
   assert_not_contains "$report" "private-project-scope" "内部project scopeの秘匿"
 }
 
+test_scan_transcriptsの2引数callerはpath間classifierを重複扱いしない() {
+  _fixture
+  _replace_with_project_scoped_classifier_rows
+  actual="$(python3 - "$REPO_ROOT/scripts/measure-token-usage.py" \
+    "$FIXTURE_HOME/.claude/projects" <<'PYEOF'
+import glob
+import os
+import runpy
+import sys
+
+engine_path, projects = sys.argv[1:]
+engine = runpy.run_path(engine_path)
+paths = sorted(glob.glob(os.path.join(projects, "*", "parent.jsonl")))
+scan = engine["scan_transcripts"](paths, None)
+print(scan.auto_classifier_calls, scan.auto_classifier_duplicates)
+PYEOF
+)"
+  assert_eq "2 0" "$actual" "2引数callerのpath別classifier scope"
+}
+
 test_Claude_auto_classifierの代替キーと欠測を区別する() {
   _run_report --days 1 >/dev/null 2>&1
   report="$(_report)"

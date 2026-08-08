@@ -951,6 +951,14 @@ def record_claude_auto_classifier(scan, entry, since, project_scope):
     scan.auto_classifier_calls += 1
 
 
+def classifier_scope_for_path(path, project_scopes):
+    if project_scopes is not None:
+        return project_scopes[path]
+    return hashlib.sha256(
+        os.path.realpath(path).encode("utf-8", "surrogateescape")
+    ).digest()
+
+
 class Usage:
     FIELDS = (
         ("input", "input_tokens"),
@@ -1140,7 +1148,7 @@ def mark_matching_tool_results(scan, session_key, request_id):
             scan.main_tool_results[index]["usage_matched"] = True
 
 
-def scan_transcripts(paths, since, project_scopes):
+def scan_transcripts(paths, since, project_scopes=None):
     scan = Scan()
     seen_messages = set()
     for path in paths:
@@ -1149,6 +1157,7 @@ def scan_transcripts(paths, since, project_scopes):
             handle = open(path, encoding="utf-8", errors="replace")
         except OSError:
             continue
+        project_scope = classifier_scope_for_path(path, project_scopes)
         with handle:
             for line in handle:
                 scan.lines += 1
@@ -1159,7 +1168,7 @@ def scan_transcripts(paths, since, project_scopes):
                 if not isinstance(entry, dict):
                     continue
                 record_claude_auto_classifier(
-                    scan, entry, since, project_scopes[path]
+                    scan, entry, since, project_scope
                 )
 
                 stamp = parse_ts(entry.get("timestamp"))
@@ -1265,13 +1274,14 @@ def scan_transcripts(paths, since, project_scopes):
     return scan
 
 
-def scan_subagent_transcripts(scan, paths, since, project_scopes):
+def scan_subagent_transcripts(scan, paths, since, project_scopes=None):
     seen_messages = set()
     for path in paths:
         try:
             handle = open(path, encoding="utf-8", errors="replace")
         except OSError:
             continue
+        project_scope = classifier_scope_for_path(path, project_scopes)
         file_agent_id = agent_id_from_sub_path(path)
         accepted_usage = False
         fixed_cost = None
@@ -1286,7 +1296,7 @@ def scan_subagent_transcripts(scan, paths, since, project_scopes):
                 if not isinstance(entry, dict):
                     continue
                 record_claude_auto_classifier(
-                    scan, entry, since, project_scopes[path]
+                    scan, entry, since, project_scope
                 )
 
                 stamp = parse_ts(entry.get("timestamp"))
