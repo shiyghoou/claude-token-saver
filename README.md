@@ -275,7 +275,7 @@ Stop payload と設定ファイルは末尾まで完全な JSON として検証�
 
 - 対象期間ごとの input / cache_creation / cache_read / output の合計
 - モデル別 usage、subagent_type ごとの起動数 / ログ本数 / `message.usage` 合計
-- サブエージェントのカバレッジ注意と起動固定コスト（中央値・最小・最大・標本数）
+- サブエージェントのカバレッジ注意と起動固定コスト（中央値・最小・最大・標本数、うち cache_read 中央値、および種別が複数あるときの `subagent_type` 別内訳）
 - MCP の設定済みサーバ名と実利用回数
 - `--paths` 指定時の Read パス要約（repo 外は `(repo外)` に伏せる）
 

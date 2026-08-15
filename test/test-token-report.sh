@@ -304,6 +304,46 @@ _report() {
   [ -f "$FIXTURE_OUT" ] && sed -n '1,240p' "$FIXTURE_OUT" || true
 }
 
+# 親マップに無い agentId のログへ `.meta.json` を添える。型解決の唯一の手掛かりが
+# meta 側だけになる状態を作る。
+_add_meta_typed_subagent_log() {
+  python3 - "$FIXTURE_HOME" "$FIXTURE_REPO" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+home, repo = sys.argv[1:]
+now = datetime.now(timezone.utc)
+
+
+def key(path):
+    return "".join(c if c.isalnum() and c.isascii() else "-" for c in path)
+
+
+stamp = (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+subagents = os.path.join(home, ".claude", "projects", key(repo), "session", "subagents")
+os.makedirs(subagents, exist_ok=True)
+
+log_path = os.path.join(subagents, "agent-meta-1.jsonl")
+with open(log_path, "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({
+        "type": "assistant", "timestamp": stamp, "agentId": "agent-meta-1",
+        "message": {"id": "sub-meta-1", "model": "meta-model",
+                    "usage": {"input_tokens": 3,
+                              "cache_creation_input_tokens": 30,
+                              "cache_read_input_tokens": 300,
+                              "output_tokens": 3},
+                    "content": [{"type": "text", "text": "秘密の meta 本文"}]},
+    }, ensure_ascii=False) + "\n")
+
+with open(os.path.join(subagents, "agent-meta-1.meta.json"), "w",
+          encoding="utf-8") as fh:
+    json.dump({"agentType": "context-inheriting", "isFork": True,
+               "description": "秘密の meta description"}, fh, ensure_ascii=False)
+PYEOF
+}
+
 _add_unrelated_project() {
   python3 - "$FIXTURE_HOME" <<'PYEOF'
 import json
@@ -612,6 +652,45 @@ test_起動固定コストの中央値最小最大標本数を出す() {
   assert_contains "$report" "9,909" "最大または標本"
   assert_contains "$report" "222" "最小"
   assert_contains "$report" "5,065" "中央値"
+}
+
+test_起動固定コストのcache_read内訳を分けて出す() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  # cache_read は 9000 と 200 → 中央値 (200+9000)//2 = 4,600
+  assert_contains "$report" "うち cache_read 中央値: 4,600" "cache_read 中央値"
+  assert_contains "$report" "cache_creation と課金重みが異なる" "重み差の注意"
+}
+
+test_起動固定コストを種別ごとに分けて出す() {
+  _run_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "起動固定コストの種別内訳" "種別内訳の見出し"
+  # 総量 / うち cache_read / 標本数
+  assert_contains "$report" "plot-adversarial-reviewer: 9,909 / 9,000 / 1" "join 済み種別"
+  assert_contains "$report" "(不明): 222 / 200 / 1" "型未解決の種別"
+}
+
+test_起動固定コストは種別が1つなら内訳を出さない() {
+  _fixture
+  rm -f "$FIXTURE_HOME/.claude/projects"/*/session/subagents/agent-orphan.jsonl
+  _execute_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "起動固定コスト" "固定コスト節は残る"
+  assert_not_contains "$report" "起動固定コストの種別内訳" "単一種別では内訳を出さない"
+}
+
+test_metaのagentTypeから種別を解決する() {
+  _fixture
+  _add_meta_typed_subagent_log
+  _execute_report --days 1 >/dev/null 2>&1
+  report="$(_report)"
+  assert_contains "$report" "context-inheriting" "meta 由来の型"
+  assert_contains "$report" "context-inheriting: 333 / 300 / 1" "meta 由来の固定コスト"
+  # 起動は親側に無いのでログだけが増える。型未解決は orphan の1本のまま
+  assert_contains "$report" "型未解決ログ: 1 本" "meta 解決分は未解決に数えない"
+  assert_not_contains "$report" "秘密の meta 本文" "本文の秘匿"
+  assert_not_contains "$report" "秘密の meta description" "meta description の秘匿"
 }
 
 test_固定コストを合算へ二重加算しない() {
