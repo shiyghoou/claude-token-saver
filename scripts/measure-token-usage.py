@@ -490,6 +490,35 @@ def agent_id_from_sub_path(path):
     return safe_agent_id(base)
 
 
+def agent_type_from_meta(path):
+    """`<log>.meta.json` の agentType を読む。無ければ None。"""
+    if not path.endswith(".jsonl"):
+        return None
+    meta_path = path[: -len(".jsonl")] + ".meta.json"
+    if os.path.islink(meta_path):
+        return None
+    try:
+        with open(meta_path, encoding="utf-8", errors="replace") as handle:
+            meta = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    return sanitize_name(meta.get("agentType"))
+
+
+def resolve_agent_type(scan, meta_type, file_agent_id):
+    """meta.json を優先し、無ければ親 JSONL の agentId join へ落ちる。"""
+    if meta_type:
+        return meta_type
+    if file_agent_id and file_agent_id in scan.agent_id_types:
+        joined = scan.agent_id_types[file_agent_id]
+        # join 先が未解決の記録なら、解決済みとして数えない
+        if joined and joined != "(不明)":
+            return joined
+    return None
+
+
 def safe_int(value):
     if not is_token_count(value):
         return 0
@@ -581,16 +610,53 @@ def median_non_negative_integer(values):
     return (ordered[middle - 1] + ordered[middle]) // 2
 
 
-def fixed_cost_summary(values):
-    ordered = [value for value in values if isinstance(value, int) and value >= 0]
-    if not ordered:
+def fixed_cost_record(agent_type, total, cache_read):
+    return {
+        "agent_type": agent_type,
+        "total": total,
+        "cache_read": cache_read,
+    }
+
+
+def fixed_cost_summary(records):
+    totals = []
+    cache_reads = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        total = record.get("total")
+        if not isinstance(total, int) or total < 0:
+            continue
+        cache_read = record.get("cache_read")
+        if not isinstance(cache_read, int) or cache_read < 0:
+            cache_read = 0
+        totals.append(total)
+        cache_reads.append(cache_read)
+    if not totals:
         return None
     return {
-        "median": median_non_negative_integer(ordered),
-        "min": min(ordered),
-        "max": max(ordered),
-        "count": len(ordered),
+        "median": median_non_negative_integer(totals),
+        "min": min(totals),
+        "max": max(totals),
+        "count": len(totals),
+        "cache_read_median": median_non_negative_integer(cache_reads),
     }
+
+
+def fixed_cost_by_type(records):
+    grouped = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        agent_type = record.get("agent_type") or "(不明)"
+        grouped.setdefault(agent_type, []).append(record)
+    rows = []
+    for agent_type, group in grouped.items():
+        summary = fixed_cost_summary(group)
+        if summary:
+            rows.append((agent_type, summary))
+    rows.sort(key=lambda row: (-row[1]["median"], row[0]))
+    return rows
 
 
 def calibration_prompt_key(session_count, assistant_turns, min_sessions, min_turns):
@@ -1022,7 +1088,7 @@ class Scan:
         self.agent_usage = defaultdict(Usage)
         self.agent_usage_total = Usage()
         self.agent_log_counts = Counter()  # type -> log files attributed
-        self.agent_fixed_costs = []  # list[int]
+        self.agent_fixed_costs = []  # list[fixed_cost_record()]
         self.main_tool_results = []
         self.compact_events = []
         self.sub_files = 0
@@ -1283,6 +1349,7 @@ def scan_subagent_transcripts(scan, paths, since, project_scopes=None):
             continue
         project_scope = classifier_scope_for_path(path, project_scopes)
         file_agent_id = agent_id_from_sub_path(path)
+        meta_type = agent_type_from_meta(path)
         accepted_usage = False
         fixed_cost = None
         line_seen = False
@@ -1332,10 +1399,13 @@ def scan_subagent_transcripts(scan, paths, since, project_scopes=None):
                 one = Usage()
                 one.add_raw(usage)
                 if fixed_cost is None:
-                    fixed_cost = one.input + one.cache_creation + one.cache_read
-                agent_type = "(不明)"
-                if file_agent_id and file_agent_id in scan.agent_id_types:
-                    agent_type = scan.agent_id_types[file_agent_id]
+                    fixed_cost = (
+                        one.input + one.cache_creation + one.cache_read,
+                        one.cache_read,
+                    )
+                agent_type = (
+                    resolve_agent_type(scan, meta_type, file_agent_id) or "(不明)"
+                )
                 scan.agent_usage[agent_type] += one
                 scan.agent_usage_total += one
                 accepted_usage = True
@@ -1344,16 +1414,17 @@ def scan_subagent_transcripts(scan, paths, since, project_scopes=None):
             # 期間内行が無いファイルは「読めたログ」に入れない
             continue
         scan.sub_files += 1
-        agent_type = "(不明)"
-        if file_agent_id and file_agent_id in scan.agent_id_types:
-            agent_type = scan.agent_id_types[file_agent_id]
-        else:
+        agent_type = resolve_agent_type(scan, meta_type, file_agent_id)
+        if agent_type is None:
+            agent_type = "(不明)"
             scan.sub_unresolved_logs += 1
         scan.agent_log_counts[agent_type] += 1
         if accepted_usage:
             scan.sub_files_with_usage += 1
         if fixed_cost is not None:
-            scan.agent_fixed_costs.append(fixed_cost)
+            scan.agent_fixed_costs.append(
+                fixed_cost_record(agent_type, fixed_cost[0], fixed_cost[1])
+            )
 
 
 def disabled_plugins():
@@ -2049,6 +2120,21 @@ def build_report(
             f" 中央値 {fmt(fixed['median'])} / 最小 {fmt(fixed['min'])}"
             f" / 最大 {fmt(fixed['max'])} / 標本数: {fmt(fixed['count'])}"
         )
+        add(
+            "- うち cache_read 中央値:"
+            f" {fmt(fixed['cache_read_median'])}"
+            "（既存キャッシュに乗った分。cache_creation と課金重みが異なるため"
+            "合計だけで種別間を比較しない）"
+        )
+        by_type = fixed_cost_by_type(scan.agent_fixed_costs)
+        if len(by_type) > 1:
+            add("- 起動固定コストの種別内訳（中央値 / うち cache_read / 標本数）:")
+            for agent_type, summary in by_type:
+                add(
+                    f"    - {agent_type}: {fmt(summary['median'])}"
+                    f" / {fmt(summary['cache_read_median'])}"
+                    f" / {fmt(summary['count'])}"
+                )
         add("- 起動固定コストは診断用であり、上記 usage 合計へ二重加算しない。")
     add("")
 
